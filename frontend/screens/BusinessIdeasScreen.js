@@ -1,5 +1,5 @@
 // screens/BusinessIdeasScreen.js
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -10,11 +10,14 @@ import {
   Modal,
   Linking,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { fetchAllBusinessIdeas } from '../services/businessIdeasService';
 import { useTheme } from '../context/ThemeContext';
+import axios from 'axios';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { BASE_URL } from '../constants';
 
 // ---------- Full Translations ----------
 const translations = {
@@ -152,11 +155,9 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
   const { theme, isDarkMode } = useTheme();
   const t = translations[language] || translations.English;
 
-  // User bubble color: dark accent in light mode, light accent in dark mode
   const userBubbleColor = isDarkMode ? '#FFFFFF' : '#111111';
   const userBubbleText = isDarkMode ? '#111111' : '#FFFFFF';
 
-  // Initial question with translated text
   const [initialQuestion, setInitialQuestion] = useState(() => ({
     ...SHAKA_QUESTIONS[0],
     text: t.greeting,
@@ -200,6 +201,52 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
     }
   }, [messages]);
 
+  // Fetch data from backend
+  const fetchBusinessIdeaData = useCallback(async () => {
+  setIsLoading(true);
+  setErrorMessage('');
+  try {
+    // Retrieve auth token (optional; some endpoints may not require it)
+    const token = await AsyncStorage.getItem('userToken');
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+
+    // Fetch all three datasets in parallel from the backend
+    const [jobsRes, businessRes, skillsRes] = await Promise.all([
+      axios.get(`${BASE_URL}/job-openings`, { headers }),
+      axios.get(`${BASE_URL}/business-ideas`, { headers }),
+      axios.get(`${BASE_URL}/skill-courses`, { headers }),
+    ]);
+
+    // Helper to extract array from response
+    const extractData = (response) => {
+      if (response?.data?.success && Array.isArray(response.data.data)) {
+        return response.data.data;
+      }
+      if (Array.isArray(response.data)) {
+        return response.data;
+      }
+      if (response?.data?.data && Array.isArray(response.data.data)) {
+        return response.data.data;
+      }
+      return [];
+    };
+
+    const jobs = extractData(jobsRes);
+    const businessIdeas = extractData(businessRes);
+    const skills = extractData(skillsRes);
+
+    setJobOpenings(jobs);
+    setBusinessIdeas(businessIdeas);
+    setSkillCourses(skills);
+  } catch (error) {
+    console.warn('BusinessIdeas fetch error:', error?.response?.data || error?.message || error);
+    setErrorMessage(t.aiOffline);
+    // Keep previous data if any; do NOT clear the arrays
+  } finally {
+    setIsLoading(false);
+  }
+}, [t]);
+
   const handleOptionSelect = async (optionText) => {
     setUserChoice(optionText);
     const userMsg = {
@@ -228,29 +275,6 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
     if (choice === t.findJob) return t.finalResponseJob;
     if (choice === t.startBusiness) return t.finalResponseBusiness;
     return t.finalResponseSkill;
-  };
-
-  const fetchBusinessIdeaData = async () => {
-    setIsLoading(true);
-    setErrorMessage('');
-    try {
-      const response = await fetchAllBusinessIdeas();
-      if (response?.success) {
-        setBusinessIdeas(response.businessIdeas || []);
-        setJobOpenings(response.jobs || []);
-        setSkillCourses(response.skills || []);
-      } else {
-        throw new Error('Invalid response');
-      }
-    } catch (error) {
-      console.warn('BusinessIdeas fetch error:', error?.message || error);
-      setErrorMessage(t.aiOffline);
-      setBusinessIdeas([]);
-      setJobOpenings([]);
-      setSkillCourses([]);
-    } finally {
-      setIsLoading(false);
-    }
   };
 
   const resetChat = () => {
@@ -464,6 +488,7 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
       <View style={styles.dynamicListContainer}>
         {isLoading && (
           <View style={styles.loadingBanner}>
+            <ActivityIndicator size="small" color={theme.accent} />
             <Text style={[styles.loadingText, { color: theme.textSecondary }]}>{t.aiLoading}</Text>
           </View>
         )}
@@ -556,7 +581,6 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
           <Ionicons name="chevron-back" size={28} color="#777777" />
         </TouchableOpacity>
-        
       </View>
 
       {/* Top static cards */}
@@ -590,7 +614,6 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
                     <Ionicons key={i} name="star" size={12} color={theme.accent} />
                   ))}
                   <Ionicons name="star-outline" size={12} color={theme.textSecondary} />
-                 
                 </View>
               </View>
             </View>
@@ -604,15 +627,12 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
           <View style={styles.trackerHeaderRow}>
             <Text style={[styles.sectionHeader, { color: theme.text }]}>{!showTracker ? t.conversation : t.results}</Text>
             {showTracker && (
-           <TouchableOpacity
-  onPress={resetChat}
-  style={{ flexDirection: 'row', alignItems: 'center' }}
->
-  <Ionicons name="arrow-back" size={22} color="#777777" />
-  <Text style={[styles.resetBtnText, { color: theme.accent }]}>
-    {t.backToShaaka}
-  </Text>
-</TouchableOpacity>
+              <TouchableOpacity onPress={resetChat} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Ionicons name="arrow-back" size={22} color="#777777" />
+                <Text style={[styles.resetBtnText, { color: theme.accent }]}>
+                  {t.backToShaaka}
+                </Text>
+              </TouchableOpacity>
             )}
           </View>
 
@@ -633,8 +653,6 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
         </View>
       </View>
 
-      {/* Bottom actions */}
-     
       {/* Modal */}
       <Modal animationType="slide" transparent visible={modalVisible} onRequestClose={() => setModalVisible(false)}>
         <View style={styles.modalOverlay}>
@@ -749,7 +767,7 @@ const styles = StyleSheet.create({
   actionBtn: {
     paddingHorizontal: 16,
     paddingVertical: 8,
-    marginBottom:33,
+    marginBottom: 33,
     borderRadius: 8,
     justifyContent: 'center',
     alignSelf: 'center',
@@ -832,8 +850,8 @@ const styles = StyleSheet.create({
   },
   stepNumber: { color: '#FFF', fontSize: 12, fontWeight: '700' },
   stepText: { flex: 1, fontSize: 14, lineHeight: 20 },
-  loadingBanner: { paddingVertical: 12, alignItems: 'center' },
-  loadingText: {},
+  loadingBanner: { paddingVertical: 12, alignItems: 'center', flexDirection: 'row', justifyContent: 'center' },
+  loadingText: { marginLeft: 8 },
   errorBanner: {
     paddingVertical: 12,
     backgroundColor: '#FFEBEE',

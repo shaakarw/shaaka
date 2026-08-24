@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+// screens/WelcomeHomeScreen.js
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,12 +10,15 @@ import {
   ScrollView,
   Dimensions,
   Animated,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../context/ThemeContext';
 import { useTabMode } from '../context/TabModeContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import axios from 'axios';
+import { BASE_URL } from '../constants';
 
 // Assets
 const map1flag = require('../assets/map1.png');
@@ -43,6 +47,16 @@ const translations = {
     searchPosts: 'Posts',
     searchProductsHint: 'Find products and listings',
     searchMapHint: 'Find shops and places on the map',
+    products: 'Products',
+    places: 'Places',
+    shops: 'Shops',
+    noResults: 'No results found',
+    seeAllPosts: 'See all products',
+    seeAllPlaces: 'See all places',
+    loading: 'Searching...',
+    loginRequired: 'Login Required',
+    loginMessage: 'Please login to view post details',
+    cancel: 'Cancel',
   },
   Kinyarwanda: {
     welcome: 'Murakaza neza kuri Shaaka',
@@ -61,8 +75,38 @@ const translations = {
     searchPosts: 'Ibicuruzwa',
     searchProductsHint: 'Shakisha ibicuruzwa n’amatangazo',
     searchMapHint: 'Shakisha amaduka n’ahantu ku ikarita',
+    products: 'Ibicuruzwa',
+    places: 'Ahantu',
+    shops: 'Amaduka',
+    noResults: 'Nta byabonetse',
+    seeAllPosts: 'Reba ibicuruzwa byose',
+    seeAllPlaces: 'Reba ahantu hose',
+    loading: 'Gushaka...',
+    loginRequired: 'Ugomba kwinjira',
+    loginMessage: 'Nyamuneka winjire kugira ngo urebe ibyo ushaka',
+    cancel: 'Hagarika',
   },
 };
+
+const mapPost = (post) => ({
+  ...post,
+  _id: post._id,
+  id: post._id,
+  username: post.username || post.user?.username || 'User',
+  userAvatar: post.userAvatar || post.user?.avatar,
+  amount: post.amount || `RWF ${post.price?.toLocaleString()}`,
+  price: post.price,
+  location: post.location,
+  description: post.description,
+  productName: post.productName || 'Product',
+  houseImages: post.houseImages || [],
+  contactNumber1: post.contactNumbers?.[0] || '',
+  contactNumber2: post.contactNumbers?.[1] || '',
+  priceNegotiable: post.priceNegotiable || false,
+  userId: post.user?._id || post.user,
+  status: post.status || 'active',
+  featured: post.featured || false,
+});
 
 const WelcomeHomeScreen = ({ navigation, language }) => {
   const { theme, isDarkMode } = useTheme();
@@ -70,29 +114,23 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
   const [activeCard, setActiveCard] = useState('buySell');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-
-  // Animated search
   const [searchExpanded, setSearchExpanded] = useState(false);
   const searchWidthAnim = useRef(new Animated.Value(0)).current;
   const EXPANDED_SEARCH_WIDTH = width * 0.8;
 
-  const toggleSearch = () => {
-    const toValue = searchExpanded ? 0 : 1;
-    Animated.timing(searchWidthAnim, {
-      toValue,
-      duration: 250,
-      useNativeDriver: false,
-    }).start(() => setSearchExpanded(!searchExpanded));
-  };
-
-  const searchContainerWidth = searchWidthAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [46, EXPANDED_SEARCH_WIDTH],
+  // New states for search data
+  const [allPosts, setAllPosts] = useState([]);
+  const [allPlaces, setAllPlaces] = useState([]);
+  const [allMallShops, setAllMallShops] = useState([]);
+  const [searchResults, setSearchResults] = useState({
+    posts: [],
+    places: [],
+    shops: [],
   });
+  const [isSearching, setIsSearching] = useState(false);
 
-  const t = translations[language];
+  const t = translations[language] || translations.English;
 
-  // ---------- grayscale palette (light & dark) ----------
   const colors = {
     background: isDarkMode ? '#111' : '#ffffff',
     cardBackground: isDarkMode ? '#1e1e1e' : '#f8f8f8',
@@ -108,6 +146,154 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
     shadowColor: isDarkMode ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.08)',
     authButtonBg: isDarkMode ? '#3a3a3a' : '#e8e8e8',
     howItWorksBg: isDarkMode ? '#2a2a2a' : '#ffffff',
+  };
+
+  const toggleSearch = () => {
+    const toValue = searchExpanded ? 0 : 1;
+    Animated.timing(searchWidthAnim, {
+      toValue,
+      duration: 250,
+      useNativeDriver: false,
+    }).start(() => setSearchExpanded(!searchExpanded));
+  };
+
+  const searchContainerWidth = searchWidthAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [46, EXPANDED_SEARCH_WIDTH],
+  });
+
+  // Fetch all data needed for search (posts, places, mall shops)
+  const fetchSearchData = useCallback(async () => {
+    try {
+      const token = await AsyncStorage.getItem('userToken');
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+
+      const postsResponse = await axios.get(`${BASE_URL}/api/posts`, {
+        params: { page: 1, limit: 50 },
+      });
+      const activePosts = (postsResponse.data.posts || [])
+        .map(mapPost)
+        .filter(p => p.status !== 'stopped');
+      setAllPosts(activePosts);
+
+      try {
+        const placesResponse = await axios.get(`${BASE_URL}/api/places`, { headers });
+        setAllPlaces(placesResponse.data.places || []);
+      } catch (e) {
+        console.warn('Places fetch failed:', e.message);
+        setAllPlaces([]);
+      }
+
+      try {
+        const shopsResponse = await axios.get(`${BASE_URL}/api/mall-shops`, { headers });
+        let shops = [];
+        if (shopsResponse.data && shopsResponse.data.shops) {
+          shops = shopsResponse.data.shops;
+        } else if (Array.isArray(shopsResponse.data)) {
+          shops = shopsResponse.data;
+        }
+        setAllMallShops(shops);
+      } catch (e) {
+        console.warn('Mall shops fetch failed:', e.message);
+        setAllMallShops([]);
+      }
+    } catch (error) {
+      console.error('Search data fetch error:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSearchData();
+  }, [fetchSearchData]);
+
+  // Perform search when query changes
+  useEffect(() => {
+    if (!searchExpanded || searchQuery.trim().length === 0) {
+      setSearchResults({ posts: [], places: [], shops: [] });
+      return;
+    }
+
+    const delayDebounce = setTimeout(() => {
+      performSearch(searchQuery);
+    }, 300);
+
+    return () => clearTimeout(delayDebounce);
+  }, [searchQuery, searchExpanded, allPosts, allPlaces, allMallShops]);
+
+  const performSearch = (query) => {
+    setIsSearching(true);
+    const lowerQuery = query.toLowerCase().trim();
+
+    const matchedPosts = allPosts.filter(post =>
+      post.productName?.toLowerCase().includes(lowerQuery) ||
+      post.description?.toLowerCase().includes(lowerQuery) ||
+      post.location?.toLowerCase().includes(lowerQuery) ||
+      post.username?.toLowerCase().includes(lowerQuery)
+    ).slice(0, 5);
+
+    const matchedPlaces = allPlaces.filter(place => {
+      const searchIn = (value) => {
+        if (!value) return false;
+        return String(value).toLowerCase().includes(lowerQuery);
+      };
+      return (
+        searchIn(place.name) ||
+        searchIn(place.category) ||
+        searchIn(place.address) ||
+        searchIn(place.description) ||
+        (place.products && place.products.some(p => searchIn(p.name)))
+      );
+    }).slice(0, 5);
+
+    const matchedShops = allMallShops.filter(shop => {
+      const name = shop.name || '';
+      const mallName = shop.mall?.name || '';
+      return name.toLowerCase().includes(lowerQuery) ||
+             mallName.toLowerCase().includes(lowerQuery);
+    }).slice(0, 5);
+
+    setSearchResults({
+      posts: matchedPosts,
+      places: matchedPlaces,
+      shops: matchedShops,
+    });
+    setIsSearching(false);
+  };
+
+  // Navigation handlers for results
+  const handlePostResultPress = (post) => {
+    if (!isLoggedIn) {
+      Alert.alert(
+        t.loginRequired,
+        t.loginMessage,
+        [
+          { text: t.cancel, style: 'cancel' },
+          { text: t.login || 'Login', onPress: () => navigation.navigate('Login') },
+        ]
+      );
+      return;
+    }
+    navigation.navigate('PostDetail', { house: post, language });
+  };
+
+  const handlePlaceResultPress = (place) => {
+    setTabMode('locateMode');
+    navigation.navigate('Locate', { placeId: place._id, searchQuery: searchQuery });
+  };
+
+  const handleShopResultPress = (shop) => {
+    navigation.navigate('ViewShop', { shopId: shop._id });
+  };
+
+  const navigateToSearch = (target) => {
+    const query = searchQuery.trim();
+    if (target === 'map') {
+      setTabMode('locateMode');
+      navigation.navigate('Locate', { searchQuery: query });
+    } else {
+      setTabMode('shopMode');
+      navigation.navigate('Search', { searchQuery: query });
+    }
   };
 
   useEffect(() => {
@@ -130,37 +316,26 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
     action();
   };
 
-  const navigateToSearch = (target) => {
-    const query = searchQuery.trim();
-    if (target === 'map') {
-      setTabMode('locateMode');
-      navigation.navigate('Locate', { searchQuery: query });
-    } else {
-      setTabMode('shopMode');
-      navigation.navigate('Search', { searchQuery: query });
-    }
-  };
-
   return (
     <SafeAreaView
       edges={['bottom', 'left', 'right']}
       style={[styles.safeArea, { backgroundColor: colors.background }]}
     >
-      {/* Background decorative curve */}
       <View style={[styles.curve, { backgroundColor: colors.curveBg }]} />
 
       <View style={styles.mainContainer}>
-        {/* Scrollable area: welcome, tagline, search, and map image (now top-aligned) */}
+        {/* MAIN SCROLLVIEW - disabled when search expanded to keep top content fixed */}
         <ScrollView
           style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
+          scrollEnabled={!searchExpanded}
         >
           <View style={styles.topContent}>
             <Text style={[styles.welcomeText, { color: colors.textPrimary }]}>{t.welcome}</Text>
             <Text style={[styles.tagline, { color: colors.textSecondary }]}>{t.tagline}</Text>
 
-            {/* Animated Search Section - right-aligned */}
+            {/* Animated Search Section */}
             <Animated.View style={[styles.searchWrapper, { width: searchContainerWidth }]}>
               {!searchExpanded ? (
                 <TouchableOpacity
@@ -202,34 +377,122 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
               )}
             </Animated.View>
 
-            {/* Dropdown – only when expanded and query exists */}
+            {/* Search Results Dropdown - now with own scroll area */}
             {searchExpanded && searchQuery.trim().length > 0 && (
               <View style={[styles.searchDropdown, { borderTopColor: colors.border }]}>
-                <Text style={[styles.searchDropdownLabel, { color: colors.textTertiary }]}>Search in</Text>
-                <TouchableOpacity style={styles.searchDropdownItem} onPress={() => navigateToSearch('posts')}>
-                  <View style={[styles.searchDropdownIcon, { backgroundColor: colors.activeCardBg }]}>
-                    <Ionicons name="cart-outline" size={18} color={colors.activeText} />
-                  </View>
-                  <View style={styles.searchDropdownCopy}>
-                    <Text style={[styles.searchDropdownTitle, { color: colors.textPrimary }]}>{t.searchPosts}</Text>
-                    <Text style={[styles.searchDropdownHint, { color: colors.textSecondary }]}>
-                      {t.searchProductsHint}: “{searchQuery.trim()}”
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.searchDropdownItem} onPress={() => navigateToSearch('map')}>
-                  <View style={[styles.searchDropdownIcon, { backgroundColor: colors.inactiveCardBg }]}>
-                    <Ionicons name="location-outline" size={18} color={colors.textPrimary} />
-                  </View>
-                  <View style={styles.searchDropdownCopy}>
-                    <Text style={[styles.searchDropdownTitle, { color: colors.textPrimary }]}>{t.searchMap}</Text>
-                    <Text style={[styles.searchDropdownHint, { color: colors.textSecondary }]}>
-                      {t.searchMapHint}: “{searchQuery.trim()}”
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
-                </TouchableOpacity>
+                <ScrollView
+                  style={styles.searchDropdownScroll}
+                  nestedScrollEnabled
+                  showsVerticalScrollIndicator={false}
+                >
+                  {isSearching ? (
+                    <View style={styles.searchLoadingRow}>
+                      <ActivityIndicator size="small" color={colors.accent} />
+                      <Text style={[styles.searchLoadingText, { color: colors.textSecondary }]}>{t.loading}</Text>
+                    </View>
+                  ) : (
+                    <>
+                      {/* Products Section */}
+                      {searchResults.posts.length > 0 && (
+                        <View style={styles.searchSection}>
+                          <Text style={[styles.searchSectionTitle, { color: colors.textTertiary }]}>{t.products}</Text>
+                          {searchResults.posts.map((post) => (
+                            <TouchableOpacity
+                              key={post._id}
+                              style={styles.searchResultItem}
+                              onPress={() => handlePostResultPress(post)}
+                            >
+                              <Image
+                                source={{ uri: post.houseImages?.[0] || 'https://via.placeholder.com/50' }}
+                                style={styles.searchResultImage}
+                              />
+                              <View style={styles.searchResultInfo}>
+                                <Text style={[styles.searchResultName, { color: colors.textPrimary }]} numberOfLines={1}>
+                                  {post.productName}
+                                </Text>
+                                <Text style={[styles.searchResultSub, { color: colors.textSecondary }]}>
+                                  {post.amount} • {post.location}
+                                </Text>
+                              </View>
+                              <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      )}
+
+                      {/* Places Section */}
+                      {searchResults.places.length > 0 && (
+                        <View style={styles.searchSection}>
+                          <Text style={[styles.searchSectionTitle, { color: colors.textTertiary }]}>{t.places}</Text>
+                          {searchResults.places.map((place) => (
+                            <TouchableOpacity
+                              key={place._id}
+                              style={styles.searchResultItem}
+                              onPress={() => handlePlaceResultPress(place)}
+                            >
+                              <View style={[styles.searchResultIcon, { backgroundColor: colors.activeCardBg }]}>
+                                <Ionicons name="location-outline" size={18} color={colors.activeText} />
+                              </View>
+                              <View style={styles.searchResultInfo}>
+                                <Text style={[styles.searchResultName, { color: colors.textPrimary }]} numberOfLines={1}>
+                                  {place.name}
+                                </Text>
+                                <Text style={[styles.searchResultSub, { color: colors.textSecondary }]}>
+                                  {place.category || 'Place'} • {place.address?.full || place.address || ''}
+                                </Text>
+                              </View>
+                              <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      )}
+
+                      {/* Shops Section */}
+                      {searchResults.shops.length > 0 && (
+                        <View style={styles.searchSection}>
+                          <Text style={[styles.searchSectionTitle, { color: colors.textTertiary }]}>{t.shops}</Text>
+                          {searchResults.shops.map((shop) => (
+                            <TouchableOpacity
+                              key={shop._id}
+                              style={styles.searchResultItem}
+                              onPress={() => handleShopResultPress(shop)}
+                            >
+                              <View style={[styles.searchResultIcon, { backgroundColor: colors.inactiveCardBg }]}>
+                                <MaterialCommunityIcons name="store-outline" size={18} color={colors.textPrimary} />
+                              </View>
+                              <View style={styles.searchResultInfo}>
+                                <Text style={[styles.searchResultName, { color: colors.textPrimary }]} numberOfLines={1}>
+                                  {shop.name}
+                                </Text>
+                                <Text style={[styles.searchResultSub, { color: colors.textSecondary }]}>
+                                  {shop.mall?.name || 'Shopping Mall'} • {shop.mall?.address || ''}
+                                </Text>
+                              </View>
+                              <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      )}
+
+                      {/* No results */}
+                      {searchResults.posts.length === 0 &&
+                       searchResults.places.length === 0 &&
+                       searchResults.shops.length === 0 && (
+                        <Text style={[styles.noResultsText, { color: colors.textSecondary }]}>{t.noResults}</Text>
+                      )}
+
+                      {/* "See all" links */}
+                      <View style={styles.seeAllRow}>
+                        <TouchableOpacity onPress={() => navigateToSearch('posts')} style={styles.seeAllButton}>
+                          <Text style={[styles.seeAllText, { color: colors.accent }]}>{t.seeAllPosts}</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => navigateToSearch('map')} style={styles.seeAllButton}>
+                          <Text style={[styles.seeAllText, { color: colors.accent }]}>{t.seeAllPlaces}</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </>
+                  )}
+                </ScrollView>
               </View>
             )}
 
@@ -242,7 +505,7 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
           </View>
         </ScrollView>
 
-        {/* Fixed bottom content: logo, Shaaka, description, avatars (always visible) */}
+        {/* Fixed bottom content */}
         <View style={styles.bottomContentContainer}>
           <View style={styles.locationRow}>
             <Image source={logo} style={[styles.locationIcon, { tintColor: colors.textPrimary }]} />
@@ -262,7 +525,6 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
         {/* Fixed bottom area: selection cards + auth buttons */}
         <View style={styles.footer}>
           <View style={styles.selectionContainer}>
-            {/* Locate card */}
             <TouchableOpacity
               style={[
                 styles.selectionCard,
@@ -295,7 +557,6 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
               </Text>
             </TouchableOpacity>
 
-            {/* Buy/Sell card */}
             <TouchableOpacity
               style={[
                 styles.selectionCard,
@@ -328,7 +589,6 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
               </Text>
             </TouchableOpacity>
 
-            {/* Business ideas card */}
             <TouchableOpacity
               style={[
                 styles.selectionCard,
@@ -361,7 +621,6 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
             </TouchableOpacity>
           </View>
 
-          {/* Login / Register buttons (only when unauthenticated) */}
           {!isLoggedIn && (
             <View style={styles.authButtonsContainer}>
               <TouchableOpacity
@@ -409,21 +668,169 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
   },
-  // Changed from scrollContentCenter to scrollContent with top alignment
   scrollContent: {
     flexGrow: 1,
-    justifyContent: 'flex-start',  // Align content to top
+    justifyContent: 'flex-start',
     alignItems: 'center',
     paddingBottom: 20,
     paddingHorizontal: 16,
-    paddingTop: 20,                // Extra top padding for breathing room
+    paddingTop: 20,
   },
   topContent: {
     alignItems: 'center',
     width: '100%',
   },
 
-  // Bottom fixed content (logo, Shaaka, description, avatars)
+  // Search styles
+  searchWrapper: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 46,
+    overflow: 'hidden',
+    marginBottom: 8,
+    alignSelf: 'flex-end',
+  },
+  searchIconButton: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#00000001',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  expandedSearchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 20,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    height: 46,
+    width: '100%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  searchIcon: { marginRight: 8 },
+  searchInput: {
+    flex: 1,
+    fontSize: 14,
+    paddingVertical: 5,
+  },
+  closeSearchBtn: { marginLeft: 8, padding: 4 },
+  searchDropdown: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    marginTop: 8,
+    paddingTop: 8,
+    width: '100%',
+  },
+  searchDropdownScroll: {
+    maxHeight: height * 0.4, // Limit height so only this area scrolls
+  },
+  searchSection: {
+    marginBottom: 10,
+  },
+  searchSectionTitle: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 4,
+    textTransform: 'uppercase',
+  },
+  searchResultItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(0,0,0,0.05)',
+  },
+  searchResultImage: {
+    width: 40,
+    height: 40,
+    borderRadius: 8,
+    marginRight: 10,
+  },
+  searchResultIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+  },
+  searchResultInfo: {
+    flex: 1,
+  },
+  searchResultName: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  searchResultSub: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  searchLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  searchLoadingText: {
+    fontSize: 12,
+    marginLeft: 8,
+  },
+  noResultsText: {
+    fontSize: 13,
+    textAlign: 'center',
+    paddingVertical: 10,
+  },
+  seeAllRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 8,
+    paddingBottom: 4,
+  },
+  seeAllButton: {
+    paddingVertical: 6,
+  },
+  seeAllText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+
+  // Welcome & tagline
+  welcomeText: {
+    fontSize: Math.min(width * 0.07, 30),
+    fontWeight: 'bold',
+    fontFamily: 'Irish Grover',
+    textAlign: 'center',
+    marginBottom: height * 0.008,
+  },
+  tagline: {
+    fontSize: Math.min(width * 0.04, 16),
+    fontFamily: 'Inter',
+    textAlign: 'center',
+    marginBottom: 12,
+    paddingHorizontal: 10,
+  },
+
+  // Map image
+  imageCenteredContainer: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 8,
+  },
+  mapImage: {
+    width: width * 0.95,
+    height: width * 0.5,
+    alignSelf: 'center',
+  },
+
+  // Bottom fixed content
   bottomContentContainer: {
     paddingHorizontal: 16,
     paddingVertical: 12,
@@ -479,114 +886,7 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter',
   },
 
-  // Search styles
-  searchWrapper: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 46,
-    overflow: 'hidden',
-    marginBottom: 8,
-    alignSelf: 'flex-end',   // right-aligned
-  },
-  searchIconButton: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#00000001',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 4,
-  },
-  expandedSearchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 20,
-    borderWidth: 1,
-    paddingHorizontal: 14,
-    height: 46,
-    width: '100%',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 4,
-  },
-  searchIcon: { marginRight: 8 },
-  searchInput: {
-    flex: 1,
-    fontSize: 14,
-    paddingVertical: 5,
-  },
-  closeSearchBtn: { marginLeft: 8, padding: 4 },
-  searchDropdown: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    marginTop: 8,
-    paddingTop: 8,
-    width: '100%',
-  },
-  searchDropdownLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    marginBottom: 2,
-  },
-  searchDropdownItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 7,
-  },
-  searchDropdownIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 9,
-  },
-  searchDropdownCopy: {
-    flex: 1,
-  },
-  searchDropdownTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  searchDropdownHint: {
-    fontSize: 11,
-    marginTop: 2,
-  },
-
-  // Welcome & tagline
-  welcomeText: {
-    fontSize: Math.min(width * 0.07, 30),
-    fontWeight: 'bold',
-    fontFamily: 'Irish Grover',
-    textAlign: 'center',
-    marginBottom: height * 0.008,
-  },
-  tagline: {
-    fontSize: Math.min(width * 0.04, 16),
-    fontFamily: 'Inter',
-    textAlign: 'center',
-    marginBottom: 12,
-    paddingHorizontal: 10,
-  },
-
-  // Map image
-  imageCenteredContainer: {
-    width: '100%',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginVertical: 8,
-  },
-  mapImage: {
-    width: width * 0.95,
-    height: width * 0.5,
-    alignSelf: 'center',
-  },
-
-  // Footer (selection cards + auth)
+  // Footer
   footer: {
     paddingHorizontal: 16,
     paddingBottom: 0,
@@ -630,7 +930,7 @@ const styles = StyleSheet.create({
   authButton: {
     flex: 1,
     paddingVertical: 12,
-    top:-8,
+    top: -8,
     borderRadius: 25,
     alignItems: 'center',
     shadowColor: '#000',
