@@ -1,0 +1,59 @@
+{
+  "expo": {
+    "name": "shaka",
+    "slug": "shaka",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/icon.png",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "com.anonymous.shaka",
+      "permissions": [
+        "INTERNET"
+      ],
+      "allowCleartextTraffic": true
+    },
+    "web": {
+      "favicon": "./assets/icon.png"
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 21
+          }
+        }
+      ],
+      "@maplibre/maplibre-react-native",
+      "expo-asset",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow Shaaka to access your photos to save images.",
+          "savePhotosPermission": "Allow Shaaka to save images to your gallery.",
+          "isAccessMediaLocationEnabled": true,
+          "audioPermission": false  
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "d3a023d7-8b01-4084-a888-a0e99844aba9"
+      }
+    },
+    "owner": "segoremys-team"
+  }
+}
