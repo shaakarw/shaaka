@@ -20,6 +20,8 @@ import {
 import { useTheme } from '../context/ThemeContext';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
@@ -31,8 +33,18 @@ import Logo from '../assets/logos.png';
 import { useBottomSheet } from '../context/BottomSheetContext';
 
 const { width } = Dimensions.get('window');
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const MAX_IMAGE_HEIGHT = 500; // Height limit for cropping
+
+// Target size for compression (same as the HTML page)
+const MAX_COMPRESSED_BYTES = 100 * 1024; // 100 KB
+
+// Pre‑resize target dimensions
+const TARGET_MAX_WIDTH = 600;
+const TARGET_MAX_HEIGHT = 500;
+const UPSCALE_THRESHOLD_FACTOR = 0.5;
+const UPSCALE_FACTOR = 1.5;
+const MIN_ACCEPTABLE_QUALITY = 0.42;
+const DIMENSION_SCALES = [1.0, 0.85, 0.72, 0.6, 0.5, 0.42, 0.35, 0.3, 0.25, 0.21, 0.18, 0.15, 0.12, 0.1];
+const BINARY_SEARCH_ITERATIONS = 8;
 
 const prepareUploadFile = async (image) => {
   if (Platform.OS !== 'web') return image;
@@ -41,7 +53,7 @@ const prepareUploadFile = async (image) => {
   return new File([blob], image.name || `image_${Date.now()}.jpg`, { type: image.type || blob.type || 'image/jpeg' });
 };
 
-// ---------- Translations (Updated step names and hints for new order) ----------
+// ---------- Translations (unchanged) ----------
 const translations = {
   English: {
     title: 'Create New Post',
@@ -128,16 +140,11 @@ const translations = {
     loginRequiredMessage: 'You need to login to create a post.',
     login: 'Login',
     cancel: 'Cancel',
-    cropImage: 'Crop Image',
-    cropMessage: 'This image is taller than 500px. Please crop it.',
-    tallImageDetected: 'Tall Image Detected',
-    tallImageMultiMessage: 'Some selected images are taller than 500px. They will be cropped one by one.',
   },
   Kinyarwanda: {
     title: 'Kora Icyatangazo Gishya',
     subtitle: 'Sangiza ibicuruzwa byawe',
     step1: 'Amashusho',
-   
     step2: 'Ibisobanuro by’Igicuruzwa',
     step3: 'Aho uri & Igiciro',
     step4: '',
@@ -219,10 +226,6 @@ const translations = {
     loginRequiredMessage: 'Ugomba kwinjira kugirango utangaze igicuruzwa.',
     login: 'Injira',
     cancel: 'Kureka',
-    cropImage: 'Hindura Ifoto',
-    cropMessage: 'Iyi foto ni ndende kurenza 500px. Nyamuneka uyihindure.',
-    tallImageDetected: 'Ifoto Nini Yabonetse',
-    tallImageMultiMessage: 'Zimwe mu mafoto ni ndende kurenza 500px. Zizahindurwa imwe imwe.',
   },
 };
 
@@ -257,7 +260,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
   const { showBottomSheet, closeBottomSheet } = useBottomSheet();
   const route = useRoute();
 
-  const [step, setStep] = useState(1); // Step 1 is now Images
+  const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [infoModalVisible, setInfoModalVisible] = useState(false);
@@ -309,10 +312,142 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
   const phoneRef = useRef(null);
   const whatsappRef = useRef(null);
 
-  // Refs for crop flow
-  const pendingTallImagesRef = useRef([]);
-  const isAwaitingCropRef = useRef(false);
-  const skipResetOnFocusRef = useRef(false);
+  // ---------- Helper functions for compression ----------
+  const getImageDimensions = (uri) => {
+    return new Promise((resolve, reject) => {
+      Image.getSize(uri, (width, height) => resolve({ width, height }), reject);
+    });
+  };
+
+  const checkWebPSupport = async () => {
+    try {
+      const testResult = await ImageManipulator.manipulateAsync(
+        'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==',
+        [],
+        { format: ImageManipulator.SaveFormat.WEBP, compress: 0.8 }
+      );
+      return testResult.uri ? true : false;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const compressImageToTarget = async (sourceUri) => {
+    const { width: originalWidth, height: originalHeight } = await getImageDimensions(sourceUri);
+
+    // Determine output format (WebP if supported, otherwise JPEG)
+    let outputFormat = ImageManipulator.SaveFormat.JPEG;
+    const webpSupported = await checkWebPSupport();
+    if (webpSupported) {
+      outputFormat = ImageManipulator.SaveFormat.WEBP;
+    }
+
+    // Compute effective dimensions (pre‑resize + optional upscale)
+    const getEffectiveDimensions = (w, h) => {
+      let newW = w;
+      let newH = h;
+
+      // Upscale small images by 50% if less than half target
+      const thresholdW = TARGET_MAX_WIDTH * UPSCALE_THRESHOLD_FACTOR;
+      const thresholdH = TARGET_MAX_HEIGHT * UPSCALE_THRESHOLD_FACTOR;
+      if (newW < thresholdW || newH < thresholdH) {
+        newW = Math.round(newW * UPSCALE_FACTOR);
+        newH = Math.round(newH * UPSCALE_FACTOR);
+      }
+
+      // Fit within target dimensions
+      const scaleW = TARGET_MAX_WIDTH / newW;
+      const scaleH = TARGET_MAX_HEIGHT / newH;
+      const scale = Math.min(scaleW, scaleH, 1);
+      newW = Math.max(1, Math.round(newW * scale));
+      newH = Math.max(1, Math.round(newH * scale));
+
+      return { width: newW, height: newH };
+    };
+
+    const effective = getEffectiveDimensions(originalWidth, originalHeight);
+    const longestSide = Math.max(effective.width, effective.height);
+    let startW = effective.width;
+    let startH = effective.height;
+    if (longestSide > 8192) { // safety cap
+      const ratio = 8192 / longestSide;
+      startW = Math.round(startW * ratio);
+      startH = Math.round(startH * ratio);
+    }
+
+    const compressAtDimensions = async (width, height, quality) => {
+      const result = await ImageManipulator.manipulateAsync(
+        sourceUri,
+        [{ resize: { width, height } }],
+        { compress: quality, format: outputFormat }
+      );
+      const fileInfo = await FileSystem.getInfoAsync(result.uri);
+      return { uri: result.uri, size: fileInfo.size };
+    };
+
+    let bestResult = null;
+
+    for (const scale of DIMENSION_SCALES) {
+      const w = Math.round(startW * scale);
+      const h = Math.round(startH * scale);
+      if (w < 16 || h < 16) continue;
+
+      // Quick test at quality 0.1 to see if this size can fit under target
+      const tiny = await compressAtDimensions(w, h, 0.1);
+      if (tiny.size > MAX_COMPRESSED_BYTES) continue;
+
+      // Binary search for highest quality under target
+      let low = 0.1;
+      let high = 0.92;
+      let bestQuality = 0.1;
+      let bestBlob = tiny;
+
+      for (let i = 0; i < BINARY_SEARCH_ITERATIONS; i++) {
+        const mid = (low + high) / 2;
+        const compressed = await compressAtDimensions(w, h, mid);
+        if (compressed.size <= MAX_COMPRESSED_BYTES) {
+          bestQuality = mid;
+          bestBlob = compressed;
+          low = mid;
+        } else {
+          high = mid;
+        }
+      }
+
+      const candidate = {
+        uri: bestBlob.uri,
+        size: bestBlob.size,
+        width: w,
+        height: h,
+        quality: bestQuality,
+      };
+
+      if (!bestResult ||
+          candidate.quality > bestResult.quality ||
+          (Math.abs(candidate.quality - bestResult.quality) < 0.02 &&
+           candidate.width * candidate.height > bestResult.width * bestResult.height)) {
+        bestResult = candidate;
+      }
+
+      if (bestQuality >= MIN_ACCEPTABLE_QUALITY) {
+        break; // Good enough, stop searching
+      }
+    }
+
+    if (!bestResult) {
+      // Fallback: use original with minimal quality
+      const fallback = await compressAtDimensions(startW, startH, 0.1);
+      bestResult = {
+        uri: fallback.uri,
+        size: fallback.size,
+        width: startW,
+        height: startH,
+        quality: 0.1,
+      };
+    }
+
+    return bestResult;
+  };
 
   // ---------- Fetch limits and usage ----------
   const fetchLimitsAndUsage = async () => {
@@ -360,19 +495,13 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 
   useFocusEffect(
     React.useCallback(() => {
-      if (skipResetOnFocusRef.current) {
-        skipResetOnFocusRef.current = false;
-      } else {
-        setFormData(initialFormState);
-        setPriceDisplay('');
-        setStep(1);
-        setError('');
-        setLoading(false);
-        setUploadProgress(0);
-        setUploadStatusMessage('');
-        pendingTallImagesRef.current = [];
-        isAwaitingCropRef.current = false;
-      }
+      setFormData(initialFormState);
+      setPriceDisplay('');
+      setStep(1);
+      setError('');
+      setLoading(false);
+      setUploadProgress(0);
+      setUploadStatusMessage('');
       fetchLimitsAndUsage();
       checkLoginAndPrompt();
     }, [])
@@ -439,48 +568,6 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
     return () => backHandler.remove();
   }, [navigation]);
 
-  // ---------- Handle cropped image returned from CropImageScreen ----------
-  useEffect(() => {
-    const croppedUri = route.params?.croppedImageUri;
-    if (!croppedUri) return;
-
-    const newImage = {
-      uri: croppedUri,
-      type: 'image/jpeg',
-      name: `post_${Date.now()}.jpg`,
-    };
-    setFormData(prev => ({ ...prev, images: [...prev.images, newImage] }));
-
-    navigation.setParams({ croppedImageUri: undefined });
-    // Go back to images step (now step 1)
-    setStep(1);
-
-    startNextTallCrop();
-  }, [route.params?.croppedImageUri, navigation]);
-
-  useFocusEffect(
-    React.useCallback(() => {
-      if (isAwaitingCropRef.current) {
-        isAwaitingCropRef.current = false;
-        pendingTallImagesRef.current = [];
-        skipResetOnFocusRef.current = false;
-      }
-    }, [])
-  );
-
-  const startNextTallCrop = () => {
-    if (pendingTallImagesRef.current.length > 0) {
-      const nextTall = pendingTallImagesRef.current.shift();
-      if (nextTall) {
-        isAwaitingCropRef.current = true;
-        skipResetOnFocusRef.current = true;
-        navigation.navigate('CropImage', { imageUri: nextTall.uri });
-      }
-    } else {
-      isAwaitingCropRef.current = false;
-    }
-  };
-
   const handleChange = (field, value) => {
     setFormData({ ...formData, [field]: value });
     setError('');
@@ -541,13 +628,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 
   const countWords = (text) => text.trim().split(/\s+/).filter(w => w.length > 0).length;
 
-  const getImageHeight = (uri) => {
-    return new Promise((resolve, reject) => {
-      Image.getSize(uri, (width, height) => resolve(height), reject);
-    });
-  };
-
-  // ---------- Image pickers (used in step 1) ----------
+  // ---------- Image pickers with compression ----------
   const selectMultipleImages = async () => {
     if (formData.images.length >= maxImagesPerPost) {
       showBottomSheet({
@@ -572,62 +653,34 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
         allowsMultipleSelection: true,
-        quality: 0.8,
+        quality: 1, // we will compress ourselves
         selectionLimit: maxImagesPerPost - formData.images.length,
       });
       if (!result.canceled && result.assets?.length > 0) {
         const remainingSlots = maxImagesPerPost - formData.images.length;
         const selectedAssets = result.assets.slice(0, remainingSlots);
 
-        const oversizedAsset = selectedAssets.find(asset => asset.fileSize > MAX_IMAGE_BYTES);
-        if (oversizedAsset) {
-          showBottomSheet({
-            type: 'error',
-            title: t.imageLimitExceeded,
-            message: 'Each image must be 2 MB or smaller. Please choose a smaller image.',
-            buttonText: 'OK',
-          });
-          return;
-        }
-
-        const normalAssets = [];
-        const tallAssets = [];
+        // Compress each image sequentially to avoid memory issues
+        const compressedImages = [];
         for (const asset of selectedAssets) {
           try {
-            const height = await getImageHeight(asset.uri);
-            if (height > MAX_IMAGE_HEIGHT) {
-              tallAssets.push(asset);
-            } else {
-              normalAssets.push(asset);
-            }
+            const compressed = await compressImageToTarget(asset.uri);
+            compressedImages.push({
+              uri: compressed.uri,
+              type: 'image/jpeg', // or based on format, but fine
+              name: `post_${Date.now()}_${Math.random()}.jpg`,
+            });
           } catch (err) {
-            console.warn('Failed to get image height:', err);
-            normalAssets.push(asset);
+            console.warn('Compression failed for one image, using original', err);
+            // Fallback to original if compression fails
+            compressedImages.push({
+              uri: asset.uri,
+              type: 'image/jpeg',
+              name: `post_${Date.now()}_${Math.random()}.jpg`,
+            });
           }
         }
-
-        if (normalAssets.length > 0) {
-          const newNormalImages = normalAssets.map(asset => ({
-            uri: asset.uri,
-            type: 'image/jpeg',
-            name: `post_${Date.now()}_${Math.random()}.jpg`,
-          }));
-          setFormData(prev => ({ ...prev, images: [...prev.images, ...newNormalImages] }));
-        }
-
-        if (tallAssets.length > 0) {
-          pendingTallImagesRef.current = tallAssets;
-          showBottomSheet({
-            type: 'info',
-            title: t.tallImageDetected,
-            message: t.tallImageMultiMessage,
-            buttonText: 'Crop',
-            buttonAction: () => {
-              closeBottomSheet();
-              startNextTallCrop();
-            },
-          });
-        }
+        setFormData(prev => ({ ...prev, images: [...prev.images, ...compressedImages] }));
       }
     } catch (err) {
       showBottomSheet({
@@ -663,33 +716,27 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         return;
       }
       const result = useCamera
-        ? await ImagePicker.launchCameraAsync({ allowsEditing: true, quality: 0.8 })
-        : await ImagePicker.launchImageLibraryAsync({ allowsEditing: true, quality: 0.8 });
+        ? await ImagePicker.launchCameraAsync({ allowsEditing: true, quality: 1 })
+        : await ImagePicker.launchImageLibraryAsync({ allowsEditing: true, quality: 1 });
       if (!result.canceled && result.assets?.[0]) {
-        if (result.assets[0].fileSize > MAX_IMAGE_BYTES) {
-          showBottomSheet({
-            type: 'error',
-            title: t.imageLimitExceeded,
-            message: 'Each image must be 2 MB or smaller. Please choose a smaller image.',
-            buttonText: 'OK',
-          });
-          return;
+        const asset = result.assets[0];
+        try {
+          const compressed = await compressImageToTarget(asset.uri);
+          const newImage = {
+            uri: compressed.uri,
+            type: 'image/jpeg',
+            name: `post_${Date.now()}.jpg`,
+          };
+          setFormData(prev => ({ ...prev, images: [...prev.images, newImage] }));
+        } catch (err) {
+          // Fallback to original
+          const newImage = {
+            uri: asset.uri,
+            type: 'image/jpeg',
+            name: `post_${Date.now()}.jpg`,
+          };
+          setFormData(prev => ({ ...prev, images: [...prev.images, newImage] }));
         }
-
-        const height = await getImageHeight(result.assets[0].uri);
-        if (height > MAX_IMAGE_HEIGHT) {
-          isAwaitingCropRef.current = true;
-          skipResetOnFocusRef.current = true;
-          navigation.navigate('CropImage', { imageUri: result.assets[0].uri });
-          return;
-        }
-
-        const newImage = {
-          uri: result.assets[0].uri,
-          type: 'image/jpeg',
-          name: `post_${Date.now()}.jpg`,
-        };
-        setFormData(prev => ({ ...prev, images: [...prev.images, newImage] }));
       }
     } catch (err) {
       showBottomSheet({
@@ -707,16 +754,16 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
     setFormData(prev => ({ ...prev, images: newImages }));
   };
 
-  // ---------- Validation (updated for new step order) ----------
+  // ---------- Validation (unchanged) ----------
   const validateStep = () => {
     switch (step) {
-      case 1: // Images
+      case 1:
         if (formData.images.length === 0) {
           setError(t.selectMedia);
           return false;
         }
         return true;
-      case 2: // Product Details
+      case 2:
         if (!formData.productName.trim()) { setError('Please enter a product name'); return false; }
         if (!formData.description.trim()) { setError('Please provide a description'); return false; }
         const wc = countWords(formData.description);
@@ -728,7 +775,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
           return false;
         }
         return true;
-      case 3: // Location & Price
+      case 3:
         if (!formData.location.trim() || formData.location.trim().length < 3) { setError('Please enter a valid location'); return false; }
         const locationLength = formData.location.trim().length;
         if (locationLength > 20) {
@@ -745,7 +792,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
     }
   };
 
-  // ---------- Navigation & Post ----------
+  // ---------- Navigation & Post (unchanged) ----------
   const nextStep = () => {
     if (limitsLoading) { setError(t.loadingLimits); return; }
     if (postCooldownHours > 0) {
@@ -1138,7 +1185,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
   // ---------- Step content (reordered) ----------
   const renderStepContent = () => {
     switch (step) {
-      case 1: // Images
+      case 1:
         return (
           <View style={[styles.step3Container, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
             <SimplePostPreview
@@ -1186,7 +1233,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
             </Text>
           </View>
         );
-      case 2: // Product Details
+      case 2:
         return (
           <>
             <View style={styles.inputGroup}>
@@ -1238,7 +1285,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
             </View>
           </>
         );
-      case 3: // Location & Price
+      case 3:
         return (
           <>
             <View style={styles.inputGroup}>
@@ -1324,7 +1371,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
             </View>
           </>
         );
-      case 4: // Preview
+      case 4:
         return renderStep4Content();
       default:
         return null;
@@ -1432,7 +1479,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
   );
 };
 
-// ---------- Styles (unchanged except input borders top/bottom only) ----------
+// ---------- Styles (unchanged) ----------
 const styles = StyleSheet.create({
   container: { flex: 1 },
   keyboardView: { flex: 1 },
@@ -1705,3 +1752,4 @@ const styles = StyleSheet.create({
 });
 
 export default AddPostScreen;
+//npx expo install expo-image-manipulator expo-file-system
