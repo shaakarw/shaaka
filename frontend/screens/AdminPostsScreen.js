@@ -24,10 +24,12 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import AdminScreenHeader from '../components/AdminScreenHeader';
 
 const { width, height } = Dimensions.get('window');
 const CARD_MARGIN = 6;
-const ITEMS_PER_ROW = 3;
+const ITEMS_PER_ROW = 2;
 const CARD_WIDTH = (width - CARD_MARGIN * (ITEMS_PER_ROW + 1)) / ITEMS_PER_ROW;
 const BOTTOM_SHEET_MAX_HEIGHT = height * 0.75;
 const BOTTOM_SHEET_MIN_HEIGHT = height * 0.25;
@@ -59,9 +61,9 @@ const translations = {
     back: 'Back',
     viewImages: 'View Images',
     title: 'Title',
-    featured: 'Featured',
-    feature: 'Feature',
-    unfeature: 'Unfeature',
+    trending: 'Trending',
+    trend: 'Add to Trending',
+    untrend: 'Remove from Trending',
   },
   Kinyarwanda: {
     posts: 'Inyandiko',
@@ -88,9 +90,9 @@ const translations = {
     back: 'Subira',
     viewImages: 'Reba amashusho',
     title: 'Umutwe',
-    featured: 'Byazamuwe',
-    feature: 'Kuzamura',
-    unfeature: 'Kuraho kuzamura',
+    trending: 'Ibikunzwe',
+    trend: 'Shyira mu Bikunzwe',
+    untrend: 'Kuramo mu Bikunzwe',
   },
 };
 
@@ -321,24 +323,21 @@ const AdminPostsScreen = ({ navigation, language }) => {
     ]);
   };
 
-  // ---------- Toggle featured (promote / unpromote) ----------
-  const handleToggleFeatured = async (post) => {
+  const handleToggleTrending = async (post) => {
     try {
       const token = await getToken();
-      const newFeatured = !post.featured;
+      const newTrending = !post.trending;
       await axios.patch(
         `${BASE_URL}/api/admin/posts/${post._id}`,
-        { featured: newFeatured },
+        { trending: newTrending },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      // Show appropriate message
-      const message = newFeatured ? 'Post featured successfully!' : 'Feature removed from post.';
-      showStatus(t.success, message);
+      showStatus(t.success, newTrending ? 'Post added to Trending.' : 'Post removed from Trending.');
       closeSheet();
       fetchPosts();
     } catch (error) {
-      console.error('Toggle featured error:', error);
-      Alert.alert(t.error, 'Failed to update featured status. Please try again.');
+      console.error('Toggle trending error:', error);
+      Alert.alert(t.error, 'Failed to update Trending status. Please try again.');
     }
   };
 
@@ -446,7 +445,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
   const renderBottomSheet = () => {
     if (!selectedPost) return null;
     const isStopped = selectedPost.status === 'stopped';
-    const isFeatured = selectedPost.featured || false;
+    const isTrending = selectedPost.trending || false;
     const imageUrl = (selectedPost.houseImages && selectedPost.houseImages.length > 0)
       ? selectedPost.houseImages[0]
       : null;
@@ -504,12 +503,6 @@ const AdminPostsScreen = ({ navigation, language }) => {
                     </Text>
                   </View>
                 )}
-                {isFeatured && (
-                  <View style={[styles.featuredBadge, { backgroundColor: '#FFD700' }]}>
-                    <Ionicons name="star" size={16} color="#000" />
-                    <Text style={styles.featuredBadgeText}>{t.featured}</Text>
-                  </View>
-                )}
               </TouchableOpacity>
 
               {/* Title and owner */}
@@ -555,20 +548,19 @@ const AdminPostsScreen = ({ navigation, language }) => {
                 </View>
               </View>
 
-              {/* Action buttons – Feature/Unfeature clearly labeled */}
+              {/* Action buttons */}
               <View style={styles.sheetActions}>
-                {/* Feature / Unfeature – toggles based on current state */}
                 <TouchableOpacity
-                  style={[styles.sheetActionBtn, { backgroundColor: '#FFD700' }]}
-                  onPress={() => handleToggleFeatured(selectedPost)}
+                  style={[styles.sheetActionBtn, { backgroundColor: isTrending ? '#d87428' : '#47ae87' }]}
+                  onPress={() => handleToggleTrending(selectedPost)}
                 >
                   <Ionicons
-                    name={isFeatured ? 'star' : 'star-outline'}
+                    name={isTrending ? 'flame' : 'flame-outline'}
                     size={22}
-                    color="#000"
+                    color="#fff"
                   />
-                  <Text style={[styles.sheetActionText, { color: '#000' }]}>
-                    {isFeatured ? t.unfeature : t.feature}
+                  <Text style={styles.sheetActionText}>
+                    {isTrending ? t.untrend : t.trend}
                   </Text>
                 </TouchableOpacity>
 
@@ -617,7 +609,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
         style={[
           styles.gridCard,
           {
-            backgroundColor: theme.background,
+            backgroundColor: theme.cardBackground,
             borderColor: isFeatured ? '#FFD700' : theme.border,
             borderWidth: isFeatured ? 2 : 1,
             opacity: isStopped ? 0.6 : 1,
@@ -669,9 +661,11 @@ const AdminPostsScreen = ({ navigation, language }) => {
     );
   };
 
+  const AnimatedFlatList = Animated.createAnimatedComponent(FlatList);
+
   // ---------- Render list ----------
   const renderPostsList = () => (
-    <FlatList
+    <AnimatedFlatList
       key="posts"
       data={filteredPosts}
       keyExtractor={(item) => item._id}
@@ -739,15 +733,14 @@ const AdminPostsScreen = ({ navigation, language }) => {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
       {/* Header with Refresh Button */}
-      <View style={[styles.header, { borderBottomColor: theme.border }]}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Ionicons name="arrow-back-outline" size={26} color={theme.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: theme.text }]}>{t.posts}</Text>
-        <TouchableOpacity onPress={fetchPosts} style={styles.refreshBtn}>
-          <Ionicons name="refresh-outline" size={26} color={theme.text} />
-        </TouchableOpacity>
-      </View>
+      <AdminScreenHeader
+        title={t.posts}
+        theme={theme}
+        onBack={() => navigation.goBack()}
+        actionIcon="refresh-outline"
+        actionLabel="Refresh posts"
+        onAction={fetchPosts}
+      />
 
       {/* Search (collapsible) */}
       {renderSearch()}
@@ -755,7 +748,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
       {/* List */}
       {loading && !refreshing ? (
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={theme.accent} />
+          <ShaakaLoadingScreen backgroundColor={theme.background} textColor={theme.text} hideText />
         </View>
       ) : (
         renderPostsList()
@@ -825,7 +818,7 @@ const styles = StyleSheet.create({
 
   postImageContainer: {
     width: '100%',
-    height: 80,
+    height: 112,
     borderRadius: 8,
     overflow: 'hidden',
     marginBottom: 6,

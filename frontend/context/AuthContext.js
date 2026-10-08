@@ -255,9 +255,14 @@ export const AuthProvider = ({ children }) => {
       });
 
       if (response.data.success) {
-        const newUser = { ...user, ...response.data.user };
+        const newUser = {
+          ...(user || {}),
+          ...(response.data.user || {}),
+          ...(updatedData || {}),
+        };
         setUser(newUser);
         await AsyncStorage.setItem('user', JSON.stringify(newUser));
+        await AsyncStorage.setItem('sessionUser', JSON.stringify(newUser));
         return { success: true, user: newUser };
       }
       return { success: false, message: response.data.message };
@@ -265,6 +270,14 @@ export const AuthProvider = ({ children }) => {
       console.error('Update user error:', err);
       return { success: false, message: err.response?.data?.message || 'Update failed' };
     }
+  };
+
+  const syncStoredUser = async (storedUser) => {
+    const nextUser = storedUser || user;
+    if (!nextUser) return;
+    setUser(nextUser);
+    await AsyncStorage.setItem('user', JSON.stringify(nextUser));
+    await AsyncStorage.setItem('sessionUser', JSON.stringify(nextUser));
   };
 
   // ============================================================
@@ -289,6 +302,7 @@ export const AuthProvider = ({ children }) => {
         loading,
         refreshUser,
         updateUser,
+        syncStoredUser,
         getToken,
         syncFavorites,   // 🆕 exposed so you can call it from anywhere
       }}

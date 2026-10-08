@@ -222,6 +222,16 @@ export default function SettingsScreen({ navigation, route, language = 'English'
   // Screen-local swipe sheet state removed; all dialogs now use the shared global sheet.
 
   const [pushNotifications, setPushNotifications] = useState(true);
+  const [adminSession, setAdminSession] = useState(false);
+
+  useEffect(() => {
+    const checkAdminSession = async () => {
+      const token = await AsyncStorage.getItem('adminToken');
+      setAdminSession(Boolean(token));
+    };
+
+    checkAdminSession();
+  }, []);
 
   // Collapsible sections
   const [showAccount, setShowAccount] = useState(false);
@@ -339,6 +349,7 @@ export default function SettingsScreen({ navigation, route, language = 'English'
 
   const profileImageSource = user?.avatar ? { uri: user.avatar } : defaultAvatar;
   const isAdmin = user?.role === 'admin';
+  const hasAdminAccess = isAdmin || adminSession;
   const subscriptionLabel = user ? t.mySubscriptions : t.login;
 
   // ---------- Handlers with login checks ----------
@@ -408,7 +419,7 @@ export default function SettingsScreen({ navigation, route, language = 'English'
         <View style={styles.section}>
           <Text style={[styles.sectionHeader, { color: theme.textSecondary }]}></Text>
           
-          {isAdmin && (
+          {hasAdminAccess && (
             <TouchableOpacity onPress={handleAdminLogin}>
               <View style={[styles.settingRow, { borderBottomColor: theme.border }]}> 
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -465,7 +476,7 @@ export default function SettingsScreen({ navigation, route, language = 'English'
                   <Text style={[styles.chevron, { color: theme.textSecondary }]}>›</Text>
                 </View>
               </TouchableOpacity>
-              <TouchableOpacity onPress={() => navigateTo('ChangePassword')}>
+              <TouchableOpacity onPress={() => navigateTo('ChangePassword', { adminMode: hasAdminAccess })}>
                 <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
                   <Text style={[styles.settingText, { color: theme.text }]}>{t.changePassword}</Text>
                   <Text style={[styles.chevron, { color: theme.textSecondary }]}>›</Text>

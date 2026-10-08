@@ -26,6 +26,8 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { useFocusEffect } from '@react-navigation/native';
 import Compass from '../components/Compass';
+import { networkStatus } from '../services/networkStatus';
+import { mapOfflineCache } from '../services/mapOfflineCache';
 
 const loadingLogo = require('../assets/logos.png');
 
@@ -180,6 +182,11 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       noPlacesFound: 'No places found in Rwanda for: ',
       geocodingFailed: 'Geocoding failed.',
       shopsInMalls: 'Shops inside Malls',
+      online: 'ONLINE',
+      offline: 'OFFLINE',
+      offlineMap: 'Offline map - showing saved map data',
+      offlineSearch: 'Internet connection required to search for new places.',
+      offlineRoute: 'Internet connection required to calculate a new route.',
     },
     Kinyarwanda: {
       loading: 'Turigutunganya…',
@@ -222,6 +229,11 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       noPlacesFound: 'Nta hantu habonetse mu Rwanda hita: ',
       geocodingFailed: 'Gushakisha byanze.',
       shopsInMalls: 'Amaduka mu Maduka manini',
+      online: 'KURI INTERINETI',
+      offline: 'NTA INTERINETI',
+      offlineMap: 'Ikarita itari kuri interneti - herekana amakuru wabitse',
+      offlineSearch: 'Internet irakenewe kugirango ushakishe ahandi hantu.',
+      offlineRoute: 'Internet irakenewe kugirango ubare indi nzira.',
     },
   };
   const t = translations[language] || translations.English;
@@ -245,6 +257,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   const [places, setPlaces] = useState([]);
   const [mapReady, setMapReady] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
 
   const intervalRef = useRef(null);
   const routeDestinationRef = useRef(null);
@@ -255,6 +268,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   const [savedPlacesVisible, setSavedPlacesVisible] = useState(false);
   const [savedPlaces, setSavedPlaces] = useState([]);
   const [favoriteIds, setFavoriteIds] = useState([]);
+  const autoOpenedMyShops = useRef(false);
 
   const [userLocation, setUserLocation] = useState(null);
   const [matchingResults, setMatchingResults] = useState([]);
@@ -372,8 +386,22 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     };
   }, []);
 
-  // Fetch places
+  const loadCachedMapData = async () => {
+    const [cachedPlaces, cachedMallShops] = await Promise.all([
+      mapOfflineCache.getPlaces(),
+      mapOfflineCache.getMallShops(),
+    ]);
+    if (cachedPlaces.length > 0) setPlaces(cachedPlaces);
+    if (cachedMallShops.length > 0) {
+      setAllMallShops(cachedMallShops);
+      setAllMallShopsLoaded(true);
+    }
+  };
+
+  // Fetch places, using the persistent cache when offline.
   const fetchPlaces = async () => {
+    await loadCachedMapData();
+    if (!networkStatus.get().isConnected || !networkStatus.get().isInternetReachable) return;
     try {
       const token = await AsyncStorage.getItem('userToken');
       const headers = {};
@@ -381,6 +409,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       const response = await axios.get(`${BASE_URL}/api/places`, { headers });
       if (response.data && response.data.places) {
         setPlaces(response.data.places);
+        await mapOfflineCache.savePlaces(response.data.places);
       }
     } catch (error) {
       if (error.response && error.response.status === 404) {
@@ -392,6 +421,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   };
 
   const fetchPlacesSilent = async () => {
+    if (!networkStatus.get().isConnected || !networkStatus.get().isInternetReachable) return;
     try {
       const token = await AsyncStorage.getItem('userToken');
       const headers = {};
@@ -399,6 +429,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       const response = await axios.get(`${BASE_URL}/api/places`, { headers });
       if (response.data && response.data.places) {
         setPlaces(response.data.places);
+        await mapOfflineCache.savePlaces(response.data.places);
       }
     } catch (error) {
       if (error.response && error.response.status === 404) {
@@ -409,21 +440,38 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   // Fetch all mall shops once
   const fetchAllMallShops = async () => {
+    const mallIds = places
+      .filter(place => place.category === 'shoppingmall')
+      .map(place => place._id || place.id)
+      .filter(Boolean);
+    if (mallIds.length === 0) {
+      const cachedShops = await mapOfflineCache.getMallShops();
+      setAllMallShops(cachedShops);
+      setAllMallShopsLoaded(true);
+      return;
+    }
+    if (!networkStatus.get().isConnected || !networkStatus.get().isInternetReachable) {
+      const cachedShops = await mapOfflineCache.getMallShops();
+      setAllMallShops(cachedShops);
+      setAllMallShopsLoaded(true);
+      return;
+    }
     try {
       const token = await AsyncStorage.getItem('userToken');
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
-      const response = await axios.get(`${BASE_URL}/api/mall-shops`, { headers });
-      let shops = [];
-      if (response.data && response.data.shops) {
-        shops = response.data.shops;
-      } else if (Array.isArray(response.data)) {
-        shops = response.data;
-      }
+      const responses = await Promise.all(mallIds.map(mallId => axios.get(`${BASE_URL}/api/mall-shops`, {
+        params: { mallId },
+        headers,
+      })));
+      const shops = responses.flatMap(response => response.data?.shops || (Array.isArray(response.data) ? response.data : []));
       setAllMallShops(shops);
       setAllMallShopsLoaded(true);
+      await mapOfflineCache.saveMallShops(shops);
     } catch (error) {
       console.warn('Failed to fetch all mall shops:', error.message);
-      setAllMallShopsLoaded(false);
+      const cachedShops = await mapOfflineCache.getMallShops();
+      setAllMallShops(cachedShops);
+      setAllMallShopsLoaded(true);
     }
   };
 
@@ -443,9 +491,19 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   useFocusEffect(
     useCallback(() => {
+      autoOpenedMyShops.current = false;
       loadFavoriteIds();
     }, [])
   );
+
+  useEffect(() => networkStatus.subscribe(status => {
+    const online = status.isConnected && status.isInternetReachable;
+    setIsOnline(online);
+    if (online) {
+      fetchPlacesSilent();
+      fetchAllMallShops();
+    }
+  }), []);
 
   // Send places to map
   const sendPlacesToMap = () => {
@@ -501,10 +559,10 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   }, [mapReady, places, favoriteIds, singleSelectedPlaceId]);
 
   useEffect(() => {
-    if (mapReady) {
+    if (mapReady && places.length > 0) {
       fetchAllMallShops();
     }
-  }, [mapReady]);
+  }, [mapReady, places]);
 
   // If route requests to show mall shops on open, display them on the map
   useEffect(() => {
@@ -529,90 +587,89 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     tryShowMallShops();
   }, [route?.params, mapReady, allMallShopsLoaded]);
 
-  // --- NEW: Auto-select the nearest place when the screen opens ---
+  // Center on the user in Rwanda, or the closest shop when they are outside it.
   useEffect(() => {
     if (initialNearestSet.current) return; // already done
-    if (!mapReady || !userLocation) return; // not ready
-    if (places.length === 0 && allMallShops.length === 0) return; // nothing to centre on
+    if (!mapReady || !userLocation || !webViewRef.current) return;
 
-    // Collect all valid locations from both normal places and mall shops
-    const allLocations = [];
+    const isUserInRwanda =
+      userLocation.latitude >= -2.8 && userLocation.latitude <= -1.0 &&
+      userLocation.longitude >= 28.8 && userLocation.longitude <= 30.9;
 
-    places.forEach(p => {
-      const lat = p.location?.latitude || p.lat;
-      const lon = p.location?.longitude || p.lon;
-      if (lat && lon) {
-        allLocations.push({ ...p, lat, lon, type: 'place' });
-      }
-    });
+    if (isUserInRwanda) {
+      webViewRef.current.injectJavaScript(`
+        if (window.mapInstance) {
+          window.mapInstance.flyTo({ center: [${userLocation.longitude}, ${userLocation.latitude}], zoom: 15 });
+        }
+        if (window.updateUserLocation) {
+          window.updateUserLocation(${userLocation.latitude}, ${userLocation.longitude});
+        }
+      `);
+      initialNearestSet.current = true;
+      return;
+    }
 
-    allMallShops.forEach(shop => {
-      const lat = shop.mall?.lat;
-      const lon = shop.mall?.lon;
-      if (lat && lon) {
-        allLocations.push({
-          ...shop,
-          lat,
-          lon,
-          type: 'mallshop',
-          _id: shop._id || shop.mall?._id,
-        });
-      }
-    });
+    const hasMalls = places.some(place => place.category === 'shoppingmall');
+    if (hasMalls && !allMallShopsLoaded) return;
 
-    if (allLocations.length === 0) return;
+    const placeLocations = places
+      .map(place => ({
+        ...place,
+        lat: place.location?.latitude ?? place.lat,
+        lon: place.location?.longitude ?? place.lon,
+        type: 'place',
+      }))
+      .filter(place => Number.isFinite(place.lat) && Number.isFinite(place.lon));
+    const mallShopLocations = allMallShops
+      .map(shop => ({
+        ...shop,
+        lat: shop.mall?.lat ?? shop.lat,
+        lon: shop.mall?.lon ?? shop.lon,
+        type: 'mallshop',
+        _id: shop._id || shop.mall?._id,
+      }))
+      .filter(shop => Number.isFinite(shop.lat) && Number.isFinite(shop.lon));
+    const shopLocations = [
+      ...placeLocations.filter(place => ['shop', 'shoppingmall'].includes(place.category)),
+      ...mallShopLocations,
+    ];
+    const candidates = shopLocations.length > 0 ? shopLocations : placeLocations;
+    if (candidates.length === 0) return;
 
-    // Find the one with smallest haversine distance
-    let nearest = null;
-    let minDist = Infinity;
-
-    allLocations.forEach(item => {
-      const dist = haversineDistance(
+    const nearest = candidates.reduce((closest, item) => {
+      const distance = haversineDistance(
         userLocation.latitude,
         userLocation.longitude,
         item.lat,
         item.lon
       );
-      if (dist < minDist) {
-        minDist = dist;
-        nearest = item;
-      }
-    });
+      return distance < closest.distance ? { item, distance } : closest;
+    }, { item: null, distance: Infinity }).item;
 
-    if (nearest && webViewRef.current) {
-      if (nearest.type === 'place') {
-        // Normal place: highlight and fly
-        setSingleSelectedPlaceId(nearest._id);
-        webViewRef.current.injectJavaScript(`
-          if (window.mapInstance) {
-            window.mapInstance.flyTo({ center: [${nearest.lon}, ${nearest.lat}], zoom: 17 });
-          }
-          if (window.highlightSinglePlace) {
-            window.highlightSinglePlace('${nearest._id}');
-          }
-        `);
-      } else {
-        // Mall shop: fly to its mall coordinates and optionally highlight
-        webViewRef.current.injectJavaScript(`
-          if (window.mapInstance) {
-            window.mapInstance.flyTo({ center: [${nearest.lon}, ${nearest.lat}], zoom: 17 });
-          }
-          if (window.highlightShopLocation) {
-            window.highlightShopLocation(${JSON.stringify({
-              lat: nearest.lat,
-              lon: nearest.lon,
-              name: nearest.name || '',
-              mallName: nearest.mall?.name || '',
-            })});
-          }
-        `);
-      }
+    if (nearest.type === 'place') {
+      setSingleSelectedPlaceId(nearest._id);
+      webViewRef.current.injectJavaScript(`
+        if (window.mapInstance) {
+          window.mapInstance.flyTo({ center: [${nearest.lon}, ${nearest.lat}], zoom: 15 });
+        }
+        if (window.highlightSinglePlace) {
+          window.highlightSinglePlace('${nearest._id}');
+        }
+      `);
+    } else {
+      webViewRef.current.injectJavaScript(`
+        if (window.highlightShopLocation) {
+          window.highlightShopLocation(${JSON.stringify({
+            lat: nearest.lat,
+            lon: nearest.lon,
+            name: nearest.name || '',
+            mallName: nearest.mall?.name || '',
+          })});
+        }
+      `);
     }
-
-    // Mark as done so this never runs again during this screen session
     initialNearestSet.current = true;
-  }, [mapReady, places, allMallShops, userLocation]);
-  // --- END of new auto‑select logic ---
+  }, [mapReady, places, allMallShops, allMallShopsLoaded, userLocation]);
 
   // Search logic (mall shops filtered locally)
   const performSearch = useCallback((query) => {
@@ -657,6 +714,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     });
 
     setMatchingResults(matched);
+    mapOfflineCache.saveSearch(trimmed, matched).catch(() => {});
 
     // Nearby shops
     let nearby = [];
@@ -687,7 +745,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       });
       setShopSearchResults(mallShops);
     } else {
-      fetchShopsBySearch(trimmed);
+      if (isOnline) fetchShopsBySearch(trimmed);
     }
 
     // Filter map markers to show only matching local places
@@ -706,11 +764,16 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         `);
       }
     }
-  }, [places, userLocation, allMallShops, allMallShopsLoaded]);
+  }, [places, userLocation, allMallShops, allMallShopsLoaded, isOnline, fetchShopsBySearch]);
 
   const fetchShopsBySearch = useCallback(async (query) => {
     if (!query.trim()) {
       setShopSearchResults([]);
+      return;
+    }
+    if (!networkStatus.get().isConnected || !networkStatus.get().isInternetReachable) {
+      const cached = await mapOfflineCache.search(query);
+      setShopSearchResults(cached);
       return;
     }
     try {
@@ -722,6 +785,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       });
       if (response.data && response.data.shops) {
         setShopSearchResults(response.data.shops);
+        await mapOfflineCache.saveSearch(query, response.data.shops);
       } else {
         setShopSearchResults([]);
       }
@@ -770,6 +834,10 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     } else {
       const query = searchQuery.trim();
       if (query.length > 0 && webViewRef.current) {
+        if (!isOnline) {
+          Alert.alert(t.noResultsTitle, t.offlineSearch);
+          return;
+        }
         webViewRef.current.injectJavaScript(`
           window.searchPlace("${query.replace(/"/g, '\\"')}");
         `);
@@ -916,11 +984,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     setLoading(false);
     setMapReady(true);
     fetchPlaces();
-
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    intervalRef.current = setInterval(() => {
-      fetchPlacesSilent();
-    }, 1000);
   };
 
   useEffect(() => {
@@ -1108,6 +1171,12 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   // My Shops
   const userPlaces = places.filter(p => p.userId === user?._id);
+
+  useEffect(() => {
+    if (!mapReady || !user?._id || userPlaces.length === 0 || autoOpenedMyShops.current) return;
+    autoOpenedMyShops.current = true;
+    setMyShopsVisible(true);
+  }, [mapReady, user?._id, userPlaces.length]);
 
   const deletePlace = async (placeId) => {
     Alert.alert(
@@ -1533,9 +1602,10 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   };
 
   const renderMyShopsModal = () => (
-    <Modal visible={myShopsVisible} animationType="slide" transparent>
-      <View style={styles.modalOverlay}>
-        <View style={[styles.modalContent, { backgroundColor: cardBg }]}>
+    <Modal visible={myShopsVisible} animationType="slide" transparent onRequestClose={() => setMyShopsVisible(false)}>
+      <View style={styles.myShopsOverlay}>
+        <View style={[styles.myShopsSheet, { backgroundColor: cardBg }]}>
+          <View style={[styles.sheetHandle, { backgroundColor: secondaryText }]} />
           <View style={styles.modalHeader}>
             <Text style={[styles.modalTitle, { color: textColor }]}>{t.myShops}</Text>
             <TouchableOpacity onPress={() => setMyShopsVisible(false)}>
@@ -1795,7 +1865,9 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
         {loading && (
           <View style={[styles.loadingOverlay, { backgroundColor: overlayColor }]}>
-            <Animated.Image source={loadingLogo} style={[styles.loadingImage, { transform: [{ scale: scaleAnim }] }]} resizeMode="contain" />
+            <View style={styles.loadingBadge}>
+              <Animated.Image source={loadingLogo} style={[styles.loadingImage, { transform: [{ scale: scaleAnim }] }]} resizeMode="contain" />
+            </View>
             <Text style={[styles.loadingText, { color: textColor }]}>{t.loading}</Text>
           </View>
         )}
@@ -1953,7 +2025,20 @@ const styles = StyleSheet.create({
   mapContainer: { flex: 1, position: 'relative' },
   map: { flex: 1 },
   loadingOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center' },
-  loadingImage: { width: 150, height: 150 },
+  loadingBadge: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
+  },
+  loadingImage: { width: 110, height: 110 },
   loadingText: { marginTop: 22, fontSize: 16 },
 
   touchOutsideOverlay: {
@@ -2082,6 +2167,9 @@ const styles = StyleSheet.create({
 
   modalOverlay: { flex: 1, backgroundColor: 'transparent', justifyContent: 'center', alignItems: 'center' },
   modalContent: { width: '80%', borderRadius: 16, padding: 20, borderWidth: 0.5, borderColor: 'rgba(0,0,0,0.1)' },
+  myShopsOverlay: { flex: 1, backgroundColor: 'transparent', justifyContent: 'flex-end' },
+  myShopsSheet: { width: '100%', maxHeight: '75%', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 32 },
+  sheetHandle: { alignSelf: 'center', width: 42, height: 5, borderRadius: 3, marginBottom: 14, opacity: 0.5 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   modalTitle: { fontSize: 20, fontWeight: 'bold' },
   loginModalContent: { width: '80%', borderRadius: 16, padding: 20, borderWidth: 0.5 },

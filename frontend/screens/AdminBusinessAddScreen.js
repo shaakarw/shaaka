@@ -18,6 +18,8 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { Ionicons } from '@expo/vector-icons';
 import { normalizeRwandaPhone, isValidRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import AdminScreenHeader from '../components/AdminScreenHeader';
 
 // ---------- Full Translations ----------
 const translations = {
@@ -507,16 +509,26 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
-      <View style={styles.tabBar}>
+      {!showForm && (
+        <AdminScreenHeader
+          title={t.businessTab}
+          theme={theme}
+          onBack={() => navigation.goBack()}
+          actionIcon="refresh-outline"
+          actionLabel="Refresh business data"
+          onAction={fetchItems}
+        />
+      )}
+      <View style={[styles.tabBar, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
         {['jobs', 'skills', 'business'].map((tab) => {
           const label = tab === 'jobs' ? t.jobsTab : tab === 'skills' ? t.skillsTab : t.businessTab;
           return (
             <TouchableOpacity
               key={tab}
-              style={[styles.tab, activeTab === tab && styles.activeTab]}
+              style={[styles.tab, activeTab === tab && styles.activeTab, { backgroundColor: activeTab === tab ? theme.background : 'transparent' }]}
               onPress={() => { setActiveTab(tab); setShowForm(false); resetForm(); }}
             >
-              <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>{label}</Text>
+              <Text style={[styles.tabText, { color: activeTab === tab ? theme.text : theme.textSecondary }]}>{label}</Text>
             </TouchableOpacity>
           );
         })}
@@ -534,7 +546,9 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
           </View>
 
           {loadingList ? (
-            <ActivityIndicator size="large" color={theme.accent} style={{ marginTop: 40 }} />
+            <View style={{ height: 180 }}>
+              <ShaakaLoadingScreen backgroundColor={theme.background} textColor={theme.text} hideText compact />
+            </View>
           ) : items.length === 0 ? (
             <View style={styles.emptyView}>
               <Text style={[styles.emptyText, { color: theme.textSecondary }]}>{t.noData}</Text>
@@ -618,7 +632,7 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   tabBar: {
     flexDirection: 'row', marginHorizontal: 16, marginTop: 12, marginBottom: 8,
-    backgroundColor: '#f0f0f0', borderRadius: 12, padding: 4,
+    borderWidth: 1, borderRadius: 12, padding: 4,
   },
   tab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: 10 },
   activeTab: { backgroundColor: '#fff' },

@@ -5,9 +5,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '../constants';
 import { useTheme } from '../context/ThemeContext';
 
-export default function ChangePasswordScreen({ navigation, language = 'English' }) {
+export default function ChangePasswordScreen({ navigation, route, language = 'English' }) {
   const { theme } = useTheme();
   const rw = language === 'Kinyarwanda';
+  const adminMode = route?.params?.adminMode === true;
   const [step, setStep] = useState(1);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -20,6 +21,14 @@ export default function ChangePasswordScreen({ navigation, language = 'English' 
   const newPasswordRef = useRef(null);
   const confirmPasswordRef = useRef(null);
 
+  const getAuthToken = async () => {
+    if (adminMode) {
+      const adminToken = await AsyncStorage.getItem('adminToken');
+      if (adminToken) return adminToken;
+    }
+    return AsyncStorage.getItem('userToken');
+  };
+
   const verifyCurrentPassword = async () => {
     if (!currentPassword) {
       setError(rw ? 'Andika ijambo banga risanzwe.' : 'Enter your current password.');
@@ -27,7 +36,11 @@ export default function ChangePasswordScreen({ navigation, language = 'English' 
     }
     setLoading(true);
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken();
+      if (!token) {
+        setError(rw ? 'Injira ubundi mbere.' : 'Please log in first.');
+        return;
+      }
       await axios.post(`${BASE_URL}/api/auth/verify-current-password`, { currentPassword }, { headers: { Authorization: `Bearer ${token}` } });
       setError('');
       setStep(2);
@@ -53,7 +66,11 @@ export default function ChangePasswordScreen({ navigation, language = 'English' 
     }
     setLoading(true);
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken();
+      if (!token) {
+        setError(rw ? 'Injira ubundi mbere.' : 'Please log in first.');
+        return;
+      }
       await axios.put(`${BASE_URL}/api/auth/change-password`, { currentPassword, newPassword }, { headers: { Authorization: `Bearer ${token}` } });
       Alert.alert(rw ? 'Byakunze' : 'Success', rw ? 'Ijambo banga ryahinduwe.' : 'Password changed successfully.');
       navigation.goBack();

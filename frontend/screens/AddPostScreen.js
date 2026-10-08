@@ -21,21 +21,26 @@ import { useTheme } from '../context/ThemeContext';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { useFocusEffect, useRoute } from '@react-navigation/native';
-import { computeAggregatedLimits, MAX_IMAGES_PER_POST } from '../utils/subscriptionHelpers';
+import { computeAggregatedLimits } from '../utils/subscriptionHelpers';
 import { normalizeRwandaPhone } from '../utils/phoneNormalizer';
 import { useAuth, useUserLimits } from '../context/AuthContext';
 import Logo from '../assets/logos.png';
 import { useBottomSheet } from '../context/BottomSheetContext';
+import VideoUploader from '../components/VideoUploader';
+import ArrowUploadLoader from '../components/ArrowUploadLoader';
+import VideoPost from '../components/VideoPost';
 
 const { width } = Dimensions.get('window');
 
 // Target size for compression (same as the HTML page)
 const MAX_COMPRESSED_BYTES = 100 * 1024; // 100 KB
+const MIN_IMAGE_HEIGHT = 300;
+const MAX_IMAGE_HEIGHT = 700;
 
 // Pre‑resize target dimensions
 const TARGET_MAX_WIDTH = 600;
@@ -56,11 +61,10 @@ const prepareUploadFile = async (image) => {
 // ---------- Translations (unchanged) ----------
 const translations = {
   English: {
-    title: 'Create New Post',
     subtitle: 'Share your product or service',
-    step1: 'Images',
-    step2: 'Product Details',
-    step3: 'Location & Price',
+    step1: '',
+    step2: '',
+    step3: '',
     step4: '',
     productName: 'Product name:',
     description: 'Description:',
@@ -69,7 +73,7 @@ const translations = {
     priceNegotiable: 'Price Negotiable',
     addImages: 'Add Images',
     maxImages: 'Maximum {max} images',
-    selectMultiple: 'Select Multiple Images',
+    selectMultiple: 'Choose Image',
     takePhoto: 'Take Photo',
     chooseFromLibrary: 'Choose from Gallery',
     removeImage: 'Remove',
@@ -80,6 +84,9 @@ const translations = {
     fillRequired: 'Please fill all required fields',
     selectImages: 'Please select at least 1 image',
     selectMedia: 'Please select at least one image',
+    imageTooShort: 'This image is too short to upload. Minimum height is {min} px.',
+    videoTooShort: 'This video is too short to upload. Minimum height is {min} px.',
+    videoTooTall: 'This video is over {max} px high. Crop it to {min}-{max} px in a video editor, then select it again.',
     postSuccess: 'Your post has been created successfully!',
     postFailed: 'Failed to post. Please try again.',
     preview: 'Preview',
@@ -142,61 +149,63 @@ const translations = {
     cancel: 'Cancel',
   },
   Kinyarwanda: {
-    title: 'Kora Icyatangazo Gishya',
     subtitle: 'Sangiza ibicuruzwa byawe',
-    step1: 'Amashusho',
-    step2: 'Ibisobanuro by’Igicuruzwa',
-    step3: 'Aho uri & Igiciro',
+    step1: '',
+    step2: '',
+    step3: '',
     step4: '',
     productName: 'Izina ry’Igicuruzwa:',
     description: 'Ibisobanuro:',
     location: 'Aho uri:',
     price: 'Igiciro (FRW):',
-    priceNegotiable: 'Igiciro girahamagara',
-    addImages: 'Ongeraho Amashusho',
+    priceNegotiable: 'Igiciro kiganirwaho',
+    addImages: 'Shyiraho Amashusho',
     maxImages: 'Amashusho angana {max} gusa',
-    selectMultiple: 'Hitamo Amashusho Menshi',
+    selectMultiple: 'Hitamo Ifoto',
     takePhoto: 'Fata Ifoto',
-    chooseFromLibrary: 'Hitamo mu Bubiko',
+    chooseFromLibrary: 'Koresha ayo ufite',
     removeImage: 'Kuraho',
-    next: 'Urukurikire',
+    next: 'Ibikurikiye',
     back: 'Subira inyuma',
     post: 'Tangaza',
-    posting: 'Iratangazwa...',
+    posting: 'Gutangaza...',
     fillRequired: 'Nyamuneka andika ibisabwa byose',
-    selectImages: 'Nyamuneka hitamo amashusho 1 byibuze',
+    selectImages: 'Nyamuneka hitamo ishusho 1 byibuze',
     selectMedia: 'Nyamuneka hitamo amashusho byibuze',
-    postSuccess: 'Icyatangazo cyawe cyakozwe neza!',
-    postFailed: 'Kutanga byanze. Ongera ugerageze.',
+    imageTooShort: 'Iyi foto ni ngufi cyane ku buryo wayishyiraho. Uburebure ntarengwa ni {min} px.',
+    videoTooShort: 'Iyi videwo ni ngufi cyane ku buryo wayishyiraho. Uburebure ntarengwa ni {min} px.',
+    videoTooTall: 'Iyi videwo irengeje {max} px. Yigabanye ibe hagati ya {min}-{max} px muri porogaramu yo guhindura videwo, wongere uyihitemo.',
+    postSuccess: 'Gutangaza byakozwe neza!',
+    postFailed: 'Gutangaza byanze. Ongera ugerageze.',
     preview: 'Reba',
     edit: 'Hindura',
-    negotiable: 'Biragahamagara',
-    fixed: 'Ntabwo bihamagara',
+    negotiable: 'Cyiraganirwaho',
+    fixed: 'Ntabwo cyiganirwaho',
     postCreated: 'Byakunze!',
     contactNumberCall: 'Numero ya Telefone (Guhamura):',
-    contactNumberWhatsApp: 'Numero ya WhatsApp (Bishakiye):',
+    contactNumberWhatsApp: 'Numero ya WhatsApp (WhatsApp):',
     phoneError: 'Numero igomba gutangira na 072, 073, 078, cyangwa 079 kandi ibe imibare 10',
-    phoneRequired: 'Nyamuneka tangiza numero yo guhamura',
+    phoneRequired: 'Nyamuneka shyiraho nimero',
     descriptionLength: 'Ibisobanuro bigomba kuba hagati y\'amagambo 10 na 30',
-    minChars: 'Ukennye amagambo 10',
-    maxChars: 'Urenga amagambo 30',
+    minChars: 'Byibuze amgambo 10',
+    maxChars: 'Nturenze amagambo 30',
     step2HintTitle: '#Ibisobanuro by’Igicuruzwa#',
     step2HintMessages: [
-      'Andika izina ry’igicuruzwa ryiza (inyuguti 10 ntarengwa).',
+      'Andika izina ry’igicuruzwa (inyuguti 10 ntarengwa).',
       'Sobanura igicuruzwa cyawe neza mu magambo 10-30.',
       'Ibisobanuro byiza bifasha abaguzi kumva icyo utanga.',
     ],
     step3HintTitle: '#Aho uri & Igiciro#',
     step3HintMessages: [
-      'Bwira abaguzi aho uri — ahantu hagurisha!',
-      'Shyira igiciro cyiza kugirango ube abantu benshi.',
-      'Nimero ya telefone irakenerwa kugirango abaguzi bagushe.',
+      'Bwira abaguzi icyo ugurisha cyibarizwa!',
+      'Shyira igiciro cyiza kugirango uboone abaguzi beshi.',
+      'Nimero ya telefone irakenerwa kubaguzi/abagura.',
     ],
     step4HintTitle: '#Iherezo ryiza#',
     step4HintMessages: [
-      'Reba igicuruzwa cyawe mbere yo kugitangaza.',
+      'Genzura igicuruzwa cyawe mbereyo gutangaza.',
       'Menya neza ko nimero zawe ziriho.',
-      'Ushobora guhindura nyuma uhereye kuri profile yawe.',
+      'Ntusho guhindura cyeretse usibize ikongera bundi bushha',
     ],
     loadingLimits: 'Turareba urugero rwawe...',
     cooldownPostMessage: 'Ugomba gutegereza amasaha {hours} mbere yo kongera gutangaza.',
@@ -235,7 +244,7 @@ const SimplePostPreview = ({ productName, images, theme }) => {
   return (
     <View style={[styles.simplePreviewContainer, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
       {hasImage ? (
-        <Image source={{ uri: images[0].uri }} style={styles.simplePreviewImage} />
+        <Image source={{ uri: images[0].uri }} style={styles.simplePreviewImage} resizeMode="cover" />
       ) : (
         <View style={[styles.simplePreviewImage, styles.placeholderBg, { backgroundColor: theme.border }]}>
           <Ionicons name="image-outline" size={40} color={theme.textSecondary} />
@@ -259,6 +268,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
   const t = translations[language];
   const { showBottomSheet, closeBottomSheet } = useBottomSheet();
   const route = useRoute();
+  const cropFlowPendingRef = useRef(false);
 
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -271,12 +281,37 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
     price: '',
     priceNegotiable: false,
     images: [],
+    video: null,
+    videoLink: '',
     contactNumberCall: '07',
     contactNumberWhatsApp: '',
   });
   const [whatsappSameAsCall, setWhatsappSameAsCall] = useState(false);
 
   const [priceDisplay, setPriceDisplay] = useState('');
+
+  useEffect(() => {
+    const croppedImageUri = route.params?.croppedImageUri;
+    if (!croppedImageUri) return;
+
+    const addCroppedImage = async () => {
+      try {
+        const processedImage = await processImageForUpload(croppedImageUri);
+        setFormData(prev => ({ ...prev, images: [processedImage], video: null }));
+      } catch (err) {
+        console.warn('Cropped image processing failed:', err);
+        showBottomSheet({
+          type: 'error',
+          title: 'Image Error',
+          message: 'Unable to process this image. Please try another image.',
+          buttonText: 'OK',
+        });
+      } finally {
+        navigation.setParams?.({ croppedImageUri: undefined });
+      }
+    };
+    addCroppedImage();
+  }, [route.params?.croppedImageUri]);
 
   useEffect(() => {
     if (!formData.price) {
@@ -288,22 +323,44 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadStatusMessage, setUploadStatusMessage] = useState('');
+  const uploadLogoScale = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (!loading) return undefined;
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(uploadLogoScale, { toValue: 1.15, duration: 800, useNativeDriver: true }),
+        Animated.timing(uploadLogoScale, { toValue: 1, duration: 800, useNativeDriver: true }),
+      ])
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [loading, uploadLogoScale]);
 
   const [remainingPosts, setRemainingPosts] = useState(1);
   const [remainingPostImages, setRemainingPostImages] = useState(1);
   const [maxPostsPerDay, setMaxPostsPerDay] = useState(1);
   const [maxPostImagesPerDay, setMaxPostImagesPerDay] = useState(2);
-  const [maxImagesPerPost] = useState(MAX_IMAGES_PER_POST);
+  const [maxImagesPerPost] = useState(1);
   const [totalPostsUsed, setTotalPostsUsed] = useState(0);
   const [maxTotalPosts, setMaxTotalPosts] = useState(Infinity);
   const [totalPostImagesUsed, setTotalPostImagesUsed] = useState(0);
   const [maxTotalPostImages, setMaxTotalPostImages] = useState(Infinity);
   const [postCooldownHours, setPostCooldownHours] = useState(0);
+  const [allowVideoUpload, setAllowVideoUpload] = useState(false);
+  const [videoUploadLimitPerDay, setVideoUploadLimitPerDay] = useState(0);
+  const [videosToday, setVideosToday] = useState(0);
 
   const [limitsLoading, setLimitsLoading] = useState(true);
   const [hintIndex, setHintIndex] = useState(0);
   const [showHint, setShowHint] = useState(false);
   const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  const videoUploadDisabled =
+    limitsLoading ||
+    !allowVideoUpload ||
+    videoUploadLimitPerDay <= 0 ||
+    videosToday >= videoUploadLimitPerDay;
 
   const productNameRef = useRef(null);
   const descriptionRef = useRef(null);
@@ -312,138 +369,86 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
   const phoneRef = useRef(null);
   const whatsappRef = useRef(null);
 
-  // ---------- Helper functions for compression ----------
+  // ---------- Helper functions for local image processing ----------
   const getImageDimensions = (uri) => {
     return new Promise((resolve, reject) => {
       Image.getSize(uri, (width, height) => resolve({ width, height }), reject);
     });
   };
 
-  const checkWebPSupport = async () => {
-    try {
-      const testResult = await ImageManipulator.manipulateAsync(
-        'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==',
-        [],
-        { format: ImageManipulator.SaveFormat.WEBP, compress: 0.8 }
-      );
-      return testResult.uri ? true : false;
-    } catch (e) {
-      return false;
+  const getExifRotation = (exif = null) => {
+    if (!exif) return 0;
+
+    const orientation = exif.Orientation ?? exif.orientation ?? exif['Orientation'];
+    const normalized = Number(orientation);
+
+    if (Number.isNaN(normalized)) return 0;
+
+    switch (normalized) {
+      case 3:
+      case 4:
+        return 180;
+      case 5:
+      case 6:
+      case 7:
+      case 8:
+        return 90;
+      default:
+        return 0;
     }
   };
 
-  const compressImageToTarget = async (sourceUri) => {
+  const processImageForUpload = async (sourceUri, exif = null) => {
+    if (!sourceUri) {
+      throw new Error('No image selected');
+    }
+
     const { width: originalWidth, height: originalHeight } = await getImageDimensions(sourceUri);
+    const rotation = getExifRotation(exif);
+    const orientedWidth = rotation % 180 === 0 ? originalWidth : originalHeight;
+    const orientedHeight = rotation % 180 === 0 ? originalHeight : originalWidth;
+    const fitScale = Math.min(1, 500 / orientedHeight);
+    const targetWidth = Math.max(1, Math.round(orientedWidth * fitScale));
+    const targetHeight = Math.max(1, Math.round(orientedHeight * fitScale));
 
-    // Determine output format (WebP if supported, otherwise JPEG)
-    let outputFormat = ImageManipulator.SaveFormat.JPEG;
-    const webpSupported = await checkWebPSupport();
-    if (webpSupported) {
-      outputFormat = ImageManipulator.SaveFormat.WEBP;
-    }
-
-    // Compute effective dimensions (pre‑resize + optional upscale)
-    const getEffectiveDimensions = (w, h) => {
-      let newW = w;
-      let newH = h;
-
-      // Upscale small images by 50% if less than half target
-      const thresholdW = TARGET_MAX_WIDTH * UPSCALE_THRESHOLD_FACTOR;
-      const thresholdH = TARGET_MAX_HEIGHT * UPSCALE_THRESHOLD_FACTOR;
-      if (newW < thresholdW || newH < thresholdH) {
-        newW = Math.round(newW * UPSCALE_FACTOR);
-        newH = Math.round(newH * UPSCALE_FACTOR);
-      }
-
-      // Fit within target dimensions
-      const scaleW = TARGET_MAX_WIDTH / newW;
-      const scaleH = TARGET_MAX_HEIGHT / newH;
-      const scale = Math.min(scaleW, scaleH, 1);
-      newW = Math.max(1, Math.round(newW * scale));
-      newH = Math.max(1, Math.round(newH * scale));
-
-      return { width: newW, height: newH };
-    };
-
-    const effective = getEffectiveDimensions(originalWidth, originalHeight);
-    const longestSide = Math.max(effective.width, effective.height);
-    let startW = effective.width;
-    let startH = effective.height;
-    if (longestSide > 8192) { // safety cap
-      const ratio = 8192 / longestSide;
-      startW = Math.round(startW * ratio);
-      startH = Math.round(startH * ratio);
-    }
-
-    const compressAtDimensions = async (width, height, quality) => {
-      const result = await ImageManipulator.manipulateAsync(
-        sourceUri,
-        [{ resize: { width, height } }],
-        { compress: quality, format: outputFormat }
-      );
-      const fileInfo = await FileSystem.getInfoAsync(result.uri);
-      return { uri: result.uri, size: fileInfo.size };
-    };
-
+    const qualitySequence = [0.9, 0.82, 0.74, 0.66, 0.58, 0.5, 0.42, 0.34, 0.26, 0.18];
     let bestResult = null;
 
-    for (const scale of DIMENSION_SCALES) {
-      const w = Math.round(startW * scale);
-      const h = Math.round(startH * scale);
-      if (w < 16 || h < 16) continue;
+    for (const quality of qualitySequence) {
+      const actions = [];
 
-      // Quick test at quality 0.1 to see if this size can fit under target
-      const tiny = await compressAtDimensions(w, h, 0.1);
-      if (tiny.size > MAX_COMPRESSED_BYTES) continue;
-
-      // Binary search for highest quality under target
-      let low = 0.1;
-      let high = 0.92;
-      let bestQuality = 0.1;
-      let bestBlob = tiny;
-
-      for (let i = 0; i < BINARY_SEARCH_ITERATIONS; i++) {
-        const mid = (low + high) / 2;
-        const compressed = await compressAtDimensions(w, h, mid);
-        if (compressed.size <= MAX_COMPRESSED_BYTES) {
-          bestQuality = mid;
-          bestBlob = compressed;
-          low = mid;
-        } else {
-          high = mid;
-        }
+      if (rotation) {
+        actions.push({ rotate: rotation });
       }
 
-      const candidate = {
-        uri: bestBlob.uri,
-        size: bestBlob.size,
-        width: w,
-        height: h,
-        quality: bestQuality,
+      actions.push({
+        resize: { width: targetWidth, height: targetHeight },
+      });
+
+      const processed = await ImageManipulator.manipulateAsync(
+        sourceUri,
+        actions,
+        { compress: quality, format: ImageManipulator.SaveFormat.JPEG }
+      );
+
+      const info = await FileSystem.getInfoAsync(processed.uri);
+      if (!info.exists || typeof info.size !== 'number') {
+        throw new Error('Unable to get the processed image size.');
+      }
+
+      const result = {
+        uri: processed.uri,
+        type: 'image/jpeg',
+        name: `post_${Date.now()}.jpg`,
+        size: info.size,
       };
-
-      if (!bestResult ||
-          candidate.quality > bestResult.quality ||
-          (Math.abs(candidate.quality - bestResult.quality) < 0.02 &&
-           candidate.width * candidate.height > bestResult.width * bestResult.height)) {
-        bestResult = candidate;
+      if (!bestResult || result.size < bestResult.size) {
+        bestResult = result;
       }
 
-      if (bestQuality >= MIN_ACCEPTABLE_QUALITY) {
-        break; // Good enough, stop searching
+      if (result.size < MAX_COMPRESSED_BYTES) {
+        return result;
       }
-    }
-
-    if (!bestResult) {
-      // Fallback: use original with minimal quality
-      const fallback = await compressAtDimensions(startW, startH, 0.1);
-      bestResult = {
-        uri: fallback.uri,
-        size: fallback.size,
-        width: startW,
-        height: startH,
-        quality: 0.1,
-      };
     }
 
     return bestResult;
@@ -468,6 +473,9 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         setMaxPostImagesPerDay(limits.totalPostImagesPerDay);
         setMaxTotalPosts(limits.maxTotalPosts);
         setMaxTotalPostImages(limits.maxTotalPostImages || Infinity);
+        setAllowVideoUpload(user.allowVideoUpload === true);
+        setVideoUploadLimitPerDay(typeof user.videoUploadLimitPerDay === 'number' ? Math.max(0, user.videoUploadLimitPerDay) : 0);
+        setVideosToday(typeof user.videosToday === 'number' ? user.videosToday : 0);
 
         setRemainingPosts(user.remainingPosts ?? limits.postsPerDay);
         setRemainingPostImages(user.remainingPostImages ?? user.remainingImages ?? limits.totalPostImagesPerDay);
@@ -489,19 +497,25 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
     price: '',
     priceNegotiable: false,
     images: [],
+    video: null,
+    videoLink: '',
     contactNumberCall: '07',
     contactNumberWhatsApp: '',
   };
 
   useFocusEffect(
     React.useCallback(() => {
-      setFormData(initialFormState);
-      setPriceDisplay('');
-      setStep(1);
-      setError('');
-      setLoading(false);
-      setUploadProgress(0);
-      setUploadStatusMessage('');
+      const returningFromCrop = cropFlowPendingRef.current;
+      cropFlowPendingRef.current = false;
+      if (!returningFromCrop) {
+        setFormData(initialFormState);
+        setPriceDisplay('');
+        setStep(1);
+        setError('');
+        setLoading(false);
+        setUploadProgress(0);
+        setUploadStatusMessage('');
+      }
       fetchLimitsAndUsage();
       checkLoginAndPrompt();
     }, [])
@@ -561,7 +575,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 
   useEffect(() => {
     const backAction = () => {
-      navigation.navigate('BuyPost', { activeTab: 'ushaka' });
+      navigation.navigate('Main', { screen: 'BuyPost', params: { activeTab: 'ushaka' } });
       return true;
     };
     const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
@@ -570,6 +584,26 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 
   const handleChange = (field, value) => {
     setFormData({ ...formData, [field]: value });
+    setError('');
+  };
+
+  const handleVideoChange = (video, errorMessage) => {
+    if (errorMessage) {
+      setError(errorMessage);
+      return;
+    }
+    if (video) {
+      const videoHeight = Number(video.height);
+      if (!Number.isFinite(videoHeight) || videoHeight < MIN_IMAGE_HEIGHT) {
+        setError(t.videoTooShort.replace('{min}', MIN_IMAGE_HEIGHT));
+        return;
+      }
+      if (videoHeight > MAX_IMAGE_HEIGHT) {
+        setError(t.videoTooTall.replace('{min}', MIN_IMAGE_HEIGHT).replace('{max}', MAX_IMAGE_HEIGHT));
+        return;
+      }
+    }
+    setFormData(prev => ({ ...prev, video, images: video ? [] : prev.images }));
     setError('');
   };
 
@@ -628,6 +662,38 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 
   const countWords = (text) => text.trim().split(/\s+/).filter(w => w.length > 0).length;
 
+  const openCropScreen = (uri) => {
+    cropFlowPendingRef.current = true;
+    navigation.navigate('CropImage', { imageUri: uri, language });
+  };
+
+  const handlePickedImage = async (asset) => {
+    try {
+      const { width: imageWidth, height: imageHeight } = await getImageDimensions(asset.uri);
+      const rotation = getExifRotation(asset.exif);
+      const orientedHeight = rotation % 180 === 0 ? imageHeight : imageWidth;
+      if (orientedHeight < MIN_IMAGE_HEIGHT) {
+        setError(t.imageTooShort.replace('{min}', MIN_IMAGE_HEIGHT));
+        return;
+      }
+      if (orientedHeight > MAX_IMAGE_HEIGHT) {
+        openCropScreen(asset.uri);
+        return;
+      }
+
+      const processed = await processImageForUpload(asset.uri, asset.exif);
+      setFormData(prev => ({ ...prev, images: [processed], video: null }));
+    } catch (err) {
+      console.warn('Image processing failed:', err);
+      showBottomSheet({
+        type: 'error',
+        title: 'Image Error',
+        message: 'Unable to process this image. Please try another image.',
+        buttonText: 'OK',
+      });
+    }
+  };
+
   // ---------- Image pickers with compression ----------
   const selectMultipleImages = async () => {
     if (formData.images.length >= maxImagesPerPost) {
@@ -652,35 +718,13 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
       }
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
-        allowsMultipleSelection: true,
-        quality: 1, // we will compress ourselves
-        selectionLimit: maxImagesPerPost - formData.images.length,
+        allowsMultipleSelection: false,
+        quality: 1,
+        exif: true,
+        selectionLimit: 1,
       });
       if (!result.canceled && result.assets?.length > 0) {
-        const remainingSlots = maxImagesPerPost - formData.images.length;
-        const selectedAssets = result.assets.slice(0, remainingSlots);
-
-        // Compress each image sequentially to avoid memory issues
-        const compressedImages = [];
-        for (const asset of selectedAssets) {
-          try {
-            const compressed = await compressImageToTarget(asset.uri);
-            compressedImages.push({
-              uri: compressed.uri,
-              type: 'image/jpeg', // or based on format, but fine
-              name: `post_${Date.now()}_${Math.random()}.jpg`,
-            });
-          } catch (err) {
-            console.warn('Compression failed for one image, using original', err);
-            // Fallback to original if compression fails
-            compressedImages.push({
-              uri: asset.uri,
-              type: 'image/jpeg',
-              name: `post_${Date.now()}_${Math.random()}.jpg`,
-            });
-          }
-        }
-        setFormData(prev => ({ ...prev, images: [...prev.images, ...compressedImages] }));
+        await handlePickedImage(result.assets[0]);
       }
     } catch (err) {
       showBottomSheet({
@@ -716,27 +760,10 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         return;
       }
       const result = useCamera
-        ? await ImagePicker.launchCameraAsync({ allowsEditing: true, quality: 1 })
-        : await ImagePicker.launchImageLibraryAsync({ allowsEditing: true, quality: 1 });
+        ? await ImagePicker.launchCameraAsync({ allowsEditing: true, quality: 1, exif: true })
+        : await ImagePicker.launchImageLibraryAsync({ allowsEditing: true, quality: 1, exif: true });
       if (!result.canceled && result.assets?.[0]) {
-        const asset = result.assets[0];
-        try {
-          const compressed = await compressImageToTarget(asset.uri);
-          const newImage = {
-            uri: compressed.uri,
-            type: 'image/jpeg',
-            name: `post_${Date.now()}.jpg`,
-          };
-          setFormData(prev => ({ ...prev, images: [...prev.images, newImage] }));
-        } catch (err) {
-          // Fallback to original
-          const newImage = {
-            uri: asset.uri,
-            type: 'image/jpeg',
-            name: `post_${Date.now()}.jpg`,
-          };
-          setFormData(prev => ({ ...prev, images: [...prev.images, newImage] }));
-        }
+        await handlePickedImage(result.assets[0]);
       }
     } catch (err) {
       showBottomSheet({
@@ -758,7 +785,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
   const validateStep = () => {
     switch (step) {
       case 1:
-        if (formData.images.length === 0) {
+        if (formData.images.length === 0 && !formData.video) {
           setError(t.selectMedia);
           return false;
         }
@@ -885,6 +912,8 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
       return;
     }
 
+    setLoading(true);
+    setUploadProgress(0);
     showBottomSheet({
       type: 'loading',
       title: t.uploadingPost,
@@ -925,6 +954,21 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         }
 
         fd.append('images', uploadImage, fileName);
+      }
+
+      if (formData.video) {
+        if (!allowVideoUpload || videoUploadLimitPerDay <= 0) {
+          throw new Error('Video uploads are not allowed for your account. Please contact the admin for support.');
+        }
+        if (videosToday >= videoUploadLimitPerDay) {
+          throw new Error(`Video upload limit reached. You can upload up to ${videoUploadLimitPerDay} video(s) today.`);
+        }
+        const videoUpload = await prepareUploadFile(formData.video);
+        fd.append('video', videoUpload, formData.video.name || `video_${Date.now()}.mp4`);
+        fd.append('videoDuration', String(formData.video.duration || 0));
+      }
+      if (formData.videoLink.trim()) {
+        fd.append('videoLink', formData.videoLink.trim());
       }
 
       let response;
@@ -976,7 +1020,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
           buttonText: 'OK',
           autoDismiss: 3000,
           onDismiss: () => {
-            navigation.navigate('BuyPost', { activeTab: 'utanga', refresh: true });
+            navigation.navigate('Main', { screen: 'BuyPost', params: { activeTab: 'utanga', refresh: true } });
           },
         });
       } else {
@@ -1104,80 +1148,84 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
   const renderStep4Content = () => {
     const formattedPrice = formData.price ? `${Number(formData.price).toLocaleString()} RWF` : '0 RWF';
     const negotiableText = formData.priceNegotiable ? t.negotiable : t.fixed;
+    const previewImage = formData.images[0]?.uri;
 
     return (
-      <View style={[styles.step4Container, { 
-        backgroundColor: isDarkMode ? '#111' : '#dddddd',
-        borderColor: theme.border,
-      }]}>
-        {formData.images.length > 0 ? (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.step4ImageScroll}>
-            {formData.images.map((img, idx) => (
-              <Image key={idx} source={{ uri: img.uri }} style={styles.step4Image} />
-            ))}
-          </ScrollView>
-        ) : (
-          <View style={[styles.step4NoImage, { backgroundColor: theme.border }]}>
-            <Ionicons name="image-outline" size={48} color={theme.textSecondary} />
-            <Text style={{ color: theme.textSecondary, marginTop: 8 }}>No images selected</Text>
+      <View style={[styles.step4Container, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
+        {previewImage ? (
+          <View style={styles.step4HeroWrap}>
+            <Image source={{ uri: previewImage }} style={styles.step4HeroImage} resizeMode="cover" />
+            <View style={styles.step4HeroShade} />
+            <TouchableOpacity style={styles.step4FavoriteButton} accessibilityRole="button" accessibilityLabel="Save preview">
+              <Ionicons name="heart-outline" size={22} color="#555" />
+            </TouchableOpacity>
+            {formData.images.length > 1 && (
+              <View style={styles.step4ImageCountBadge}>
+                <Ionicons name="images-outline" size={14} color="#fff" />
+                <Text style={styles.step4ImageCountText}>{formData.images.length}</Text>
+              </View>
+            )}
           </View>
+        ) : (
+          formData.video ? (
+            <VideoPost videoUrl={formData.video.uri} videoDuration={formData.video.duration} theme={theme} />
+          ) : (
+            <View style={[styles.step4HeroPlaceholder, { backgroundColor: theme.border }]}>
+              <Ionicons name="image-outline" size={48} color={theme.textSecondary} />
+              <Text style={{ color: theme.textSecondary, marginTop: 8 }}>No images selected</Text>
+            </View>
+          )
         )}
 
-        <Text style={[styles.step4ProductName, { color: theme.text }]}>{formData.productName || 'Untitled'}</Text>
-
-        {formData.description ? (
-          <Text style={[styles.step4Description, { color: theme.textSecondary }]}>{formData.description}</Text>
-        ) : null}
-
-        <View style={styles.step4Row}>
-          <View style={styles.step4DetailBlock}>
-            <Ionicons name="cash-outline" size={18} color={theme.text} style={{ marginRight: 6 }} />
-            <Text style={[styles.step4DetailText, { color: theme.text }]}>{formattedPrice}</Text>
-            <View style={[styles.negotiableBadge, { backgroundColor: formData.priceNegotiable ? '#e0f2e0' : theme.border }]}>
-              <Text style={[styles.negotiableText, { color: formData.priceNegotiable ? '#2e7d32' : theme.textSecondary }]}>
-                {negotiableText}
+        <View style={styles.step4Info}>
+          <View style={styles.step4TitleRow}>
+            <View style={styles.step4TitleBlock}>
+              <Text style={[styles.step4ProductName, { color: theme.text }]}>{formData.productName || 'Untitled'}</Text>
+              <Text style={[styles.step4Location, { color: theme.textSecondary }]}>
+                <Ionicons name="location" size={14} color={theme.accent} /> {formData.location || 'Location not specified'}
               </Text>
             </View>
+            <Ionicons name="checkmark-circle" size={24} color={theme.accent} />
           </View>
-        </View>
 
-        <View style={styles.step4Row}>
-          <Ionicons name="location-outline" size={18} color={theme.text} style={{ marginRight: 6 }} />
-          <Text style={[styles.step4DetailText, { color: theme.text }]}>{formData.location || 'Not specified'}</Text>
-        </View>
+          <Text style={[styles.step4SectionLabel, { color: theme.text }]}>Description</Text>
+          <Text style={[styles.step4Description, { color: theme.textSecondary }]}>
+            {formData.description || 'No description provided.'}
+          </Text>
 
-        <View style={styles.step4Row}>
-          <Ionicons name="call-outline" size={18} color={theme.text} style={{ marginRight: 6 }} />
-          <Text style={[styles.step4DetailText, { color: theme.text }]}>{formData.contactNumberCall}</Text>
-        </View>
-        {formData.contactNumberWhatsApp ? (
-          <View style={styles.step4Row}>
-            <Ionicons name="logo-whatsapp" size={18} color="#47ae87" style={{ marginRight: 6 }} />
-            <Text style={[styles.step4DetailText, { color: theme.text }]}>{formData.contactNumberWhatsApp}</Text>
+          <Text style={[styles.step4SectionLabel, { color: theme.text }]}>Details</Text>
+          <View style={styles.step4FacilitiesRow}>
+            <View style={styles.step4Facility}>
+              <Ionicons name="cash-outline" size={21} color={theme.accent} />
+              <Text style={[styles.step4FacilityLabel, { color: theme.textSecondary }]}>{negotiableText}</Text>
+            </View>
+            <View style={styles.step4Facility}>
+              <Ionicons name="call-outline" size={21} color={theme.accent} />
+              <Text style={[styles.step4FacilityLabel, { color: theme.textSecondary }]}>{formData.contactNumberCall || 'No phone'}</Text>
+            </View>
+            <View style={styles.step4Facility}>
+              <Ionicons name="images-outline" size={21} color={theme.accent} />
+              <Text style={[styles.step4FacilityLabel, { color: theme.textSecondary }]}>{formData.images.length} image{formData.images.length === 1 ? '' : 's'}</Text>
+            </View>
           </View>
-        ) : null}
 
-        <TouchableOpacity
-          style={[styles.step4BackButton, { borderColor: theme.accent }]}
-          onPress={prevStep}
-        >
-          <Ionicons name="arrow-back-outline" size={20} color={theme.accent} />
-          <Text style={[styles.step4BackButtonText, { color: theme.accent }]}>{t.back}</Text>
-        </TouchableOpacity>
+          <View style={[styles.step4BottomBar, { borderTopColor: theme.border }]}>
+            <View>
+              <Text style={[styles.step4PriceLabel, { color: theme.textSecondary }]}>Price</Text>
+              <Text style={[styles.step4Price, { color: theme.text }]}>{formattedPrice}</Text>
+            </View>
+            <TouchableOpacity style={[styles.step4PostButton, { backgroundColor: theme.accent }]} onPress={handlePost} disabled={loading}>
+              {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.step4PostButtonText}>{t.post}</Text>}
+            </TouchableOpacity>
+          </View>
 
-        <TouchableOpacity
-          style={[styles.step4PostButton, { backgroundColor: theme.accent }]}
-          onPress={handlePost}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.step4PostButtonText}>{t.post}</Text>
-          )}
-        </TouchableOpacity>
+          <TouchableOpacity style={styles.step4EditButton} onPress={prevStep}>
+            <Ionicons name="chevron-back" size={18} color={theme.accent} />
+            <Text style={[styles.step4BackButtonText, { color: theme.accent }]}>{t.back}</Text>
+          </TouchableOpacity>
 
-        {renderUsageInfo()}
+          {renderUsageInfo()}
+        </View>
       </View>
     );
   };
@@ -1214,6 +1262,14 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
                 <Text style={[styles.step3ImageButtonText, { color: theme.text }]}>{t.selectMultiple}</Text>
               </TouchableOpacity>
             </View>
+            <VideoUploader
+              value={formData.video}
+              onChange={handleVideoChange}
+              videoLink={formData.videoLink}
+              onVideoLinkChange={(videoLink) => handleChange('videoLink', videoLink)}
+              theme={theme}
+              disabled={videoUploadDisabled}
+            />
             {formData.images.length > 0 && (
               <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                 <View style={styles.step3ImagePreviewContainer}>
@@ -1382,12 +1438,27 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
-      {step !== 4 && (
-        <View style={[styles.topHeader, { backgroundColor: theme.cardBackground, borderBottomColor: theme.border }]}>
-          <Text style={[styles.headerTitle, { color: theme.text }]}>{t.title}</Text>
+      {loading && (
+        <View style={styles.publishLoadingOverlay}>
+          <View style={[styles.publishLoadingCard, { backgroundColor: theme.cardBackground }]}>
+            <View style={styles.publishLoadingBadge}>
+              <Animated.Image
+                source={Logo}
+                style={[styles.publishLoadingLogo, { transform: [{ scale: uploadLogoScale }] }]}
+                resizeMode="contain"
+              />
+            </View>
+            <ArrowUploadLoader color={theme.accent} size={58} />
+            <Text style={[styles.publishLoadingTitle, { color: theme.text }]}>{t.pleaseWait}</Text>
+            <Text style={[styles.publishLoadingMessage, { color: theme.textSecondary }]}>{t.uploadingPost}</Text>
+            {uploadProgress > 0 && (
+              <View style={styles.publishProgressTrack}>
+                <View style={[styles.publishProgressFill, { width: `${uploadProgress}%`, backgroundColor: theme.accent }]} />
+              </View>
+            )}
+          </View>
         </View>
       )}
-
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.keyboardView}>
         <ScrollView
           contentContainerStyle={styles.scrollContent}
@@ -1397,7 +1468,6 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
           <Image source={Logo} style={styles.logo} />
 
           <View style={styles.header}>
-            <Text style={[styles.title, { color: theme.text }]}>{t.title}</Text>
             {step === 1 ? (
               <Text style={[styles.subtitle, { color: theme.textSecondary }]}>{t.subtitle}</Text>
             ) : (
@@ -1469,9 +1539,6 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
           )}
         </ScrollView>
 
-        {step !== 4 && (
-          <View style={[styles.fixedBottomBar, { backgroundColor: theme.background, borderTopColor: theme.border }]} />
-        )}
       </KeyboardAvoidingView>
 
       {renderInfoModal()}
@@ -1482,26 +1549,54 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 // ---------- Styles (unchanged) ----------
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  publishLoadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 200,
+    backgroundColor: 'rgba(0,0,0,0.48)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 28,
+  },
+  publishLoadingCard: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: 18,
+    paddingHorizontal: 24,
+    paddingVertical: 28,
+    alignItems: 'center',
+    elevation: 8,
+  },
+  publishLoadingBadge: {
+    width: 94,
+    height: 94,
+    borderRadius: 47,
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 14,
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 3,
+  },
+  publishLoadingLogo: { width: 68, height: 68 },
+  publishLoadingTitle: { fontSize: 18, fontWeight: '700', marginBottom: 6 },
+  publishLoadingMessage: { fontSize: 13, textAlign: 'center' },
+  publishProgressTrack: {
+    width: '100%',
+    height: 6,
+    borderRadius: 3,
+    marginTop: 18,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(128,128,128,0.25)',
+  },
+  publishProgressFill: { height: '100%', borderRadius: 3 },
   keyboardView: { flex: 1 },
   scrollContent: {
     flexGrow: 1,
     paddingHorizontal: 16,
     paddingBottom: 20,
-  },
-  topHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-  },
-  headerTitle: { fontSize: 20, fontWeight: '700' },
-  fixedBottomBar: {
-    paddingHorizontal: 16,
-    paddingVertical: 30,
-    borderTopWidth: 1,
-    paddingBottom: Platform.OS === 'ios' ? 20 : 12,
   },
   buttonRow: {
     flexDirection: 'row',
@@ -1510,7 +1605,6 @@ const styles = StyleSheet.create({
   },
   logo: { width: 80, height: 80, alignSelf: 'center', marginTop: 12 },
   header: { alignItems: 'center', marginBottom: 20 },
-  title: { fontSize: 24, fontWeight: 'bold', marginBottom: 4 },
   subtitle: { fontSize: 13, textAlign: 'center' },
   stepHint: { marginTop: 10, paddingHorizontal: 8, paddingVertical: 6, alignItems: 'center' },
   stepHintTitle: { fontSize: 13, fontWeight: '700', marginBottom: 2 },
@@ -1614,48 +1708,55 @@ const styles = StyleSheet.create({
 
   step4Container: {
     borderRadius: 16,
-    padding: 16,
-    borderWidth: 0,
+    overflow: 'hidden',
+    borderWidth: 1,
   },
-  step4ImageScroll: {
-    marginBottom: 16,
+  step4HeroWrap: { height: 220, position: 'relative' },
+  step4HeroImage: { width: '100%', height: '100%' },
+  step4HeroShade: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.04)' },
+  step4FavoriteButton: {
+    position: 'absolute',
+    right: 14,
+    bottom: 14,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  step4Image: {
-    width: 200,
-    height: 200,
-    borderRadius: 12,
-    marginRight: 12,
+  step4ImageCountBadge: {
+    position: 'absolute',
+    left: 14,
+    bottom: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0,0,0,0.55)',
   },
-  step4NoImage: {
-    height: 200,
+  step4ImageCountText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  step4HeroPlaceholder: {
+    height: 220,
     justifyContent: 'center',
     alignItems: 'center',
-    borderRadius: 12,
-    marginBottom: 16,
   },
-  step4ProductName: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    marginBottom: 8,
-  },
-  step4Description: {
-    fontSize: 14,
-    marginBottom: 16,
-  },
-  step4Row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  step4DetailBlock: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-  },
-  step4DetailText: {
-    fontSize: 14,
-    marginRight: 8,
-  },
+  step4Info: { padding: 16 },
+  step4TitleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  step4TitleBlock: { flex: 1, paddingRight: 10 },
+  step4ProductName: { fontSize: 22, fontWeight: 'bold', marginBottom: 6 },
+  step4Location: { fontSize: 13 },
+  step4SectionLabel: { fontSize: 14, fontWeight: '700', marginTop: 18, marginBottom: 7 },
+  step4Description: { fontSize: 13, lineHeight: 19 },
+  step4FacilitiesRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
+  step4Facility: { alignItems: 'center', flex: 1, paddingHorizontal: 3 },
+  step4FacilityLabel: { fontSize: 10, marginTop: 5, textAlign: 'center' },
+  step4BottomBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, marginTop: 18, paddingTop: 14 },
+  step4PriceLabel: { fontSize: 11 },
+  step4Price: { fontSize: 18, fontWeight: '700', marginTop: 2 },
+  step4EditButton: { flexDirection: 'row', alignItems: 'center', alignSelf: 'center', marginTop: 14, padding: 5 },
   negotiableBadge: {
     paddingHorizontal: 8,
     paddingVertical: 2,
@@ -1681,8 +1782,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   step4PostButton: {
-    marginTop: 20,
-    paddingVertical: 14,
+    minWidth: 112,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
     borderRadius: 24,
     alignItems: 'center',
   },
@@ -1743,6 +1845,9 @@ const styles = StyleSheet.create({
   charCounter: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 5 },
   charCountText: { fontSize: 12 },
   charWarning: { fontSize: 12 },
+
+  videoDisabledNotice: { marginTop: 12, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  videoDisabledText: { fontSize: 13, fontWeight: '500' },
 
   usageInfoContainer: { marginTop: 16, padding: 12, borderRadius: 12, borderWidth: 1 },
   usageHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },

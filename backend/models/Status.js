@@ -19,7 +19,4 @@ const statusSchema = new mongoose.Schema({
   }
 });
 
-// Index for fast lookups by userId
-statusSchema.index({ userId: 1 });
-
 module.exports = mongoose.model('Status', statusSchema);

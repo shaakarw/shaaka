@@ -2,8 +2,7 @@
 const Post = require('../models/Post');
 const User = require('../models/User');
 const SavedPost = require('../models/SavedPost');
-const cloudinary = require('../config/cloudinary');
-const streamifier = require('streamifier');
+const storageService = require('../services/storage/storageService');
 const { deletePostWithCleanup } = require('../utils/deletionCleanup');
 const { normalizeRwandaPhone, isValidRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
@@ -15,30 +14,14 @@ const {
   MAX_IMAGES_PER_POST,
 } = require('../utils/subscriptionHelpers_clean');
 
-// ---------- Helper: upload buffer to Cloudinary (safe) ----------
-const uploadToCloudinary = (buffer, folder) => {
-  return new Promise((resolve, reject) => {
-    if (!cloudinary.config().cloud_name || cloudinary.config().cloud_name === 'dummy') {
-      return reject(new Error('Cloudinary not configured – skipping upload'));
-    }
-    const stream = cloudinary.uploader.upload_stream(
-      { folder, transformation: [{ width: 800, crop: 'limit' }] },
-      (error, result) => {
-        if (error) reject(error);
-        else resolve(result.secure_url);
-      }
-    );
-    streamifier.createReadStream(buffer).pipe(stream);
-  });
-};
-
 // ---------- CREATE POST ----------
 // @route   POST /api/posts
 // @desc    Create a new post (enforces total, cooldown, daily, and lifetime limits)
 exports.createPost = async (req, res) => {
+  const uploadedStorageKeys = [];
   try {
     const userId = req.user.id;
-    const user = await User.findById(userId).select('phone username avatar paymentHistory postUploadLimitPerDay');
+    const user = await User.findById(userId).select('phone username avatar paymentHistory postUploadLimitPerDay allowVideoUpload videoUploadLimitPerDay');
     if (!user) {
       console.error('User not found:', userId);
       return res.status(404).json({ success: false, message: 'User not found' });
@@ -59,6 +42,38 @@ exports.createPost = async (req, res) => {
         success: false,
         message: 'Daily post limit reached.',
       });
+    }
+
+    const imageFiles = (req.files && req.files.images) || [];
+    const videoFile = req.files?.video?.[0];
+
+    if (videoFile) {
+      if (user.allowVideoUpload !== true) {
+        return res.status(403).json({
+          success: false,
+          message: 'Video uploads are not enabled for this account.',
+        });
+      }
+
+      const videoLimit = typeof user.videoUploadLimitPerDay === 'number'
+        ? Math.max(0, user.videoUploadLimitPerDay)
+        : 0;
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      const startOfTomorrow = new Date(startOfDay);
+      startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
+      const videosToday = await Post.countDocuments({
+        user: userId,
+        videoUrl: { $exists: true, $ne: '' },
+        createdAt: { $gte: startOfDay, $lt: startOfTomorrow },
+      });
+
+      if (videoLimit <= 0 || videosToday >= videoLimit) {
+        return res.status(403).json({
+          success: false,
+          message: 'Daily video upload limit reached.',
+        });
+      }
     }
 
     // ----- 6. Parse post data from request -----
@@ -111,14 +126,23 @@ exports.createPost = async (req, res) => {
       contactNumbers.push(normalizedContact2);
     }
 
-    const imageFiles = (req.files && req.files.images) || [];
+    if (imageFiles.length === 0 && !videoFile) {
+      return res.status(400).json({ success: false, message: 'Please attach at least one image or video to create a post.' });
+    }
 
-    if (imageFiles.length === 0) {
-      return res.status(400).json({ success: false, message: 'Please attach at least one image to create a post.' });
+    const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+    const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
+    if (imageFiles.some(file => !file.buffer || file.buffer.length > MAX_IMAGE_BYTES)) {
+      return res.status(400).json({ success: false, message: 'One or more images exceed the 3 MB size limit.' });
+    }
+    if (videoFile && (!videoFile.buffer || videoFile.buffer.length > MAX_VIDEO_BYTES)) {
+      return res.status(400).json({ success: false, message: 'Video exceeds the 50 MB size limit.' });
     }
 
     // ---------- 7. Handle image uploads ----------
     const imageUrls = [];
+    const houseImageStorageKeys = [];
+    const postId = new Post()._id;
     if (imageFiles.length > 0) {
       // 7a. Check per‑post image limit (constant 2)
       if (imageFiles.length > MAX_IMAGES_PER_POST) {
@@ -128,25 +152,47 @@ exports.createPost = async (req, res) => {
         });
       }
 
-      // 7d. Upload each image to Cloudinary
+      // Upload each original image without re-encoding or reducing quality.
       for (const file of imageFiles) {
-        try {
-          // Enforce image size limit (3 MB)
-          const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
-          if (!file.buffer || file.buffer.length > MAX_IMAGE_BYTES) {
-            return res.status(400).json({ success: false, message: 'One or more images exceed the 3 MB size limit.' });
-          }
-          const url = await uploadToCloudinary(file.buffer, 'house_posts');
-          imageUrls.push(url);
-        } catch (uploadErr) {
-          console.warn('Cloudinary upload skipped:', uploadErr.message);
-          // Continue with other images
-        }
+        const result = await storageService.uploadMedia({
+          buffer: file.buffer,
+          mimeType: file.mimetype,
+          folder: `posts/${postId}/images`,
+          maxBytes: MAX_IMAGE_BYTES,
+        });
+        uploadedStorageKeys.push(result.storageKey);
+        houseImageStorageKeys.push(result.storageKey);
+        imageUrls.push(storageService.getMediaUrl(result.storageKey, {
+          origin: storageService.getRequestOrigin(req),
+        }));
       }
     }
 
     // ---------- 8. Build post data ----------
+    let videoUrl = '';
+    let videoHlsUrl = '';
+    let videoThumbnail = '';
+    let videoId = '';
+    let videoStorageKey = '';
+    let uploadedVideoDuration = Number(req.body.videoDuration) || 0;
+    if (videoFile) {
+      const videoResult = await storageService.uploadMedia({
+        buffer: videoFile.buffer,
+        mimeType: videoFile.mimetype,
+        folder: `posts/${postId}/videos`,
+        maxBytes: MAX_VIDEO_BYTES,
+      });
+      uploadedStorageKeys.push(videoResult.storageKey);
+      videoStorageKey = videoResult.storageKey;
+      videoId = videoStorageKey;
+      videoUrl = storageService.getMediaUrl(videoStorageKey, {
+        origin: storageService.getRequestOrigin(req),
+      });
+      videoHlsUrl = videoUrl;
+    }
+
     const postData = {
+      _id: postId,
       user: userId,
       username: user.username,
       userPhone: contactNumber1,
@@ -158,6 +204,15 @@ exports.createPost = async (req, res) => {
       priceNegotiable: priceNegotiable === 'true' || priceNegotiable === true,
       contactNumbers,
       houseImages: imageUrls,
+      houseImageStorageKeys,
+      storageProvider: 'b2',
+      videoUrl,
+      videoHlsUrl,
+      videoId,
+      videoStorageKey,
+      videoDuration: uploadedVideoDuration,
+      videoThumbnail,
+      videoLink: req.body.videoLink || '',
       productName: productName || undefined,
     };
 
@@ -172,6 +227,7 @@ exports.createPost = async (req, res) => {
     // ---------- 9. Save post ----------
     const post = new Post(postData);
     await post.save();
+    uploadedStorageKeys.length = 0;
     console.log('✅ Post saved successfully. ID:', post._id);
     try {
       await notifyUsers({
@@ -188,8 +244,14 @@ exports.createPost = async (req, res) => {
 
     res.status(201).json({ success: true, post });
   } catch (error) {
-    console.error('❌ CREATE POST ERROR:', error);
-    res.status(500).json({ success: false, message: error.message });
+    await Promise.all(uploadedStorageKeys.map(key => storageService.deleteMedia(key).catch(deleteError => {
+      console.error('[Storage] Failed to clean up an unsaved post upload:', deleteError.code || 'B2_OPERATION_FAILED');
+    })));
+    console.error('CREATE POST ERROR:', error.code || error.message || 'Unknown error');
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.statusCode ? error.message : 'Post could not be created',
+    });
   }
 };
 
@@ -200,14 +262,15 @@ exports.getAllPosts = async (req, res) => {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.max(parseInt(req.query.limit, 10) || 20, 1);
     const skip = (page - 1) * limit;
+    const filter = req.query.trending === 'true' ? { trending: true } : {};
 
     const [posts, total] = await Promise.all([
-      Post.find({})
-        .sort({ createdAt: -1 })
+      Post.find(filter)
+        .sort({ trending: -1, featured: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .populate('user', 'username avatar'),
-      Post.countDocuments({}),
+      Post.countDocuments(filter),
     ]);
 
     const hasMore = skip + posts.length < total;
@@ -217,7 +280,6 @@ exports.getAllPosts = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
-
 // ---------- GET MY POSTS (protected) ----------
 // @route   GET /api/posts/me
 exports.getMyPosts = async (req, res) => {
@@ -239,7 +301,12 @@ exports.getSavedPosts = async (req, res) => {
     const saved = await SavedPost.find({ user: userId })
       .populate('post')
       .sort({ savedAt: -1 });
-    const posts = saved.map(s => s.post).filter(p => p !== null);
+    const user = await User.findById(userId).populate('savedPosts');
+    const uniquePosts = new Map();
+    [...saved.map((entry) => entry.post), ...(user?.savedPosts || [])]
+      .filter(Boolean)
+      .forEach((post) => uniquePosts.set(post._id.toString(), post));
+    const posts = [...uniquePosts.values()];
     res.json({ success: true, posts });
   } catch (error) {
     console.error('GET SAVED POSTS ERROR:', error);
@@ -320,3 +387,4 @@ exports.deletePost = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+

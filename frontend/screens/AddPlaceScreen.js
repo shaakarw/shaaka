@@ -21,7 +21,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../context/ThemeContext';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, useUserLimits } from '../context/AuthContext';
 import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
@@ -29,6 +29,7 @@ import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
+import ArrowUploadLoader from '../components/ArrowUploadLoader';
 import { normalizeRwandaPhone, isValidRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
 
 const { width, height } = Dimensions.get('window');
@@ -119,8 +120,8 @@ const translations = {
     noPlacesFound: 'No places found in Rwanda for: ',
   },
   Kinyarwanda: {
-    addPlace: 'Ongera ahantu',
-    step1: 'Hitamo aho',
+    addPlace: 'Ongeraho ahantu',
+    step1: 'Hitamo ahantu',
     step1Sub: 'Kanda ku ikarita cyangwa ukurure kugirango uhitemo ahantu. Ahantu hahari hagaragazwa n\'ibara ry\'umukara.',
     step2: 'Hitamo icyiciro',
     step2Sub: 'Hitamo icyiciro gikwiriye aha hantu.',
@@ -261,6 +262,26 @@ const ALL_CATEGORIES = [
 ];
 
 const ADMIN_ONLY_CATEGORIES = ['police', 'house', 'airport', 'train', 'government', 'shoppingmall'];
+const USER_CATEGORY_IDS = [
+  'location',
+  'shop',
+  'restaurant',
+  'coffee',
+  'fastfood',
+  'supermarket',
+  'hotel',
+  'office',
+  'church',
+  'mosque',
+  'temple',
+  'hospital',
+  'pharmacy',
+  'clinic',
+  'school',
+  'university',
+  'library',
+  'other',
+];
 
 export default function AddPlaceScreen({ navigation, route, language = 'English' }) {
   const { theme, isDarkMode } = useTheme();
@@ -384,10 +405,12 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
           const user = response.data.user;
           setCurrentUser(user);
           const isAdmin = user.role === 'admin';
-          setVisibleCategories(isAdmin ? ALL_CATEGORIES : ALL_CATEGORIES.filter(c => !ADMIN_ONLY_CATEGORIES.includes(c.id)));
+          setVisibleCategories(isAdmin
+            ? ALL_CATEGORIES
+            : USER_CATEGORY_IDS.map(id => ALL_CATEGORIES.find(category => category.id === id)).filter(Boolean));
         }
       } catch (error) {
-        setVisibleCategories(ALL_CATEGORIES.filter(c => !ADMIN_ONLY_CATEGORIES.includes(c.id)));
+        setVisibleCategories(USER_CATEGORY_IDS.map(id => ALL_CATEGORIES.find(category => category.id === id)).filter(Boolean));
       } finally {
         setLoadingUser(false);
       }
@@ -403,7 +426,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
         const [placesRes, shopsRes] = await Promise.all([
           axios.get(`${BASE_URL}/api/places`, { headers }),
-          axios.get(`${BASE_URL}/api/mall-shops`, { headers }),
+          axios.get(`${BASE_URL}/api/mall-shops/mine`, { headers }),
         ]);
         setExistingPlaces(placesRes.data.places || []);
         setExistingShops(shopsRes.data.shops || []);
@@ -755,7 +778,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
       if (!token) { Alert.alert(t.error, t.loginRequired); setPublishing(false); return; }
       
       // One-type-only check: verify user does not already have a shopping mall shop
-      const mallShopsRes = await axios.get(`${BASE_URL}/api/mall-shops`, {
+      const mallShopsRes = await axios.get(`${BASE_URL}/api/mall-shops/mine`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const allMallShops = mallShopsRes.data.shops || [];
@@ -1166,7 +1189,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
               <TouchableOpacity style={[styles.button, styles.publishButtonFinal, { backgroundColor: accentColor }]} onPress={publishPlace} disabled={publishing}>
                 {publishing ? (
                   <View style={styles.publishProgress}>
-                    <ActivityIndicator size="small" color="#fff" />
+                    <ArrowUploadLoader color="#fff" size={34} />
                     <Text style={styles.publishButtonText}>{t.publishProgress.replace('{progress}', progress)}</Text>
                   </View>
                 ) : (

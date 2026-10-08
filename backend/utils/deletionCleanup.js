@@ -1,4 +1,3 @@
-const cloudinary = require('../config/cloudinary');
 const mongoose = require('mongoose');
 const Place = require('../models/Place');
 const Post = require('../models/Post');
@@ -6,121 +5,68 @@ const Message = require('../models/Message');
 const Favorite = require('../models/Favorite');
 const SavedPost = require('../models/SavedPost');
 const Report = require('../models/Report');
-const User = require('../models/User');
+const MallShop = require('../models/MallShop');
+const storageService = require('../services/storage/storageService');
 
-const CLOUDINARY_HOSTNAME = 'res.cloudinary.com';
-
-function isCloudinaryUrl(url) {
-  if (!url || typeof url !== 'string') return false;
-  return url.toLowerCase().includes(CLOUDINARY_HOSTNAME);
-}
-
-function parseCloudinaryPublicId(url) {
-  if (!isCloudinaryUrl(url)) return null;
-  const normalized = String(url).trim();
-  const lower = normalized.toLowerCase();
-  const resourceType = lower.includes('/video/') || lower.includes('/video/upload') ? 'video' : 'image';
-  const match = normalized.match(/\/\w+\/upload\/(?:v\d+\/)?(.+?)(?:\.[a-zA-Z0-9]+)?(?:\?.*)?$/);
-  if (!match || !match[1]) return null;
-  return {
-    cloudinaryPublicId: match[1],
-    cloudinaryResourceType: resourceType,
-  };
-}
-
-function collectCloudinaryIds(urls) {
-  const ids = [];
-  if (!Array.isArray(urls)) return ids;
+function collectStorageKeys(urls) {
+  const keys = [];
+  if (!Array.isArray(urls)) return keys;
   for (const url of urls) {
-    if (!url || typeof url !== 'string') continue;
-    if (!isCloudinaryUrl(url)) continue;
-    const parsed = parseCloudinaryPublicId(url);
-    if (parsed && parsed.cloudinaryPublicId) {
-      ids.push({ publicId: parsed.cloudinaryPublicId, resourceType: parsed.cloudinaryResourceType });
-    }
+    const key = storageService.getStorageKeyFromUrl(url);
+    if (key) keys.push(key);
   }
-  return ids;
+  return keys;
 }
 
-function isCloudinaryConfigured() {
-  return cloudinary.config().cloud_name && cloudinary.config().cloud_name !== 'dummy';
+function getPostStorageKeys(post) {
+  return [
+    ...(post.houseImageStorageKeys || []),
+    ...collectStorageKeys(post.houseImages || []),
+    post.videoStorageKey,
+    storageService.getStorageKeyFromUrl(post.videoUrl),
+  ].filter(storageService.isStorageKey);
 }
 
-async function deleteCloudinaryAsset(publicId, resourceType = 'image') {
-  if (!isCloudinaryConfigured()) {
-    console.warn('[DeletionCleanup] Cloudinary not configured – skipping asset deletion:', publicId);
-    return null;
-  }
-  try {
-    const result = await cloudinary.uploader.destroy(publicId, {
-      resource_type: resourceType === 'video' ? 'video' : 'image',
-    });
-    if (result && result.result !== 'ok' && result.result !== 'not found') {
-      console.warn('[DeletionCleanup] Cloudinary non-ok result:', result.result, 'for', publicId);
-    }
-    return result;
-  } catch (error) {
-    console.error('[DeletionCleanup] Cloudinary delete failed for', publicId, ':', error.message || error);
-    return null;
-  }
+function getMessageStorageKeys(message) {
+  return [
+    message.imageStorageKey,
+    message.videoStorageKey,
+    message.audioStorageKey,
+    storageService.getStorageKeyFromUrl(message.imageUrl),
+    storageService.getStorageKeyFromUrl(message.videoUrl),
+    storageService.getStorageKeyFromUrl(message.audioUrl),
+  ].filter(storageService.isStorageKey);
 }
 
-async function deleteCloudinaryAssets(assetList) {
-  if (!assetList || assetList.length === 0) return;
-  if (!isCloudinaryConfigured()) {
-    console.warn('[DeletionCleanup] Cloudinary not configured – skipping', assetList.length, 'assets');
-    return;
-  }
-  for (const { publicId, resourceType } of assetList) {
-    await deleteCloudinaryAsset(publicId, resourceType);
-  }
+function getPlaceStorageKeys(place) {
+  const imageUrls = place.images ? Object.values(place.images) : [];
+  const productImageUrls = (place.products || []).flatMap(product => product.images || []);
+  const productKeys = (place.products || []).flatMap(product => product.imageStorageKeys || []);
+  return [
+    ...(Object.values(place.imageStorageKeys || {})),
+    ...productKeys,
+    ...collectStorageKeys([...imageUrls, ...productImageUrls]),
+  ].filter(storageService.isStorageKey);
 }
 
-function getMediaIdsFromMessage(msg) {
-  const ids = [];
-  if (msg.cloudinaryPublicId) {
-    ids.push({ publicId: msg.cloudinaryPublicId, resourceType: msg.cloudinaryResourceType || (msg.videoUrl && isCloudinaryUrl(msg.videoUrl) ? 'video' : 'image') });
-  }
-  if (msg.imageUrl && isCloudinaryUrl(msg.imageUrl)) {
-    const parsed = parseCloudinaryPublicId(msg.imageUrl);
-    if (parsed && parsed.cloudinaryPublicId) ids.push(parsed);
-  }
-  if (msg.videoUrl && isCloudinaryUrl(msg.videoUrl)) {
-    const parsed = parseCloudinaryPublicId(msg.videoUrl);
-    if (parsed && parsed.cloudinaryPublicId) ids.push(parsed);
-  }
-  if (msg.audioUrl && isCloudinaryUrl(msg.audioUrl)) {
-    const parsed = parseCloudinaryPublicId(msg.audioUrl);
-    if (parsed && parsed.cloudinaryPublicId) ids.push({ ...parsed, resourceType: 'video' });
-  }
-  return ids;
+async function deleteStorageKeys(keys) {
+  const uniqueKeys = [...new Set((keys || []).filter(storageService.isStorageKey))];
+  await Promise.all(uniqueKeys.map(key => storageService.deleteMedia(key).catch(error => {
+    console.error('[DeletionCleanup] B2 object deletion failed:', error.code || 'B2_OPERATION_FAILED');
+  })));
 }
 
 async function deleteMessagesForPost(postId) {
   if (!postId || !mongoose.Types.ObjectId.isValid(postId)) return;
   const messages = await Message.find({ postId: String(postId) }).lean();
   if (!messages.length) return;
-
-  const mediaIds = [];
-  for (const msg of messages) {
-    mediaIds.push(...getMediaIdsFromMessage(msg));
-  }
-
+  const keys = messages.flatMap(getMessageStorageKeys);
   await Message.deleteMany({ postId: String(postId) });
-
-  await deleteCloudinaryAssets(mediaIds);
+  await deleteStorageKeys(keys);
 }
 
 async function deleteMessagesReplyPost(postId) {
   if (!postId || !mongoose.Types.ObjectId.isValid(postId)) return;
-  const messages = await Message.find({ 'replyPost.postId': postId }).lean();
-  if (!messages.length) return;
-
-  const mediaIds = [];
-  for (const msg of messages) {
-    mediaIds.push(...getMediaIdsFromMessage(msg));
-  }
-
   await Message.updateMany(
     { 'replyPost.postId': postId },
     {
@@ -137,218 +83,110 @@ async function deleteMessagesReplyPost(postId) {
       },
     }
   );
-
-  await deleteCloudinaryAssets(mediaIds);
 }
 
 async function deletePostWithCleanup(postId) {
-  if (!postId || !mongoose.Types.ObjectId.isValid(postId)) {
-    throw new Error('Invalid post ID');
-  }
-
+  if (!postId || !mongoose.Types.ObjectId.isValid(postId)) throw new Error('Invalid post ID');
   const post = await Post.findById(postId).lean();
   if (!post) return;
-
-  const cloudinaryIds = collectCloudinaryIds(post.houseImages || []);
-  if (post.videoUrl && isCloudinaryUrl(post.videoUrl)) {
-    const parsed = parseCloudinaryPublicId(post.videoUrl);
-    if (parsed) cloudinaryIds.push(parsed);
-  }
+  const keys = getPostStorageKeys(post);
 
   await deleteMessagesForPost(postId);
   await deleteMessagesReplyPost(postId);
-
   await SavedPost.deleteMany({ post: postId });
   await Report.deleteMany({ post: postId });
-
   await Post.findByIdAndDelete(postId);
-
-  await deleteCloudinaryAssets(cloudinaryIds);
+  await deleteStorageKeys(keys);
 }
 
 async function deletePlaceWithCleanup(placeId) {
-  if (!placeId || !mongoose.Types.ObjectId.isValid(placeId)) {
-    throw new Error('Invalid place ID');
-  }
-
+  if (!placeId || !mongoose.Types.ObjectId.isValid(placeId)) throw new Error('Invalid place ID');
   const place = await Place.findById(placeId).lean();
   if (!place) return;
 
-  const cloudinaryIds = [];
+  const keys = getPlaceStorageKeys(place);
+  const relatedPosts = await Post.find({ user: place.userId }).select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey').lean();
+  const postIds = relatedPosts.map(post => post._id);
+  for (const post of relatedPosts) keys.push(...getPostStorageKeys(post));
 
-  if (place.images) {
-    Object.values(place.images).forEach(url => {
-      if (url && typeof url === 'string' && isCloudinaryUrl(url)) {
-        const parsed = parseCloudinaryPublicId(url);
-        if (parsed) cloudinaryIds.push(parsed);
-      }
-    });
+  for (const postId of postIds) {
+    await deleteMessagesForPost(postId);
+    await deleteMessagesReplyPost(postId);
   }
-
-  if (place.products && Array.isArray(place.products)) {
-    for (const product of place.products) {
-      if (product.images && Array.isArray(product.images)) {
-        cloudinaryIds.push(...collectCloudinaryIds(product.images));
-      }
-    }
-  }
-
-  const relatedPosts = await Post.find({ user: place.userId }).select('_id houseImages videoUrl').lean();
-  const postIds = relatedPosts.map(p => p._id);
-
-  for (const post of relatedPosts) {
-    const postMediaIds = collectCloudinaryIds(post.houseImages || []);
-    if (post.videoUrl && isCloudinaryUrl(post.videoUrl)) {
-      const parsed = parseCloudinaryPublicId(post.videoUrl);
-      if (parsed) postMediaIds.push(parsed);
-    }
-    cloudinaryIds.push(...postMediaIds);
-  }
-
-  for (const pid of postIds) {
-    await deleteMessagesForPost(pid);
-    await deleteMessagesReplyPost(pid);
-  }
-
   await SavedPost.deleteMany({ post: { $in: postIds } });
   await Report.deleteMany({ post: { $in: postIds } });
   await Post.deleteMany({ _id: { $in: postIds } });
-
-  await Favorite.deleteMany({ placeId: placeId });
+  await Favorite.deleteMany({ placeId });
   await Favorite.deleteMany({ shopId: placeId });
-
   await Place.findByIdAndDelete(placeId);
-
-  await deleteCloudinaryAssets(cloudinaryIds);
+  await deleteStorageKeys(keys);
 }
 
 async function deleteMallShopWithCleanup(shopId) {
-  if (!shopId || !mongoose.Types.ObjectId.isValid(shopId)) {
-    throw new Error('Invalid mall shop ID');
-  }
-
+  if (!shopId || !mongoose.Types.ObjectId.isValid(shopId)) throw new Error('Invalid mall shop ID');
   const shop = await MallShop.findById(shopId).lean();
   if (!shop) return;
 
-  const cloudinaryIds = [];
-
-  if (shop.images && shop.images.frontImage && isCloudinaryUrl(shop.images.frontImage)) {
-    const parsed = parseCloudinaryPublicId(shop.images.frontImage);
-    if (parsed) cloudinaryIds.push(parsed);
-  }
-
-  if (shop.products && Array.isArray(shop.products)) {
-    for (const product of shop.products) {
-      if (product.images && Array.isArray(product.images)) {
-        cloudinaryIds.push(...collectCloudinaryIds(product.images));
-      }
-    }
-  }
-
-  const relatedPostIds = [];
+  const keys = collectStorageKeys([
+    shop.images?.frontImage,
+    ...(shop.products || []).flatMap(product => product.images || []),
+  ]).concat(
+    shop.frontImageStorageKey || '',
+    ...(shop.products || []).flatMap(product => product.imageStorageKeys || [])
+  );
   const shopMessages = await Message.find({
-    $or: [
-      { postId: String(shopId) },
-      { 'replyPost.postId': shopId },
-    ],
-  }).select('postId').lean();
+    $or: [{ postId: String(shopId) }, { 'replyPost.postId': shopId }],
+  }).select('postId replyPost imageUrl videoUrl audioUrl imageStorageKey videoStorageKey audioStorageKey').lean();
+  keys.push(...shopMessages.flatMap(getMessageStorageKeys));
 
-  for (const msg of shopMessages) {
-    if (msg.postId && !relatedPostIds.includes(msg.postId)) {
-      relatedPostIds.push(msg.postId);
-    }
-    if (msg.replyPost && msg.replyPost.postId && !relatedPostIds.includes(msg.replyPost.postId)) {
-      relatedPostIds.push(msg.replyPost.postId);
-    }
-  }
+  const relatedPostIds = [...new Set(shopMessages.flatMap(message => [
+    message.postId,
+    message.replyPost?.postId ? String(message.replyPost.postId) : '',
+  ]).filter(id => id && mongoose.Types.ObjectId.isValid(id)))];
+  const relatedPosts = await Post.find({ _id: { $in: relatedPostIds } })
+    .select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey').lean();
+  for (const post of relatedPosts) keys.push(...getPostStorageKeys(post));
 
-  for (const pid of relatedPostIds) {
-    await deleteMessagesForPost(pid);
-  }
-
-  await Message.deleteMany({
-    $or: [
-      { postId: String(shopId) },
-      { 'replyPost.postId': shopId },
-    ],
-  });
-
-  await Post.deleteMany({ _id: { $in: relatedPostIds.map(id => mongoose.Types.ObjectId(id)) } });
-  await Favorite.deleteMany({ shopId: shopId });
-
+  for (const postId of relatedPostIds) await deleteMessagesForPost(postId);
+  await Message.deleteMany({ $or: [{ postId: String(shopId) }, { 'replyPost.postId': shopId }] });
+  await Post.deleteMany({ _id: { $in: relatedPostIds } });
+  await Favorite.deleteMany({ shopId });
   await MallShop.findByIdAndDelete(shopId);
-
-  await deleteCloudinaryAssets(cloudinaryIds);
+  await deleteStorageKeys(keys);
 }
 
 async function deleteShopWithCleanup(shopId) {
-  if (!shopId || !mongoose.Types.ObjectId.isValid(shopId)) {
-    throw new Error('Invalid shop ID');
-  }
-
+  if (!shopId || !mongoose.Types.ObjectId.isValid(shopId)) throw new Error('Invalid shop ID');
   const shop = await Place.findById(shopId).lean();
   if (!shop) return;
 
-  const cloudinaryIds = [];
+  const keys = getPlaceStorageKeys(shop);
+  const relatedPosts = await Post.find({ user: shop.userId }).select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey').lean();
+  const postIds = relatedPosts.map(post => post._id);
+  for (const post of relatedPosts) keys.push(...getPostStorageKeys(post));
 
-  if (shop.images) {
-    Object.values(shop.images).forEach(url => {
-      if (url && typeof url === 'string' && isCloudinaryUrl(url)) {
-        const parsed = parseCloudinaryPublicId(url);
-        if (parsed) cloudinaryIds.push(parsed);
-      }
-    });
+  for (const postId of postIds) {
+    await deleteMessagesForPost(postId);
+    await deleteMessagesReplyPost(postId);
   }
-
-  if (shop.products && Array.isArray(shop.products)) {
-    for (const product of shop.products) {
-      if (product.images && Array.isArray(product.images)) {
-        cloudinaryIds.push(...collectCloudinaryIds(product.images));
-      }
-    }
-  }
-
-  const relatedPosts = await Post.find({ user: shop.userId }).select('_id houseImages videoUrl').lean();
-  const postIds = relatedPosts.map(p => p._id);
-
-  for (const post of relatedPosts) {
-    const postMediaIds = collectCloudinaryIds(post.houseImages || []);
-    if (post.videoUrl && isCloudinaryUrl(post.videoUrl)) {
-      const parsed = parseCloudinaryPublicId(post.videoUrl);
-      if (parsed) postMediaIds.push(parsed);
-    }
-    cloudinaryIds.push(...postMediaIds);
-  }
-
-  for (const pid of postIds) {
-    await deleteMessagesForPost(pid);
-    await deleteMessagesReplyPost(pid);
-  }
-
   await SavedPost.deleteMany({ post: { $in: postIds } });
   await Report.deleteMany({ post: { $in: postIds } });
   await Post.deleteMany({ _id: { $in: postIds } });
-
   await Favorite.deleteMany({ placeId: shopId });
-  await Favorite.deleteMany({ shopId: shopId });
-
+  await Favorite.deleteMany({ shopId });
   await Place.findByIdAndDelete(shopId);
-
-  await deleteCloudinaryAssets(cloudinaryIds);
+  await deleteStorageKeys(keys);
 }
 
 module.exports = {
-  isCloudinaryUrl,
-  parseCloudinaryPublicId,
-  collectCloudinaryIds,
-  isCloudinaryConfigured,
-  deleteCloudinaryAsset,
-  deleteCloudinaryAssets,
-  getMediaIdsFromMessage,
+  collectStorageKeys,
   deleteMessagesForPost,
   deleteMessagesReplyPost,
   deletePostWithCleanup,
   deletePlaceWithCleanup,
   deleteMallShopWithCleanup,
   deleteShopWithCleanup,
+  deleteStorageKeys,
+  getMessageStorageKeys,
+  getPostStorageKeys,
 };

@@ -4,6 +4,7 @@ import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '../constants';
 import { useTheme } from '../context/ThemeContext';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 
 const labels = {
   English: { title: 'Notification Preferences', newPosts: 'New Posts', newShops: 'New Shops', newPlaces: 'New Places', newShoppingMalls: 'New Shopping Malls', newMallShops: 'Shops Added to Shopping Malls', mapPlacesAdded: 'Places Added to Map' },
@@ -33,7 +34,7 @@ export default function NotificationPreferencesScreen({ language = 'English' }) 
     try { await axios.patch(`${BASE_URL}/api/notifications/preferences`, { [key]: next[key] }, { headers: await headers() }); } catch (error) { setPreferences(preferences); }
   };
 
-  if (loading) return <View style={[styles.center, { backgroundColor: theme.background }]}><ActivityIndicator color={theme.accent} /></View>;
+  if (loading) return <ShaakaLoadingScreen message={t.title} backgroundColor={theme.background} textColor={theme.text} />;
   return <View style={[styles.container, { backgroundColor: theme.background }]}><Text style={[styles.title, { color: theme.text }]}>{t.title}</Text>{keys.map(key => <View key={key} style={[styles.row, { borderBottomColor: theme.border }]}><Text style={[styles.label, { color: theme.text }]}>{t[key]}</Text><Switch value={preferences[key]} onValueChange={() => toggle(key)} trackColor={{ false: theme.border, true: theme.accent }} thumbColor="#fff" /></View>)}</View>;
 }
 const styles = StyleSheet.create({ container: { flex: 1, padding: 16 }, center: { flex: 1, justifyContent: 'center', alignItems: 'center' }, title: { fontSize: 25, fontWeight: '700', marginBottom: 18 }, row: { minHeight: 58, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth }, label: { fontSize: 16, flex: 1, paddingRight: 12 } });

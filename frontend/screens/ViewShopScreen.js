@@ -24,7 +24,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import * as ImagePicker from 'expo-image-picker';
-import FullScreenImageViewer from '../components/FullScreenImageViewer';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 
 const { height, width } = Dimensions.get('window');
 const MODAL_HEIGHT_80 = height * 0.7;   // same as ViewPlaceScreen
@@ -105,10 +105,6 @@ export default function ViewShopScreen({ route, navigation }) {
   const [statusModalTitle, setStatusModalTitle] = useState('');
   const [statusModalMessage, setStatusModalMessage] = useState('');
   const [statusModalType, setStatusModalType] = useState('info'); // 'success' | 'error' | 'info'
-
-  // Full-screen image viewer state
-  const [imageViewerVisible, setImageViewerVisible] = useState(false);
-  const [selectedImageUrl, setSelectedImageUrl] = useState(null);
 
   const modalHeight = useRef(new Animated.Value(MODAL_HEIGHT_80)).current;
 
@@ -350,10 +346,66 @@ export default function ViewShopScreen({ route, navigation }) {
     Linking.openURL(formatted).catch(() => showStatusModal({ title: 'Error', message: 'Could not open link.', type: 'error' }));
   };
 
+  const [appShareLink, setAppShareLink] = useState('');
+
+  useEffect(() => {
+    const loadShareLink = async () => {
+      try {
+        const response = await axios.get(`${BASE_URL}/api/settings/share-link`);
+        if (response.data.success) {
+          setAppShareLink(response.data.shareLink || '');
+        }
+      } catch (error) {
+        console.error('Load share link error:', error.message);
+      }
+    };
+    loadShareLink();
+  }, []);
+
   const handleShare = async () => {
     if (!shop) return;
-    const message = `🛍️ ${shop.name}\n📍 ${shop.address || ''}\n🏢 ${shop.mallName || 'Shopping Mall'}\nCategory: ${shop.category || 'General'}`;
+    const link = appShareLink || 'https://shaaka.app';
+    const message = `🛍️ ${shop.name}\n📍 ${shop.address || ''}\n🏢 ${shop.mallName || 'Shopping Mall'}\nCategory: ${shop.category || 'General'}\n\n${link}`;
     await Share.share({ message });
+  };
+
+  const handleMessageOwner = () => {
+    if (!shop) return;
+
+    const sellerId = owner?._id || shop.ownerId?._id || shop.ownerId || shop.owner || shop.userId;
+    const sellerName = owner?.name || owner?.username || shop.ownerName || 'Shop owner';
+    const sellerPhone = owner?.phone || shop.phone || '';
+    const contextId = shop?._id || shopId || `shop_${shop?.name || 'shop'}`;
+
+    if (!sellerId) {
+      showStatusModal({ title: 'Error', message: 'Owner information is not available yet.', type: 'error' });
+      return;
+    }
+
+    const replyPost = {
+      postId: contextId,
+      contextType: 'shop',
+      contextId,
+      title: shop.name || 'Shop',
+      description: shop.description || '',
+      image: shop.logo || shop.coverImage || shop.image || '',
+      price: null,
+      amount: '',
+      location: shop.address || '',
+      category: shop.category || '',
+      username: sellerName,
+      ownerId: sellerId,
+      timestamp: new Date().toISOString(),
+    };
+
+    navigation.navigate('Chat', {
+      sellerId,
+      sellerName: sellerName,
+      sellerPhone: sellerPhone,
+      postId: contextId,
+      postTitle: shop.name || 'Shop',
+      replyPost,
+    });
   };
 
   const handleCall = () => { if (shop?.phone) openLink(`tel:${shop.phone}`); };
@@ -568,8 +620,7 @@ export default function ViewShopScreen({ route, navigation }) {
           activeOpacity={0.8}
           onPress={() => {
             if (firstImage) {
-              setSelectedImageUrl(firstImage);
-              setImageViewerVisible(true);
+              navigation.navigate('Preview', { imageUri: firstImage });
             }
           }}
         >
@@ -648,11 +699,7 @@ export default function ViewShopScreen({ route, navigation }) {
   // MAIN RENDER
   // ============================================================
   if (loading) {
-    return (
-      <View style={[styles.loaderContainer, { backgroundColor: theme.background }]}>
-        <ActivityIndicator size="large" color={theme.accent} />
-      </View>
-    );
+    return <ShaakaLoadingScreen backgroundColor={theme.background} textColor={theme.text} hideText />;
   }
 
   if (!shop) {
@@ -809,7 +856,7 @@ export default function ViewShopScreen({ route, navigation }) {
                 <View style={styles.content}>
                   {/* Cover image */}
                   {frontImage ? (
-                    <TouchableOpacity activeOpacity={0.9} onPress={() => { setSelectedImageUrl(frontImage); setImageViewerVisible(true); }}>
+                    <TouchableOpacity activeOpacity={0.9} onPress={() => navigation.navigate('Preview', { imageUri: frontImage })}>
                       <Image source={{ uri: frontImage }} style={styles.coverImage} />
                     </TouchableOpacity>
                   ) : (
@@ -891,6 +938,10 @@ export default function ViewShopScreen({ route, navigation }) {
                     <TouchableOpacity style={[styles.actionBtn, { backgroundColor: theme.accent }]} onPress={handleDirections}>
                       <Ionicons name="navigate" size={22} color="#fff" />
                       <Text style={styles.actionBtnText}>Directions</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#2bb673' }]} onPress={handleMessageOwner}>
+                      <Ionicons name="chatbubble-ellipses-outline" size={22} color="#fff" />
+                      <Text style={styles.actionBtnText}>Message</Text>
                     </TouchableOpacity>
                     <TouchableOpacity style={[styles.actionBtn, { backgroundColor: theme.border }]} onPress={handleShare}>
                       <Ionicons name="share-social" size={22} color={theme.text} />
@@ -1070,12 +1121,6 @@ export default function ViewShopScreen({ route, navigation }) {
       {/* Status modal */}
       {renderStatusModal()}
 
-      <FullScreenImageViewer
-        visible={imageViewerVisible}
-        imageUrl={selectedImageUrl}
-        onClose={() => setImageViewerVisible(false)}
-        language="English"
-      />
     </View>
   );
 }
@@ -1358,7 +1403,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   productGridItem: {
-    width: (width - 48) / 2,
+    width: (width - 40) / 2,
     borderRadius: 8,
     overflow: 'hidden',
     padding: 8,
@@ -1607,19 +1652,3 @@ const styles = StyleSheet.create({
   },
 });
 
-const downloadTranslations = {
-  English: {
-    download: 'Download Image',
-    downloading: 'Downloading...',
-    downloaded: 'Image downloaded successfully.',
-    downloadFailed: 'Failed to download image. Please try again.',
-    permissionNeeded: 'Please allow access to photos to save images.',
-  },
-  Kinyarwanda: {
-    download: 'Gukuramo Ifoto',
-    downloading: 'Turi kugukuramo...',
-    downloaded: 'Ifoto yahinduwe neza.',
-    downloadFailed: 'Gukuramo ifoto byanze. Ongera ugerageze.',
-    permissionNeeded: 'Shyira uruhushya rwo kujya mu ifoto.',
-  },
-};

@@ -32,6 +32,7 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRoute } from '@react-navigation/native';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 
 // ---------- Design tokens (NEUTRAL GRAYSCALE) ----------
 // Primary action gradient (gray → dark gray)
@@ -156,6 +157,8 @@ const AddUpdateScreen = ({ navigation, language }) => {
   const [formTitle, setFormTitle] = useState('');
   const [formMessage, setFormMessage] = useState('');
   const [formLink, setFormLink] = useState('');
+  const [shareLink, setShareLink] = useState('');
+  const [shareLinkLoading, setShareLinkLoading] = useState(false);
   const [editingNoteId, setEditingNoteId] = useState(null); // null => add mode
   const [saving, setSaving] = useState(false);
 
@@ -220,10 +223,53 @@ const AddUpdateScreen = ({ navigation, language }) => {
   useFocusEffect(
     useCallback(() => {
       fetchNotes();
-    }, [fetchNotes])
+      fetchShareLink();
+    }, [fetchNotes, fetchShareLink])
   );
 
   // ---------- Add / Edit form modal helpers (unchanged) ----------
+  const fetchShareLink = useCallback(async () => {
+    try {
+      const response = await axios.get(`${BASE_URL}/api/settings/share-link`);
+      if (response.data.success) {
+        setShareLink(response.data.shareLink || '');
+      }
+    } catch (error) {
+      console.error('Failed to load share link:', error.message);
+    }
+  }, []);
+
+  const saveShareLink = useCallback(async () => {
+    try {
+      const token = await getToken();
+      if (!token) {
+        Alert.alert(t.error, isAdmin ? 'Please login as admin.' : 'Please login first.');
+        return;
+      }
+
+      setShareLinkLoading(true);
+      const response = await axios.put(
+        `${BASE_URL}/api/settings/share-link`,
+        { shareLink: shareLink.trim() },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (response.data.success) {
+        setShareLink(response.data.shareLink || '');
+        setStatusTitle(t.success);
+        setStatusMessage('Share link saved successfully');
+        setStatusModalVisible(true);
+      } else {
+        Alert.alert(t.error, response.data.message || 'Unable to save share link');
+      }
+    } catch (error) {
+      console.error('Save share link error:', error.response?.data || error.message);
+      Alert.alert(t.error, 'Unable to save share link');
+    } finally {
+      setShareLinkLoading(false);
+    }
+  }, [shareLink, getToken, t, isAdmin]);
+
   const openAddModal = () => {
     setFormTitle('');
     setFormMessage('');
@@ -639,6 +685,34 @@ const AddUpdateScreen = ({ navigation, language }) => {
               returnKeyType="done"
             />
 
+            {isAdmin && (
+              <View style={{ marginTop: 12 }}>
+                <Text style={[styles.formBadgeLabel, { color: theme.textSecondary, marginBottom: 8 }]}>Admin Share Link</Text>
+                <TextInput
+                  style={[
+                    styles.formTitleInput,
+                    { color: theme.text, borderBottomColor: theme.border },
+                  ]}
+                  placeholder="https://example.com/app"
+                  placeholderTextColor={theme.textSecondary}
+                  value={shareLink}
+                  onChangeText={setShareLink}
+                  autoCapitalize="none"
+                  keyboardType="url"
+                  returnKeyType="done"
+                />
+                <TouchableOpacity style={styles.gradientButtonWrapper} onPress={saveShareLink} disabled={shareLinkLoading}>
+                  <LinearGradient colors={PRIMARY_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.gradientButton}>
+                    {shareLinkLoading ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.gradientButtonText}>Save Share Link</Text>
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              </View>
+            )}
+
             <View style={styles.confirmButtonsRow}>
               <TouchableOpacity
                 style={[styles.confirmButton, styles.cancelButton, { borderColor: theme.border }]}
@@ -667,14 +741,7 @@ const AddUpdateScreen = ({ navigation, language }) => {
 
   // ---------- Loading state ----------
   if (loading) {
-    return (
-      <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={theme.accent} />
-          <Text style={[styles.loadingText, { color: theme.textSecondary }]}>{t.loading}</Text>
-        </View>
-      </SafeAreaView>
-    );
+    return <ShaakaLoadingScreen message={t.loading} backgroundColor={theme.background} textColor={theme.textSecondary} />;
   }
 
   return (

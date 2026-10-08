@@ -25,6 +25,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { io } from 'socket.io-client';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const DEFAULT_AVATAR = require('../assets/profile1.png');
@@ -195,9 +196,12 @@ const UpdatesRow = React.memo(({ updates, onUpdatePress, theme }) => {
 });
 
 // ---------- Conversation Row ----------
-const ConversationRow = ({ conversation, onPress, theme, currentUserId, isOnline }) => {
+const ConversationRow = ({ conversation, onPress, theme, currentUserId, isOnline, isTyping }) => {
   const lastMsg = conversation.lastMessage;
   const isSentByMe = lastMsg?.senderId === currentUserId;
+  const displayMessage = isTyping
+    ? 'Typing...'
+    : (lastMsg?.text || 'No messages yet');
 
   return (
     <TouchableOpacity
@@ -240,12 +244,14 @@ const ConversationRow = ({ conversation, onPress, theme, currentUserId, isOnline
           <Text
             style={[
               styles.lastMessage,
-              { color: isSentByMe ? theme.textSecondary : theme.text },
+              {
+                color: isTyping ? theme.accent : (isSentByMe ? theme.textSecondary : theme.text),
+                fontStyle: isTyping ? 'italic' : 'normal',
+              },
             ]}
             numberOfLines={1}
           >
-            {isSentByMe ? 'You: ' : ''}
-            {lastMsg?.text || 'No messages yet'}
+            {isTyping ? displayMessage : `${isSentByMe ? 'You: ' : ''}${displayMessage}`}
           </Text>
         </View>
       </View>
@@ -254,7 +260,7 @@ const ConversationRow = ({ conversation, onPress, theme, currentUserId, isOnline
 };
 
 // ---------- Main Screen ----------
-const MessageScreen = ({ navigation, language }) => {
+const MessageScreen = ({ navigation, language, adminMode = false }) => {
   const { theme, isDarkMode } = useTheme();
   const t = translations[language] || translations.English;
 
@@ -268,9 +274,12 @@ const MessageScreen = ({ navigation, language }) => {
   const [currentUser, setCurrentUser] = useState(null);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [onlineUsers, setOnlineUsers] = useState({});
+  const [typingUsers, setTypingUsers] = useState({});
   const socketRef = useRef(null);
 
   const [notes, setNotes] = useState([]);
+  const [showBackToTop, setShowBackToTop] = useState(false);
+  const flatListRef = useRef(null);
 
   const [detailSheetVisible, setDetailSheetVisible] = useState(false);
   const detailSheetAnim = useRef(new Animated.Value(DETAIL_SHEET_HEIGHT)).current;
@@ -360,7 +369,9 @@ const MessageScreen = ({ navigation, language }) => {
     });
   };
 
-  const getToken = async () => AsyncStorage.getItem('userToken');
+  const getToken = async () => adminMode
+    ? AsyncStorage.getItem('adminToken')
+    : AsyncStorage.getItem('userToken');
 
   // ---------- Fetch online statuses ----------
   const fetchOnlineStatuses = useCallback(async (userIds) => {
@@ -411,6 +422,24 @@ const MessageScreen = ({ navigation, language }) => {
     socket.on('user-offline', (payload) => {
       const uid = payload?.userId;
       if (uid) setOnlineUsers((prev) => ({ ...prev, [String(uid)]: false }));
+    });
+
+    socket.on('user-typing', (payload) => {
+      const uid = payload?.senderId;
+      if (uid) {
+        setTypingUsers((prev) => ({ ...prev, [String(uid)]: true }));
+      }
+    });
+
+    socket.on('user-stop-typing', (payload) => {
+      const uid = payload?.senderId;
+      if (uid) {
+        setTypingUsers((prev) => {
+          const next = { ...prev };
+          delete next[String(uid)];
+          return next;
+        });
+      }
     });
   }, [isLoggedIn, currentUser]);
 
@@ -576,8 +605,11 @@ const MessageScreen = ({ navigation, language }) => {
   const checkLoginStatus = async () => {
     try {
       const loggedIn = await AsyncStorage.getItem('isLoggedIn');
-      setIsLoggedIn(loggedIn === 'true');
-      if (loggedIn === 'true') {
+      const isAuthenticated = adminMode
+        ? Boolean(await AsyncStorage.getItem('adminToken'))
+        : loggedIn === 'true';
+      setIsLoggedIn(isAuthenticated);
+      if (isAuthenticated) {
         await loadCurrentUser();
         await refreshAll();
       } else {
@@ -641,6 +673,7 @@ const MessageScreen = ({ navigation, language }) => {
       sellerName: userName || 'User',
       sellerAvatar: userAvatar || '',
       sellerPhone: sellerPhone,
+      adminMode,
     });
   };
 
@@ -742,12 +775,27 @@ const MessageScreen = ({ navigation, language }) => {
     </Modal>
   );
 
+  const scrollToTop = useCallback(async () => {
+    flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+
+    setRefreshing(true);
+    try {
+      await refreshAll();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refreshAll]);
+
   // ---------- Scroll handler (whole container) ----------
   const handleScroll = useCallback((event) => {
     const currentScrollY = event.nativeEvent.contentOffset.y;
+    setShowBackToTop(currentScrollY > 200);
+
+    const headerCollapse = Math.min(currentScrollY, TOTAL_TOP_HEIGHT);
+    headerHeightAnim.setValue(Math.max(TOTAL_TOP_HEIGHT - headerCollapse, 0));
+    headerOpacityAnim.setValue(Math.max(1 - currentScrollY / (TOTAL_TOP_HEIGHT + 20), 0));
 
     if (currentScrollY <= 0) {
-      if (!headerVisible) animateHeaderShow();
       lastScrollY.current = 0;
       scrollAccumulator.current = 0;
       return;
@@ -761,19 +809,8 @@ const MessageScreen = ({ navigation, language }) => {
     }
 
     scrollAccumulator.current += scrollDiff;
-
-    if (scrollAccumulator.current > SCROLL_THRESHOLD && headerVisible) {
-      animateHeaderHide();
-      scrollAccumulator.current = 0;
-    }
-
-    if (scrollAccumulator.current < -SCROLL_THRESHOLD && !headerVisible) {
-      animateHeaderShow();
-      scrollAccumulator.current = 0;
-    }
-
     lastScrollY.current = currentScrollY;
-  }, [headerVisible]);
+  }, [headerHeightAnim, headerOpacityAnim]);
 
   // ---------- Login required ----------
   if (!isLoggedIn) {
@@ -795,18 +832,7 @@ const MessageScreen = ({ navigation, language }) => {
   }
 
   if (loading) {
-    return (
-      <View style={[styles.container, { backgroundColor: theme.background }]}>
-        <View style={styles.center}>
-          <Animated.Image
-            source={loadingLogo}
-            style={[styles.loadingImage, { transform: [{ scale: scaleAnim }] }]}
-            resizeMode="contain"
-          />
-          <Text style={[styles.loadingText, { color: theme.text }]}>{t.loading}</Text>
-        </View>
-      </View>
-    );
+    return <ShaakaLoadingScreen message={t.loading} backgroundColor={theme.background} textColor={theme.text} />;
   }
 
   // ---------- Main render ----------
@@ -880,6 +906,7 @@ const MessageScreen = ({ navigation, language }) => {
 
         {/* Conversations FlatList */}
         <FlatList
+          ref={flatListRef}
           data={filtered}
           keyExtractor={(item) => String(item.otherUserId || item._id || Math.random())}
           renderItem={({ item }) => (
@@ -894,6 +921,7 @@ const MessageScreen = ({ navigation, language }) => {
               theme={theme}
               currentUserId={currentUser?._id}
               isOnline={onlineUsers[String(item.otherUserId)] || false}
+              isTyping={!!typingUsers[String(item.otherUserId)]}
             />
           )}
           contentContainerStyle={styles.list}
@@ -914,14 +942,14 @@ const MessageScreen = ({ navigation, language }) => {
           scrollEventThrottle={16}
         />
 
-        {!headerVisible && (
+        {showBackToTop && (
           <TouchableOpacity
             style={[
               styles.showHeaderButton,
               { bottom: 20, backgroundColor: theme.accent }
             ]}
-            onPress={animateHeaderShow}
-            activeOpacity={0.1}
+            onPress={scrollToTop}
+            activeOpacity={0.9}
           >
             <Ionicons name="chevron-up-circle" size={30} color="#fff" />
           </TouchableOpacity>
@@ -988,7 +1016,20 @@ const MessageScreen = ({ navigation, language }) => {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  loadingImage: { width: 150, height: 150 },
+  loadingBadge: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
+  },
+  loadingImage: { width: 110, height: 110 },
   loadingText: { marginTop: 22, fontSize: 16 },
 
   overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },

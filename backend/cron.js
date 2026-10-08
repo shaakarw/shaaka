@@ -3,7 +3,8 @@
 
 const User = require('./models/User');
 const Message = require('./models/Message');
-const cloudinary = require('./config/cloudinary');
+const storageService = require('./services/storage/storageService');
+const { getMessageStorageKeys, deleteStorageKeys } = require('./utils/deletionCleanup');
 
 const PLAN_FEATURES = {
   basic: { retentionDays: 7 },
@@ -67,7 +68,9 @@ const runAutoDelete = async () => {
       const sender = msg.senderId;
       if (!sender) {
         // No sender found, delete after max retention
+        const storageKeys = getMessageStorageKeys(msg);
         await Message.findByIdAndDelete(msg._id);
+        await deleteStorageKeys(storageKeys);
         deletedCount++;
         continue;
       }
@@ -91,18 +94,9 @@ const runAutoDelete = async () => {
       msgCutoff.setDate(msgCutoff.getDate() + retentionDays);
 
       if (new Date() > msgCutoff) {
-        // Delete from Cloudinary if URL exists
-        if (msg.imageUrl && msg.imageUrl.includes('cloudinary')) {
-          try {
-            const publicId = msg.imageUrl.split('/').pop().split('.')[0];
-            if (publicId) {
-              await cloudinary.uploader.destroy(`chat_images/${publicId}`);
-            }
-          } catch (cloudErr) {
-            console.warn(`[Cron] Cloudinary delete warning for ${msg._id}:`, cloudErr.message);
-          }
-        }
+        const storageKeys = getMessageStorageKeys(msg);
         await Message.findByIdAndDelete(msg._id);
+        await deleteStorageKeys(storageKeys);
         deletedCount++;
       }
     }

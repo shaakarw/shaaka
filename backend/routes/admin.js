@@ -79,6 +79,7 @@ router.get('/users/:userId/details', adminController.getUserDetails);
 
 // Posts
 router.get('/posts', adminController.getPosts);
+router.patch('/posts/:postId', adminController.updatePost);
 router.delete('/posts/:postId', adminController.deletePost);
 router.put('/posts/:postId/stop', adminController.stopPost);
 router.put('/posts/:postId/restore', adminController.restorePost);

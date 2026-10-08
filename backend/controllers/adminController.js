@@ -16,6 +16,29 @@ exports.getDashboardStats = async (req, res) => {
     const totalReports = await Report.countDocuments();
 
     const blockedUsers = await User.countDocuments({ blocked: true });
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    const activityStart = new Date(today);
+    activityStart.setUTCDate(activityStart.getUTCDate() - 29);
+    const dailyPosts = await Post.aggregate([
+      { $match: { createdAt: { $gte: activityStart } } },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'UTC' } },
+          value: { $sum: 1 },
+        },
+      },
+    ]);
+    const postsByDay = new Map(dailyPosts.map((entry) => [entry._id, entry.value]));
+    const activityHistory = Array.from({ length: 30 }, (_, index) => {
+      const date = new Date(activityStart);
+      date.setUTCDate(date.getUTCDate() + index);
+      return {
+        date: date.toISOString().slice(0, 10),
+        label: date.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' }),
+        value: postsByDay.get(date.toISOString().slice(0, 10)) || 0,
+      };
+    });
 
     res.json({
       success: true,
@@ -25,6 +48,7 @@ exports.getDashboardStats = async (req, res) => {
         totalShops,
         totalReports,
         blockedUsers,
+        activityHistory,
       }
     });
   } catch (err) {
@@ -91,6 +115,8 @@ exports.getPosts = async (req, res) => {
       location: p.location,
       houseImages: p.houseImages || [],
       price: p.price,
+      featured: p.featured || false,
+      trending: p.trending || false,
       status: p.status || 'active',
       isReported: p.isReported || false,
       stopped: p.stopped || false,
@@ -322,16 +348,31 @@ exports.getPayments = async (req, res) => {
 exports.updateUserLimits = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { postUploadLimitPerDay, shopUploadLimitLifetime, placeProductUploadLimitPerDay, mallShopUploadLimitLifetime, mallProductUploadLimitPerDay, imagesPerMessage, imagesRetentionDays, messagesRetentionDays } = req.body;
+    const {
+      postUploadLimitPerDay,
+      shopUploadLimitLifetime,
+      placeProductUploadLimitPerDay,
+      mallShopUploadLimitLifetime,
+      mallProductUploadLimitPerDay,
+      imagesPerMessage,
+      imagesRetentionDays,
+      messagesRetentionDays,
+      allowVideoUpload,
+      videoUploadLimitPerDay,
+    } = req.body;
     const updates = {};
-    if (typeof postUploadLimitPerDay === 'number') updates.postUploadLimitPerDay = Math.max(1, postUploadLimitPerDay);
-    if (typeof shopUploadLimitLifetime === 'number') updates.shopUploadLimitLifetime = Math.max(1, shopUploadLimitLifetime);
-    if (typeof placeProductUploadLimitPerDay === 'number') updates.placeProductUploadLimitPerDay = Math.max(1, placeProductUploadLimitPerDay);
-    if (typeof mallShopUploadLimitLifetime === 'number') updates.mallShopUploadLimitLifetime = Math.max(1, mallShopUploadLimitLifetime);
-    if (typeof mallProductUploadLimitPerDay === 'number') updates.mallProductUploadLimitPerDay = Math.max(1, mallProductUploadLimitPerDay);
-    if (typeof imagesPerMessage === 'number') updates.imagesPerMessage = Math.max(1, imagesPerMessage);
-    if (typeof imagesRetentionDays === 'number') updates.imagesRetentionDays = Math.max(1, imagesRetentionDays);
-    if (typeof messagesRetentionDays === 'number') updates.messagesRetentionDays = Math.max(1, messagesRetentionDays);
+    const clampLimit = (value) => Math.min(100, Math.max(0, Number.isFinite(value) ? value : 0));
+
+    if (typeof postUploadLimitPerDay === 'number') updates.postUploadLimitPerDay = clampLimit(postUploadLimitPerDay);
+    if (typeof shopUploadLimitLifetime === 'number') updates.shopUploadLimitLifetime = clampLimit(shopUploadLimitLifetime);
+    if (typeof placeProductUploadLimitPerDay === 'number') updates.placeProductUploadLimitPerDay = clampLimit(placeProductUploadLimitPerDay);
+    if (typeof mallShopUploadLimitLifetime === 'number') updates.mallShopUploadLimitLifetime = clampLimit(mallShopUploadLimitLifetime);
+    if (typeof mallProductUploadLimitPerDay === 'number') updates.mallProductUploadLimitPerDay = clampLimit(mallProductUploadLimitPerDay);
+    if (typeof imagesPerMessage === 'number') updates.imagesPerMessage = clampLimit(imagesPerMessage);
+    if (typeof imagesRetentionDays === 'number') updates.imagesRetentionDays = clampLimit(imagesRetentionDays);
+    if (typeof messagesRetentionDays === 'number') updates.messagesRetentionDays = clampLimit(messagesRetentionDays);
+    if (typeof allowVideoUpload === 'boolean') updates.allowVideoUpload = allowVideoUpload;
+    if (typeof videoUploadLimitPerDay === 'number') updates.videoUploadLimitPerDay = clampLimit(videoUploadLimitPerDay);
 
     const user = await User.findByIdAndUpdate(userId, updates, { new: true }).select('-password');
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
@@ -427,6 +468,13 @@ exports.getUserDetails = async (req, res) => {
     };
 
     // ✅ Limits from aggregated subscriptions
+    const videoLimit = typeof user.videoUploadLimitPerDay === 'number' ? Math.max(0, user.videoUploadLimitPerDay) : 0;
+    const videosToday = await Post.countDocuments({
+      user: userId,
+      videoUrl: { $exists: true, $ne: '' },
+      createdAt: { $gte: today, $lt: tomorrow }
+    });
+
     userData.limits = {
       postsPerDay: totalLimits.postsPerDay,
       imagesPerMessage: totalLimits.imagesPerMessage,
@@ -434,6 +482,10 @@ exports.getUserDetails = async (req, res) => {
       retentionDays: totalLimits.retentionDays,
       postsToday,
       remainingPosts: Math.max(totalLimits.postsPerDay - postsToday, 0),
+      allowVideoUpload: user.allowVideoUpload !== false,
+      videoUploadLimitPerDay: videoLimit,
+      videosToday,
+      remainingVideos: Math.max(videoLimit - videosToday, 0),
     };
 
     userData.stats = {
@@ -448,6 +500,25 @@ exports.getUserDetails = async (req, res) => {
     res.json({ success: true, user: userData });
   } catch (err) {
     console.error('Get user details error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+exports.updatePost = async (req, res) => {
+  try {
+    const updates = {};
+    if (typeof req.body?.featured === 'boolean') updates.featured = req.body.featured;
+    if (typeof req.body?.trending === 'boolean') updates.trending = req.body.trending;
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid post fields provided' });
+    }
+
+    const post = await Post.findByIdAndUpdate(req.params.postId, updates, { new: true });
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
+    res.json({ success: true, message: 'Post updated', post });
+  } catch (err) {
+    console.error('Update post error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

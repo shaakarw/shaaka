@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "shaka",
-    "slug": "shaka",
+    "name": "shaaka",
+    "slug": "shaaka",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -19,7 +19,7 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.anonymous.shaka",
+      "package": "com.anonymous.shaaka",
       "permissions": [
         "INTERNET"
       ],
@@ -45,9 +45,14 @@
           "photosPermission": "Allow Shaaka to access your photos to save images.",
           "savePhotosPermission": "Allow Shaaka to save images to your gallery.",
           "isAccessMediaLocationEnabled": true,
-          "audioPermission": false  
+          "granularPermissions": [
+            "photo"
+          ]
         }
-      ]
+      ],
+      "expo-video",
+      "expo-sqlite",
+      "expo-status-bar"
     ],
     "extra": {
       "eas": {

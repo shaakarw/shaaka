@@ -23,12 +23,10 @@ const seedAdmin = async () => {
   try {
     const phone = '0799882580';
     const password = '1234';
-    console.log('🔍 Checking for admin user with phone:', phone);
 
     let existing = await User.findOne({ phone });
 
     if (!existing) {
-      console.log('❌ Admin not found – creating one...');
       const hashed = await bcrypt.hash(password, 10);
       const admin = await User.create({
         phone,
@@ -42,14 +40,14 @@ const seedAdmin = async () => {
         name: 'Admin',
         email: '',
       });
-      console.log('✅ Admin user CREATED with ID:', admin._id);
+      console.log('✅ Admin user created');
       return;
     }
 
     if (existing.role !== 'admin') {
       existing.role = 'admin';
       await existing.save();
-      console.log('✅ Existing user PROMOTED to admin:', existing._id);
+      console.log('✅ Existing user promoted to admin');
       return;
     }
 
@@ -57,12 +55,10 @@ const seedAdmin = async () => {
     if (!isMatch) {
       existing.password = await bcrypt.hash(password, 10);
       await existing.save();
-      console.log('🔑 Admin password reset to "1234"');
+      console.log('🔑 Admin password reset');
     }
 
-    console.log('✅ Admin user ALREADY EXISTS with ID:', existing._id);
-    console.log('   Phone:', existing.phone);
-    console.log('   Role:', existing.role);
+    console.log('✅ Admin user already exists');
   } catch (err) {
     console.error('❌ seedAdmin error:', err);
   }
@@ -89,18 +85,11 @@ startServer();
 app.use(cors());
 app.use(express.json());
 
-// 📨 Request logging middleware
-app.use((req, res, next) => {
-  console.log(`📨 ${req.method} ${req.url}`);
-  if (req.headers.authorization) {
-    console.log(`🔑 Authorization: ${req.headers.authorization.substring(0, 30)}...`);
-  }
-  next();
-});
-
 // ---------- Routes ----------
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/media', require('./routes/media'));
 app.use('/api/messages', messageRoutes);
+app.use('/api/sync', require('./routes/sync'));
 app.use('/api/user', require('./routes/user'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/messages', require('./routes/messages'));
@@ -108,6 +97,7 @@ app.use('/api/posts', require('./routes/posts'));
 app.use('/api/places', placeRoutes);
 app.use('/api/reports', require('./routes/reportRoutes'));
 app.use('/api/notes', require('./routes/noteRoutes'));
+app.use('/api/settings', require('./routes/settings'));
         // admin
 app.use('/api/user/notes', require('./routes/userNotes')); // user
 app.use('/api/mall-shops', mallShopRoutes);
@@ -225,14 +215,21 @@ io.on('connection', (socket) => {
     socket.leave(room);
   });
 
-  socket.on('typing', ({ postId, toUserId, isTyping }) => {
-    if (!currentUserId || !postId || !toUserId) return;
-    const room = `chat_${[currentUserId, toUserId].sort().join('_')}`;
-    socket.to(room).emit('user-typing', {
-      userId: currentUserId,
-      typing: isTyping,
+  const broadcastTyping = (eventName, payload = {}) => {
+    const chatId = payload.chatId || payload.postId;
+    const receiverId = payload.receiverId || payload.toUserId;
+    if (!currentUserId || !chatId || !receiverId) return;
+    const room = `chat_${[currentUserId, receiverId].sort().join('_')}`;
+    socket.to(room).emit(eventName, {
+      chatId: String(chatId),
+      senderId: String(currentUserId),
+      receiverId: String(receiverId),
+      typing: eventName === 'user-typing',
     });
-  });
+  };
+
+  socket.on('typing', (payload) => broadcastTyping('user-typing', payload));
+  socket.on('stop_typing', (payload) => broadcastTyping('user-stop-typing', payload));
 
   socket.on('logout', () => {
     if (!currentUserId) return;

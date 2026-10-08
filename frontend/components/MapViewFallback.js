@@ -23,6 +23,8 @@ export const Callout = ({ children, ...props }) => {
   return <View>{children}</View>;
 };
 
+export const UrlTile = () => null;
+
 export const Region = null;
 
 const styles = StyleSheet.create({

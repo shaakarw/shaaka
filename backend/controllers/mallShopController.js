@@ -5,6 +5,7 @@ const Place = require('../models/Place');
 const { deleteMallShopWithCleanup } = require('../utils/deletionCleanup');
 const { normalizeRwandaPhone, isValidRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
+const storageService = require('../services/storage/storageService');
 
 // Create a new shop inside a mall
 exports.createMallShop = async (req, res) => {
@@ -29,6 +30,15 @@ exports.createMallShop = async (req, res) => {
       lat,
       lon,
     } = req.body;
+
+    const normalizedProducts = (products || []).map(product => ({
+      ...product,
+      imageStorageKeys: storageService.collectStorageKeys
+        ? storageService.collectStorageKeys(product.images || [])
+        : (product.images || []).map(storageService.getStorageKeyFromUrl).filter(Boolean),
+    }));
+
+    const frontImageStorageKey = storageService.getStorageKeyFromUrl(images?.frontImage) || '';
 
     // Validate required fields
     const hasFrontImage = images && images.frontImage;
@@ -99,7 +109,9 @@ exports.createMallShop = async (req, res) => {
       openingTime,
       closingTime,
       images,
-      products,
+      frontImageStorageKey,
+      storageProvider: 'b2',
+      products: normalizedProducts,
       lat,
       lon,
       createdDate: new Date(),
@@ -257,6 +269,16 @@ exports.deleteMallShop = async (req, res) => {
     res.json({ success: true, message: 'Mall shop and all related data deleted successfully' });
   } catch (error) {
     console.error('Error deleting mall shop:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+exports.getMyMallShops = async (req, res) => {
+  try {
+    const shops = await MallShop.find({ ownerId: req.user.id }).sort({ createdDate: -1 });
+    res.json({ success: true, shops });
+  } catch (error) {
+    console.error('Error fetching my mall shops:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

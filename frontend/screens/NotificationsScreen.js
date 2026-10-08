@@ -7,14 +7,15 @@ import axios from 'axios';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '../constants';
 
 const fallbackImage = require('../assets/profile1.png');
 
 const copy = {
-  English: { title: 'Notifications', markAll: 'Mark as Read', empty: 'No Notifications', error: 'Failed to load notifications', newPost: 'New post added', newShop: 'New shop added', newPlace: 'New place added', newMall: 'New shopping mall added', newMallShop: 'New shop added to shopping mall', mapPlace: 'New place added to the map', password: 'Your password was successfully changed.', name: 'Your account name was successfully changed.' },
-  Kinyarwanda: { title: 'Imenyesha', markAll: 'Shyira byose mu byasomwe', empty: 'Nta menyesha zihari', error: 'Kubona imenyesha byanze', newPost: 'Igicuruzwa gishya cyashyizweho', newShop: 'Iduka rishya ryashyizweho', newPlace: 'Ahantu hashya hashyizweho', newMall: 'Isoko rinini rishya ryashyizweho', newMallShop: 'Iduka rishya ryashyizwe mu isoko', mapPlace: 'Ahantu hashya hashyizwe ku ikarita', password: 'Ijambo banga ryawe ryahinduwe neza.', name: 'Izina rya konti yawe ryahinduwe neza.' },
+  English: { title: 'Notifications', markAll: 'Mark as Read', empty: '', error: 'Failed to load notifications', newPost: 'New post added', newShop: 'New shop added', newPlace: 'New place added', newMall: 'New shopping mall added', newMallShop: 'New shop added to shopping mall', mapPlace: 'New place added to the map', password: 'Your password was successfully changed.', name: 'Your account name was successfully changed.' },
+  Kinyarwanda: { title: 'Imenyesha', markAll: 'Shyira byose mu byasomwe', empty: '', error: 'Kubona imenyesha byanze', newPost: 'Igicuruzwa gishya cyashyizweho', newShop: 'Iduka rishya ryashyizweho', newPlace: 'Ahantu hashya hashyizweho', newMall: 'Isoko rinini rishya ryashyizweho', newMallShop: 'Iduka rishya ryashyizwe mu isoko', mapPlace: 'Ahantu hashya hashyizwe ku ikarita', password: 'Ijambo banga ryawe ryahinduwe neza.', name: 'Izina rya konti yawe ryahinduwe neza.' },
 };
 
 const getTime = value => {
@@ -86,7 +87,7 @@ export default function NotificationsScreen({ navigation, language = 'English' }
     </TouchableOpacity>
   );
 
-  if (loading) return <View style={[styles.center, { backgroundColor: theme.background }]}><ActivityIndicator color={theme.accent} /></View>;
+  if (loading) return <ShaakaLoadingScreen message={copy[language]?.loading || 'Loading notifications...'} backgroundColor={theme.background} textColor={theme.text} />;
   return <View style={[styles.container, { backgroundColor: theme.background }]}><View style={styles.header}><Text style={[styles.title, { color: theme.text }]}>{t.title}</Text>{items.some(item => !item.isRead) && <TouchableOpacity onPress={markAll}><Text style={[styles.markAll, { color: theme.accent }]}>{t.markAll}</Text></TouchableOpacity>}</View>{error ? <Text style={[styles.empty, { color: theme.textSecondary }]}>{t.error}</Text> : <FlatList data={items} keyExtractor={item => item._id} renderItem={renderItem} ListEmptyComponent={<Text style={[styles.empty, { color: theme.textSecondary }]}>{t.empty}</Text>} contentContainerStyle={items.length ? styles.list : styles.emptyList} />}</View>;
 }
 

@@ -42,6 +42,14 @@ const PlaceSchema = new mongoose.Schema({
    doorImage: String,
    doorVideo: String,
   },
+  imageStorageKeys: {
+    streetImage: { type: String, default: '' },
+    street: { type: String, default: '' },
+    streetVideo: { type: String, default: '' },
+    doorImage: { type: String, default: '' },
+    doorVideo: { type: String, default: '' },
+  },
+  storageProvider: { type: String, default: '' },
   // ✅ NEW: Products array
   products: [
    {
@@ -49,6 +57,7 @@ const PlaceSchema = new mongoose.Schema({
      price: { type: Number, required: true },
      description: { type: String, default: '' },
      images: [String], // URLs after upload
+    imageStorageKeys: [{ type: String }],
    },
   ],
   extras: {

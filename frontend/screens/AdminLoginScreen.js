@@ -51,22 +51,37 @@ const translations = {
 const AdminLoginScreen = ({ navigation, language }) => {
   const { theme, isDarkMode } = useTheme();
   const t = translations[language] || translations.English;
+  const [checkingSession, setCheckingSession] = useState(true);
 
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
-  // Auto‑redirect if already logged in
   useEffect(() => {
+    let isActive = true;
     const checkToken = async () => {
-      const token = await AsyncStorage.getItem('adminToken');
-      if (token) {
-        navigation.replace('AdminDashboard', { language });
+      try {
+        const token = await AsyncStorage.getItem('adminToken');
+        if (!token) return;
+
+        const response = await axios.get(`${BASE_URL}/api/admin/stats`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (isActive && response.data?.success) {
+          navigation.replace('AdminDashboard', { language });
+        }
+      } catch (error) {
+        if ([401, 403].includes(error.response?.status)) {
+          await AsyncStorage.removeItem('adminToken');
+        }
+      } finally {
+        if (isActive) setCheckingSession(false);
       }
     };
     checkToken();
-  }, []);
+    return () => { isActive = false; };
+  }, [language, navigation]);
 
   const handleLogin = async () => {
     const trimmedPhone = phone.trim();
@@ -108,7 +123,7 @@ const AdminLoginScreen = ({ navigation, language }) => {
       resizeMode="cover"
     >
       {/* Overlay – same as MessageScreen */}
-      <View style={[styles.overlay, { backgroundColor: theme.background, opacity: 0.92 }]} />
+      <View style={[styles.overlay, { backgroundColor: theme.background, opacity: 0.88 }]} />
 
       <SafeAreaView style={{ flex: 1, backgroundColor: 'transparent' }}>
         <KeyboardAvoidingView
@@ -128,11 +143,11 @@ const AdminLoginScreen = ({ navigation, language }) => {
             </View>
 
             {/* Form */}
-            <View style={styles.form}>
+              <View style={[styles.form, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
               {/* Phone */}
               <View style={styles.inputGroup}>
                 <Text style={[styles.label, { color: theme.text }]}>{t.phone}</Text>
-                <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+                <View style={[styles.inputContainer, { borderColor: theme.border, backgroundColor: theme.background }]}>
                   <Ionicons name="call-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                   <TextInput
                     style={[styles.input, { color: theme.text }]}
@@ -148,7 +163,7 @@ const AdminLoginScreen = ({ navigation, language }) => {
               {/* Password */}
               <View style={styles.inputGroup}>
                 <Text style={[styles.label, { color: theme.text }]}>{t.password}</Text>
-                <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+                <View style={[styles.inputContainer, { borderColor: theme.border, backgroundColor: theme.background }]}>
                   <Ionicons name="lock-closed-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                   <TextInput
                     style={[styles.input, { color: theme.text }]}
@@ -224,7 +239,7 @@ const styles = StyleSheet.create({
     marginBottom: 32,
   },
   title: {
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: 'bold',
     marginBottom: 6,
   },
@@ -234,6 +249,11 @@ const styles = StyleSheet.create({
   },
   form: {
     width: '100%',
+    maxWidth: 440,
+    alignSelf: 'center',
+    borderWidth: 0,
+    borderRadius: 16,
+    padding: 20,
   },
   inputGroup: {
     marginBottom: 20,
@@ -247,7 +267,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1,
-    borderRadius: 12,
+    borderRadius: 10,
     paddingHorizontal: 12,
     height: 52,
   },
@@ -260,7 +280,7 @@ const styles = StyleSheet.create({
   },
   loginButton: {
     height: 48,
-    borderRadius: 24,
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
     marginTop: 10,
@@ -273,7 +293,7 @@ const styles = StyleSheet.create({
   cancelButton: {
     marginTop: 16,
     height: 48,
-    borderRadius: 24,
+    borderRadius: 12,
     borderWidth: 1,
     justifyContent: 'center',
     alignItems: 'center',

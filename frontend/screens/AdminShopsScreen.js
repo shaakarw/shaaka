@@ -24,10 +24,12 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import AdminScreenHeader from '../components/AdminScreenHeader';
 
 const { width, height } = Dimensions.get('window');
 const CARD_MARGIN = 6;
-const ITEMS_PER_ROW = 3;
+const ITEMS_PER_ROW = 2;
 const CARD_WIDTH = (width - CARD_MARGIN * (ITEMS_PER_ROW + 1)) / ITEMS_PER_ROW;
 const BOTTOM_SHEET_MAX_HEIGHT = height * 0.75;
 const BOTTOM_SHEET_MIN_HEIGHT = height * 0.25;
@@ -434,7 +436,7 @@ const AdminShopsScreen = ({ navigation, language }) => {
         style={[
           styles.gridCard,
           {
-            backgroundColor: theme.background,
+            backgroundColor: theme.cardBackground,
             borderColor: theme.border,
             opacity: isActive ? 1 : 0.6,
             borderWidth: isPromoted ? 2 : 1,
@@ -543,13 +545,14 @@ const AdminShopsScreen = ({ navigation, language }) => {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
       {/* Header */}
-      <View style={[styles.header, { borderBottomColor: theme.border }]}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Ionicons name="arrow-back-outline" size={26} color={theme.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: theme.text }]}>{t.shops}</Text>
-        <View style={{ width: 40 }} />
-      </View>
+      <AdminScreenHeader
+        title={t.shops}
+        theme={theme}
+        onBack={() => navigation.goBack()}
+        actionIcon="refresh-outline"
+        actionLabel="Refresh shops"
+        onAction={fetchShops}
+      />
 
       {/* Search (collapsible) */}
       {renderSearch()}
@@ -557,7 +560,7 @@ const AdminShopsScreen = ({ navigation, language }) => {
       {/* List */}
       {loading && !refreshing ? (
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={theme.accent} />
+          <ShaakaLoadingScreen backgroundColor={theme.background} textColor={theme.text} hideText />
         </View>
       ) : (
         renderShopsList()
@@ -622,7 +625,7 @@ const styles = StyleSheet.create({
   },
   shopImageContainer: {
     width: '100%',
-    height: 80,
+    height: 112,
     borderRadius: 8,
     overflow: 'hidden',
     marginBottom: 6,

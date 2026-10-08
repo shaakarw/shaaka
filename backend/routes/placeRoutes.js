@@ -6,46 +6,21 @@ const MallShop = require('../models/MallShop');
 const auth = require('../middleware/auth');
 const multer = require('multer');
 const path = require('path');
-const cloudinary = require('../config/cloudinary');
-const streamifier = require('streamifier');
+const storageService = require('../services/storage/storageService');
 const { normalizeRwandaPhone, isValidRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
-const {
-  deletePlaceWithCleanup,
-  deleteCloudinaryAsset,
-  parseCloudinaryPublicId,
-  isCloudinaryUrl,
-} = require('../utils/deletionCleanup');
+const { deletePlaceWithCleanup } = require('../utils/deletionCleanup');
 
 // ---------- Custom multer config for single image ----------
 const storage = multer.memoryStorage();
 const fileFilter = (req, file, cb) => {
-  const allowedTypes = /jpeg|jpg|png|gif/;
-  const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-  const mimetype = allowedTypes.test(file.mimetype);
+  const extname = path.extname(file.originalname).length > 0;
+  const mimetype = (file.mimetype || '').toLowerCase().startsWith('image/');
   if (mimetype && extname) return cb(null, true);
-  cb(new Error('Only images are allowed'), false);
+  cb(new Error('Only supported image files are allowed'), false);
 };
 // Use a dedicated image upload middleware for the single-image upload endpoint
 const imageUpload = multer({ storage, fileFilter }).single('image');
-
-// Helper: upload buffer to Cloudinary
-const uploadToCloudinary = (buffer, folder = 'places') => {
-  return new Promise((resolve, reject) => {
-    // Check if cloudinary is configured
-    if (!cloudinary.config().cloud_name || cloudinary.config().cloud_name === 'dummy') {
-      return reject(new Error('Cloudinary not configured'));
-    }
-    const uploadStream = cloudinary.uploader.upload_stream(
-      { folder },
-      (error, result) => {
-        if (error) reject(error);
-        else resolve(result);
-      }
-    );
-    streamifier.createReadStream(buffer).pipe(uploadStream);
-  });
-};
 
 // ----- POST /api/places/upload – single image (used by frontend) -----
 router.post('/upload', auth, imageUpload, async (req, res) => {
@@ -57,11 +32,19 @@ router.post('/upload', auth, imageUpload, async (req, res) => {
     if (!req.file.buffer || req.file.buffer.length > MAX_IMAGE_BYTES) {
       return res.status(400).json({ success: false, message: 'Image exceeds 3 MB size limit' });
     }
-    const result = await uploadToCloudinary(req.file.buffer, 'places');
-    res.json({ success: true, url: result.secure_url });
+    const result = await storageService.uploadMedia({
+      buffer: req.file.buffer,
+      mimeType: req.file.mimetype,
+      folder: `places/${req.user.id}/images`,
+      maxBytes: MAX_IMAGE_BYTES,
+    });
+    const url = storageService.getMediaUrl(result.storageKey, {
+      origin: storageService.getRequestOrigin(req),
+    });
+    res.json({ success: true, url, ...result });
   } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ success: false, message: 'Image upload failed' });
+    console.error('Place image upload error:', error.code || error.message || 'Unknown error');
+    res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Image upload failed' });
   }
 });
 
@@ -167,6 +150,13 @@ router.post('/', auth, async (req, res) => {
       });
     }
 
+    if ((category === 'shoppingmall' || category === 'shopping_mall') && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only administrators can add shopping malls',
+      });
+    }
+
     const contactPhone = (req.body.contact && req.body.contact.phone) || '';
     if (!contactPhone || !contactPhone.trim()) {
       return res.status(400).json({ success: false, message: 'Phone number is required' });
@@ -236,7 +226,17 @@ router.post('/', auth, async (req, res) => {
       streetName,
       buildingNumber,
       images: images || {},
-      products: products || [],
+      imageStorageKeys: Object.fromEntries(Object.entries(images || {}).map(([name, url]) => [
+        name,
+        storageService.getStorageKeyFromUrl(url) || '',
+      ])),
+      storageProvider: 'b2',
+      products: (products || []).map(product => ({
+        ...product,
+        imageStorageKeys: storageService.collectStorageKeys
+          ? storageService.collectStorageKeys(product.images || [])
+          : (product.images || []).map(storageService.getStorageKeyFromUrl).filter(Boolean),
+      })),
       extras,
       contactButtons,
       socialLinks,

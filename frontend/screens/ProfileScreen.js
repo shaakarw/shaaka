@@ -28,7 +28,8 @@ import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import SharedBottomNav from '../components/SharedBottomNav';
-import FullScreenImageViewer from '../components/FullScreenImageViewer';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import PostCoverImage from '../components/PostCoverImage';
 
 const { width, height } = Dimensions.get('window');
 const SIDEBAR_WIDTH = width * 0.5;
@@ -36,18 +37,22 @@ const SIDEBAR_WIDTH = width * 0.5;
 const BOTTOM_SHEET_HEIGHT = height * 0.7;
 const LOGOUT_SHEET_HEIGHT = height * 0.3;
 
-const loadingLogo = require('../assets/logos.png');
+const DEFAULT_AVATAR = require('../assets/profile1.png');
 
 // ---------- Translations ----------
 const translations = {
   English: {
     loading: 'Getting things ready…',
     posts: 'Posts',
+    videos: 'Videos',
     saved: 'Saved',
     noPosts: 'No posts yet',
+    noVideos: 'No videos yet',
     noSavedPosts: 'No saved posts yet',
     savePostsHint: 'Save posts you like to see them here',
-    createFirstPost: 'Create Your First Post',
+    createFirstVideo: 'Create your first video',
+    addFirstPost: 'Add your first post/product here',
+    saveFirstPost: 'Save your first post/product',
     explorePosts: 'Explore Posts',
     settings: 'Settings',
     logout: 'Logout',
@@ -67,15 +72,24 @@ const translations = {
     deleteConfirm: 'Are you sure you want to delete this post?',
     delete: 'Delete',
     unsaved: 'Unsaved',
+    loginRequired: 'Login Required',
+    loginMessage: 'Please login to continue',
+    login: 'Login',
+    profileLoadFailed: 'Could not load this profile',
+    retry: 'Retry',
   },
   Kinyarwanda: {
     loading: 'Turigutunganya page neza…',
     posts: 'Ibicuruzwa',
+    videos: 'Videwo',
     saved: 'Ibyabitswe',
     noPosts: 'Nta gicuruzwa',
+    noVideos: 'Nta videwo',
     noSavedPosts: 'Nta gicuruzwa cyabitswe',
     savePostsHint: 'Bika ibicuruzwa ukunda kugira ngo ubibone hano',
-    createFirstPost: 'Shyiraho igicuruzwa bwambere',
+    createFirstVideo: 'Kora videwo yawe ya mbere',
+    addFirstPost: 'Ongeraho igicuruzwa cyawe cya mbere hano',
+    saveFirstPost: 'Bika igicuruzwa cyawe cya mbere',
     explorePosts: 'Shakisha igicuruzwa',
     settings: 'Igenamiterere',
     logout: 'Sohoka',
@@ -95,7 +109,145 @@ const translations = {
     deleteConfirm: 'Ese ukenye gusiban icyi Gicuruzwa?',
     delete: 'Siba',
     unsaved: 'Ibitigenzwe bibikwa',
+    loginRequired: 'Ugomba kwinjira',
+    loginMessage: 'Nyamuneka winjire kugira ngo ukomeze',
+    login: 'Kwinjira',
+    profileLoadFailed: 'Ntibyashobotse kubona iyi porofile',
+    retry: 'Ongera ugerageze',
   },
+};
+
+// ---------- Helpers ----------
+const resolvePostImageUri = (post) => {
+  if (!post) return null;
+  return (
+    post.imageUrl ||
+    post.image ||
+    post.thumbnail ||
+    post.thumbnailUrl ||
+    post.coverImage ||
+    post.coverPhoto ||
+    post.bannerImage ||
+    post.mediaUrl ||
+    (Array.isArray(post.houseImages) && post.houseImages.find(Boolean)) ||
+    (Array.isArray(post.images) && post.images.find(Boolean)) ||
+    (Array.isArray(post.imageUrls) && post.imageUrls.find(Boolean)) ||
+    null
+  );
+};
+
+const resolvePostVideoCover = (post) => {
+  if (!post?.videoUrl) return null;
+  if (post.videoThumbnail) return post.videoThumbnail;
+  if (!post.videoUrl.includes('res.cloudinary.com')) return null;
+  const [urlWithoutQuery] = post.videoUrl.split('?');
+  const uploadMarker = '/video/upload/';
+  if (!urlWithoutQuery.includes(uploadMarker)) return null;
+  return urlWithoutQuery
+    .replace(uploadMarker, '/video/upload/so_5/')
+    .replace(/\.[^/.]+$/, '.jpg');
+};
+
+const isVideoPostItem = (post) =>
+  Boolean(post && (post.videoUrl || post.video || post.mediaUrl || post.videoUri));
+
+const getPostLabel = (post) =>
+  post?.productName || post?.title || post?.category || 'Product';
+
+const getPostImageSource = (img) => {
+  if (!img) return DEFAULT_AVATAR;
+  if (typeof img === 'string') return { uri: img };
+  if (typeof img === 'object' && img.uri) return img;
+  return DEFAULT_AVATAR;
+};
+
+// Normalise any "user id" shape (string, {_id}, {id}, {userId}, nested objects, etc.) into a string.
+const normaliseUserId = (raw) => {
+  if (raw == null) return null;
+
+  if (typeof raw === 'string' || typeof raw === 'number') {
+    const value = String(raw).trim();
+    return value ? value : null;
+  }
+
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      const value = normaliseUserId(item);
+      if (value) return value;
+    }
+    return null;
+  }
+
+  if (typeof raw === 'object') {
+    for (const key of ['_id', 'id', 'userId', 'user', 'value']) {
+      const value = normaliseUserId(raw[key]);
+      if (value) return value;
+    }
+  }
+
+  return null;
+};
+
+// ---------- PostCoverTile ----------
+// Full-bleed cover tile. Shows the product name (and video badge).
+// The user avatar and the amount are intentionally omitted.
+const PostCoverTile = ({ post, style, onPress, children }) => {
+  const [hasError, setHasError] = useState(false);
+
+  const video = isVideoPostItem(post);
+  const imageUri = video
+    ? resolvePostVideoCover(post) || resolvePostImageUri(post)
+    : resolvePostImageUri(post);
+
+  const label = getPostLabel(post);
+
+  useEffect(() => {
+    setHasError(false);
+  }, [imageUri]);
+
+  return (
+    <TouchableOpacity
+      activeOpacity={0.9}
+      onPress={onPress}
+      style={[style, styles.coverTile]}
+    >
+      {imageUri && !hasError ? (
+        <Image
+          source={{ uri: imageUri }}
+          style={styles.coverTileImage}
+          resizeMode="cover"
+          onError={() => setHasError(true)}
+        />
+      ) : (
+        <View style={styles.coverTileFallback}>
+          <Ionicons
+            name={video ? 'videocam-outline' : 'image-outline'}
+            size={32}
+            color="#a8a8a8"
+          />
+        </View>
+      )}
+
+      {/* Dark shade for readability */}
+      <View style={styles.coverTileShade} pointerEvents="none" />
+
+      {/* Product name */}
+      {!!label && (
+        <Text style={styles.coverTileLabel} numberOfLines={2}>
+          {label}
+        </Text>
+      )}
+
+      {/* Video badge */}
+      {video && (
+        <View style={styles.coverTileVideoBadge}>
+          <Ionicons name="videocam" size={11} color="#fff" />
+        </View>
+      )}
+
+      {children}
+    </TouchableOpacity>
+  );
 };
 
 const ProfileScreen = ({ navigation, route, language }) => {
@@ -103,22 +255,27 @@ const ProfileScreen = ({ navigation, route, language }) => {
   const { logout, updateUser: updateAuthUser, syncStoredUser } = useAuth();
   const t = translations[language] || translations.English;
 
-  const { userId: paramUserId, username: paramUsername } = route.params || {};
+  const params = route?.params || {};
+  const { userId: paramUserId, username: paramUsername } = params;
 
   const [currentUser, setCurrentUser] = useState(null);
   const [viewedUser, setViewedUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [avatarUri, setAvatarUri] = useState(null);
   const [username, setUsername] = useState('');
+  const [name, setName] = useState('');
   const [socialLinks, setSocialLinks] = useState([]);
   const [activeTab, setActiveTab] = useState('posts');
   const [userPosts, setUserPosts] = useState([]);
   const [savedPosts, setSavedPosts] = useState([]);
   const [savedPostIds, setSavedPostIds] = useState([]);
   const [uploading, setUploading] = useState(false);
-  
+  const [refreshing, setRefreshing] = useState(false);
+
   // Edit Profile Bottom Sheet
   const [editSheetVisible, setEditSheetVisible] = useState(false);
+  const [editName, setEditName] = useState('');
   const [editUsername, setEditUsername] = useState('');
   const [editLocation, setEditLocation] = useState('');
   const [editSocialLinks, setEditSocialLinks] = useState(['', '', '']);
@@ -130,16 +287,9 @@ const ProfileScreen = ({ navigation, route, language }) => {
 
   const [isOwnProfile, setIsOwnProfile] = useState(false);
 
-  // Full-screen image viewer state
-  const [imageViewerVisible, setImageViewerVisible] = useState(false);
-  const [selectedImageUrl, setSelectedImageUrl] = useState(null);
-
   // Sidebar
   const [sidebarVisible, setSidebarVisible] = useState(false);
-  const sidebarSlideAnim = useRef(new Animated.Value(SIDEBAR_WIDTH)).current; // off-screen to the right
-
-  // Loading animation
-  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const sidebarSlideAnim = useRef(new Animated.Value(SIDEBAR_WIDTH)).current;
 
   // PanResponder for edit bottom sheet
   const panResponder = useRef(
@@ -172,151 +322,173 @@ const ProfileScreen = ({ navigation, route, language }) => {
   ).current;
 
   useEffect(() => {
-    if (loading) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(scaleAnim, {
-            toValue: 1.2,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-          Animated.timing(scaleAnim, {
-            toValue: 1,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-        ])
-      ).start();
-    }
-  }, [loading]);
-
-  useEffect(() => {
     loadData();
   }, [paramUserId]);
+
+  // Never allow the 'saved' tab on other people's profiles
+  useEffect(() => {
+    if (!isOwnProfile && activeTab === 'saved') {
+      setActiveTab('posts');
+    }
+  }, [isOwnProfile, activeTab]);
 
   // Sidebar animation
   useEffect(() => {
     if (sidebarVisible) {
-      Animated.timing(sidebarSlideAnim, {
-        toValue: 0,
-        duration: 250,
-        useNativeDriver: true,
-      }).start();
+      Animated.timing(sidebarSlideAnim, { toValue: 0, duration: 250, useNativeDriver: true }).start();
     } else {
-      Animated.timing(sidebarSlideAnim, {
-        toValue: SIDEBAR_WIDTH,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
+      Animated.timing(sidebarSlideAnim, { toValue: SIDEBAR_WIDTH, duration: 200, useNativeDriver: true }).start();
     }
   }, [sidebarVisible]);
 
-  // Edit bottom sheet animation
+  // Edit sheet animation
   useEffect(() => {
     if (editSheetVisible) {
-      Animated.spring(slideAnim, {
-        toValue: 0,
-        useNativeDriver: true,
-        speed: 12,
-      }).start();
+      Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, speed: 12 }).start();
     } else {
-      Animated.timing(slideAnim, {
-        toValue: BOTTOM_SHEET_HEIGHT,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
+      Animated.timing(slideAnim, { toValue: BOTTOM_SHEET_HEIGHT, duration: 200, useNativeDriver: true }).start();
     }
   }, [editSheetVisible]);
 
-  // Logout bottom sheet animation
+  // Logout sheet animation
   useEffect(() => {
     if (logoutSheetVisible) {
-      Animated.spring(logoutSlideAnim, {
-        toValue: 0,
-        useNativeDriver: true,
-        speed: 12,
-      }).start();
+      Animated.spring(logoutSlideAnim, { toValue: 0, useNativeDriver: true, speed: 12 }).start();
     } else {
-      Animated.timing(logoutSlideAnim, {
-        toValue: LOGOUT_SHEET_HEIGHT,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
+      Animated.timing(logoutSlideAnim, { toValue: LOGOUT_SHEET_HEIGHT, duration: 200, useNativeDriver: true }).start();
     }
   }, [logoutSheetVisible]);
 
   const getToken = async () => await AsyncStorage.getItem('userToken');
 
+  const handleRefresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await loadData();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // ---------------------------------------------------------------
+  // loadData — normalises the incoming userId, and each sub-request
+  // is isolated so a single failure doesn't blank the entire screen.
+  // ---------------------------------------------------------------
   const loadData = async () => {
     setLoading(true);
+    setLoadError(false);
+
+    const token = await getToken();
+    if (!token) {
+      navigation.replace('Login');
+      return;
+    }
+
+    // 1. Get current user (required)
+    let me = null;
     try {
-      const token = await getToken();
-      if (!token) {
-        navigation.replace('Login');
-        return;
-      }
       const meResponse = await axios.get(`${BASE_URL}/api/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!meResponse.data.success) throw new Error('Failed to get current user');
-      const me = meResponse.data.user;
-      setCurrentUser(me);
-
-      let targetUserId = paramUserId;
-      let isOwn = false;
-
-      if (!targetUserId || targetUserId === me._id) {
-        targetUserId = me._id;
-        isOwn = true;
-        setAvatarUri(me.avatar || null);
-        setUsername(me.username || me.phone || '');
-        setViewedUser(me);
-        setSocialLinks(me.socialLinks || []);
-      } else {
-        isOwn = false;
-        const userResponse = await axios.get(`${BASE_URL}/api/user/${targetUserId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!userResponse.data.success) throw new Error('User not found');
-        const otherUser = userResponse.data.user;
-        setViewedUser(otherUser);
-        setAvatarUri(otherUser.avatar || null);
-        setUsername(otherUser.username || 'User');
-        setSocialLinks(otherUser.socialLinks || []);
+      if (meResponse.data.success) {
+        me = meResponse.data.user;
+        setCurrentUser(me);
+        await AsyncStorage.setItem('user', JSON.stringify(me));
       }
+    } catch (e) {
+      console.warn('loadData -> /auth/me failed:', e.message);
+    }
 
-      setIsOwnProfile(isOwn);
+    // Fallback to cached user
+    if (!me) {
+      try {
+        const cached = await AsyncStorage.getItem('user');
+        if (cached) me = JSON.parse(cached);
+      } catch {}
+    }
 
-      const postsResponse = await axios.get(`${BASE_URL}/api/posts/user/${targetUserId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+    if (!me) {
+      setLoadError(true);
+      setLoading(false);
+      return;
+    }
+
+    // 2. Normalise the target user id (fixes [object Object] → Network Error)
+    const normalisedParamUserId = normaliseUserId(paramUserId);
+    const myId = normaliseUserId(me._id) || normaliseUserId(me.phone);
+    const isOwn = !normalisedParamUserId || String(normalisedParamUserId) === String(myId);
+
+    let targetUserId = isOwn ? myId : normalisedParamUserId;
+
+    if (!targetUserId) {
+      setLoadError(true);
+      setLoading(false);
+      return;
+    }
+
+    if (isOwn) {
+      setAvatarUri(me.avatar || null);
+      setUsername(me.username || me.phone || '');
+      setName(me.name || me.username || '');
+      setViewedUser(me);
+      setSocialLinks(Array.isArray(me.socialLinks) ? me.socialLinks.filter(l => typeof l === 'string') : []);
+    } else {
+      // 3. Fetch the other user (non-fatal)
+      let otherUser = { _id: targetUserId, username: paramUsername || 'User' };
+      try {
+        const userResponse = await axios.get(
+          `${BASE_URL}/api/user/${encodeURIComponent(targetUserId)}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (userResponse.data.success) {
+          otherUser = userResponse.data.user;
+        }
+      } catch (e) {
+        console.warn('loadData -> /api/user/:id failed:', e.message);
+      }
+      setViewedUser(otherUser);
+      setAvatarUri(otherUser.avatar || null);
+      setUsername(otherUser.username || otherUser.phone || 'User');
+      setName(otherUser.name || otherUser.username || 'User');
+      setSocialLinks(Array.isArray(otherUser.socialLinks) ? otherUser.socialLinks.filter(l => typeof l === 'string') : []);
+    }
+
+    setIsOwnProfile(isOwn);
+
+    // 4. Posts (non-fatal)
+    try {
+      const postsResponse = await axios.get(
+        `${BASE_URL}/api/posts/user/${encodeURIComponent(targetUserId)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
       setUserPosts(postsResponse.data.posts || []);
+    } catch (e) {
+      console.warn('loadData -> /api/posts/user/:id failed:', e.message);
+      setUserPosts([]);
+    }
 
-      if (isOwn) {
-        const savedResponse = await axios.get(`${BASE_URL}/api/posts/saved`, {
+    // 5. Saved (own only, non-fatal)
+    if (isOwn) {
+      try {
+        const savedResponse = await axios.get(`${BASE_URL}/api/user/all-saved`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         const posts = savedResponse.data.posts || [];
         setSavedPosts(posts);
         setSavedPostIds(posts.map(p => p._id));
-      } else {
-        setSavedPosts([]);
-        setSavedPostIds([]);
+      } catch (e) {
+        console.warn('loadData -> /api/user/all-saved failed:', e.message);
       }
-
-      await AsyncStorage.setItem('user', JSON.stringify(me));
-    } catch (error) {
-      console.error('Load profile error:', error);
-      Alert.alert('Error', 'Could not load profile. Please try again.');
-      if (error.response?.status === 404) {
-        navigation.goBack();
-      }
-    } finally {
-      setLoading(false);
+    } else {
+      setSavedPosts([]);
+      setSavedPostIds([]);
     }
+
+    setLoading(false);
   };
 
-  // ---------- Actions (own profile only) ----------
+  // ---------- Avatar upload (own profile only) ----------
   const uploadImage = async (uri) => {
     if (!isOwnProfile) return;
     setUploading(true);
@@ -347,7 +519,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
       await syncStoredUser(updatedUser);
       Alert.alert('Success', 'Profile picture updated');
     } catch (error) {
-      console.error('Upload error:', error);
+      console.error('Upload error:', error?.message || error);
       Alert.alert('Error', 'Could not upload image');
     } finally {
       setUploading(false);
@@ -395,55 +567,74 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
   };
 
+  // ---------------------------------------------------------------
+  // updateProfile — sanitises the payload before handing it to the
+  // AuthContext so axios never tries to serialise an object where a
+  // string is expected (which was the previous "Network Error").
+  // ---------------------------------------------------------------
   const updateProfile = async () => {
     if (!isOwnProfile) return;
 
     const user = viewedUser || currentUser;
     if (!user) return;
 
-    const originalUsername = user.username || '';
-    const originalLocation = user.location || '';
-    const originalSocialLinks = (user.socialLinks || []).filter(link => typeof link === 'string' && link.trim());
+    const originalName = String(user.name || user.username || '');
+    const originalUsername = String(user.username || '');
+    const originalLocation = String(user.location || '');
+    const originalSocialLinks = (Array.isArray(user.socialLinks) ? user.socialLinks : [])
+      .filter(l => typeof l === 'string' && l.trim());
 
-    const newUsername = editUsername.trim();
-    const newLocation = editLocation.trim();
-    const newSocialLinks = editSocialLinks
+    // Sanitised new values
+    const newName = String(editName || '').trim();
+    const newUsername = String(editUsername || '').trim();
+    const newLocation = String(editLocation || '').trim();
+    const newSocialLinks = (Array.isArray(editSocialLinks) ? editSocialLinks : [])
       .map(link => (typeof link === 'string' ? link.trim() : ''))
-      .filter(link => link);
+      .filter(Boolean);
 
-    // Check if any field actually changed
+    const nameChanged = newName !== originalName;
     const usernameChanged = newUsername !== originalUsername;
     const locationChanged = newLocation !== originalLocation;
     const socialLinksChanged = JSON.stringify(newSocialLinks) !== JSON.stringify(originalSocialLinks);
 
-    if (!usernameChanged && !locationChanged && !socialLinksChanged) {
-      // No changes; close sheet silently
+    if (!nameChanged && !usernameChanged && !locationChanged && !socialLinksChanged) {
       setEditSheetVisible(false);
       return;
     }
 
-    try {
-      const authUpdate = await updateAuthUser({
-        username: newUsername,
-        location: newLocation,
-        socialLinks: newSocialLinks,
-      });
+    const payload = {
+      name: newName,
+      username: newUsername,
+      location: newLocation,
+      socialLinks: newSocialLinks,
+    };
 
-      if (authUpdate.success) {
-        const updatedUser = authUpdate.user;
+    // Safety check — never send an object where a string is expected
+    if (typeof payload.username !== 'string' || typeof payload.location !== 'string') {
+      Alert.alert('Error', 'Invalid profile data. Please check your inputs.');
+      return;
+    }
+
+    try {
+      console.log('updateProfile payload =', JSON.stringify(payload));
+      const authUpdate = await updateAuthUser(payload);
+
+      if (authUpdate?.success) {
+        const updatedUser = authUpdate.user || { ...user, ...payload };
         setCurrentUser(updatedUser);
         setViewedUser(updatedUser);
         setAvatarUri(updatedUser.avatar || null);
-        setSocialLinks(updatedUser.socialLinks || []);
+        setName(updatedUser.name || updatedUser.username || '');
+        setSocialLinks(Array.isArray(updatedUser.socialLinks) ? updatedUser.socialLinks.filter(l => typeof l === 'string') : newSocialLinks);
         setUsername(updatedUser.username || updatedUser.phone || '');
         await syncStoredUser(updatedUser);
         Alert.alert('Success', t.profileUpdated);
         setEditSheetVisible(false);
       } else {
-        Alert.alert('Error', authUpdate.message || t.updateFailed);
+        Alert.alert('Error', authUpdate?.message || t.updateFailed);
       }
     } catch (error) {
-      console.error('Update error:', error);
+      console.error('Update profile error:', error?.response?.data || error?.message || error);
       Alert.alert('Error', t.updateFailed);
     }
   };
@@ -484,11 +675,9 @@ const ProfileScreen = ({ navigation, route, language }) => {
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      if (response.data.success) {
-        if (!response.data.saved) {
-          setSavedPosts(prev => prev.filter(p => p._id !== post._id));
-          setSavedPostIds(prev => prev.filter(id => id !== post._id));
-        }
+      if (response.data.success && !response.data.saved) {
+        setSavedPosts(prev => prev.filter(p => p._id !== post._id));
+        setSavedPostIds(prev => prev.filter(id => id !== post._id));
       }
     } catch (error) {
       console.error('Toggle save error:', error);
@@ -496,19 +685,13 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
   };
 
-  // ---------- Logout Bottom Sheet Handlers ----------
+  // ---------- Logout Bottom Sheet ----------
   const openLogoutSheet = () => {
     closeSidebar();
     setLogoutSheetVisible(true);
   };
-
-  const closeLogoutSheet = () => {
-    setLogoutSheetVisible(false);
-  };
-
-  const handleLogout = () => {
-    openLogoutSheet();
-  };
+  const closeLogoutSheet = () => setLogoutSheetVisible(false);
+  const handleLogout = () => openLogoutSheet();
 
   const confirmLogout = async () => {
     closeLogoutSheet();
@@ -516,21 +699,50 @@ const ProfileScreen = ({ navigation, route, language }) => {
     navigation.reset({ index: 0, routes: [{ name: 'Main' }] });
   };
 
-  // ---------- Sidebar menu options ----------
+  const handleOpenUserChat = () => {
+    const user = viewedUser || currentUser;
+    const targetUserId = normaliseUserId(user?._id || user?.id || user?.userId);
+    const targetUserName = user?.username || user?.name || 'User';
+    const targetUserPhone = user?.phone || '';
+    const currentUserId = normaliseUserId(currentUser?._id || currentUser?.id || currentUser?.userId);
+
+    if (!targetUserId) {
+      Alert.alert('Error', 'User information is unavailable.');
+      return;
+    }
+
+    if (currentUserId && String(currentUserId) === String(targetUserId)) {
+      Alert.alert('Info', 'You cannot message yourself.');
+      return;
+    }
+
+    navigation.navigate('Chat', {
+      sellerId: targetUserId,
+      sellerName: targetUserName,
+      sellerPhone: targetUserPhone,
+      postId: '',
+      postTitle: '',
+      replyPost: null,
+    });
+  };
+
+  // ---------- Sidebar ----------
   const handleMenuOption = (option) => {
     closeSidebar();
     if (option === 'addPost') {
-      try {
-        navigation.navigate('Main', { screen: 'BuyPost' });
-      } catch (e) {
-        Alert.alert('Error', 'BuyPost screen not found. Please check your navigation.');
-      }
+      try { navigation.navigate('AddPost'); } catch (e) { Alert.alert('Error', 'AddPost screen not found.'); }
+    } else if (option === 'home') {
+      try { navigation.navigate('Main', { screen: 'WelcomeHome' }); } catch (e) { Alert.alert('Error', 'Home screen not found.'); }
+    } else if (option === 'map') {
+      try { navigation.navigate('Map'); } catch (e) { Alert.alert('Error', 'Map screen not found.'); }
+    } else if (option === 'search') {
+      try { navigation.navigate('Search'); } catch (e) { Alert.alert('Error', 'Search screen not found.'); }
+    } else if (option === 'messages') {
+      try { navigation.navigate('Message'); } catch (e) { Alert.alert('Error', 'Messages screen not found.'); }
+    } else if (option === 'notifications') {
+      try { navigation.navigate('Notifications'); } catch (e) { Alert.alert('Error', 'Notifications screen not found.'); }
     } else if (option === 'settings') {
-      try {
-        navigation.navigate('Main', { screen: 'Settings' });
-      } catch (e) {
-        Alert.alert('Error', 'Settings screen not found. Please check your navigation.');
-      }
+      try { navigation.navigate('Main', { screen: 'Settings' }); } catch (e) { Alert.alert('Error', 'Settings screen not found.'); }
     } else if (option === 'logout') {
       handleLogout();
     }
@@ -540,79 +752,72 @@ const ProfileScreen = ({ navigation, route, language }) => {
     if (!isOwnProfile) return;
     setSidebarVisible(true);
   };
+  const closeSidebar = () => setSidebarVisible(false);
 
-  const closeSidebar = () => {
-    setSidebarVisible(false);
-  };
-
-  // ---------- Bottom Sheet Handlers ----------
+  // ---------- Edit Sheet ----------
   const openEditSheet = () => {
     const user = viewedUser || currentUser;
-    setEditUsername(user?.username || '');
-    setEditLocation(user?.location || '');
-    setEditSocialLinks([
-      ...(user?.socialLinks || []).slice(0, 3),
-      '',
-      '',
-    ].slice(0, 3));
+    setEditName(String(user?.name || user?.username || ''));
+    setEditUsername(String(user?.username || ''));
+    setEditLocation(String(user?.location || ''));
+    const sanitized = (Array.isArray(user?.socialLinks) ? user.socialLinks : [])
+      .filter(l => typeof l === 'string')
+      .slice(0, 3);
+    while (sanitized.length < 3) sanitized.push('');
+    setEditSocialLinks(sanitized);
     setEditSheetVisible(true);
   };
-
-  const closeEditSheet = () => {
-    setEditSheetVisible(false);
-  };
+  const closeEditSheet = () => setEditSheetVisible(false);
 
   // ---------- Render helpers ----------
+  const isVideoPost = (post) => Boolean(post.videoUrl || post.video || post.mediaUrl);
+
   const renderGridPostItem = ({ item }) => {
     const isSavedTab = activeTab === 'saved';
     const showDelete = isOwnProfile && !isSavedTab;
 
     return (
       <View style={styles.gridPostItem}>
-        <TouchableOpacity
-          style={styles.gridPostImageContainer}
+        <PostCoverTile
+          post={item}
+          style={styles.gridPostCover}
           onPress={() => {
-            const imageUrl = item.houseImages?.[0];
-            if (imageUrl) {
-              setSelectedImageUrl(imageUrl);
-              setImageViewerVisible(true);
-            } else {
-              navigation.navigate('PostDetail', { house: item });
-            }
+            navigation.navigate('PostDetail', { house: item, language });
           }}
         >
-          <Image
-            source={{
-              uri: item.houseImages?.[0] || 'https://via.placeholder.com/150',
-            }}
-            style={styles.gridPostImage}
-          />
           {isSavedTab && isOwnProfile && (
             <TouchableOpacity
               style={styles.unsaveButton}
-              onPress={() => toggleSavePost(item)}
+              onPress={(e) => {
+                e?.stopPropagation?.();
+                toggleSavePost(item);
+              }}
             >
-              <Ionicons name="bookmark" size={24} color="#fff" />
+              <Ionicons name="bookmark" size={22} color="#fff" />
             </TouchableOpacity>
           )}
-        </TouchableOpacity>
-        {showDelete && (
-          <TouchableOpacity
-            style={[
-              styles.deleteButton,
-              {
-                backgroundColor: isDarkMode ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.6)',
-              },
-            ]}
-            onPress={() => confirmDeletePost(item._id)}
-          >
-            <Ionicons
-              name="ellipsis-horizontal"
-              size={18}
-              color={isDarkMode ? '#000' : '#fff'}
-            />
-          </TouchableOpacity>
-        )}
+
+          {showDelete && (
+            <TouchableOpacity
+              style={[
+                styles.deleteButton,
+                {
+                  backgroundColor: isDarkMode ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.55)',
+                },
+              ]}
+              onPress={(e) => {
+                e?.stopPropagation?.();
+                confirmDeletePost(item._id);
+              }}
+            >
+              <View style={styles.gridMenuIconWrapper}>
+                <View style={[styles.gridMenuIconLine, styles.gridMenuIconLineShort, { backgroundColor: '#47ae87' }]} />
+                <View style={[styles.gridMenuIconLine, styles.gridMenuIconLineLong, { backgroundColor: '#47ae87' }]} />
+                <View style={[styles.gridMenuIconLine, styles.gridMenuIconLineMid, { backgroundColor: '#47ae87' }]} />
+              </View>
+            </TouchableOpacity>
+          )}
+        </PostCoverTile>
       </View>
     );
   };
@@ -621,129 +826,141 @@ const ProfileScreen = ({ navigation, route, language }) => {
     const user = viewedUser || currentUser;
     if (!user) return null;
 
-    const postCount = userPosts.length;
+    const videoCount = userPosts.filter(isVideoPost).length;
     const savedCount = savedPosts.length;
 
+    const coverImage = user.coverImage || user.coverPhoto || user.bannerImage;
+    const coverSource = coverImage
+      ? { uri: coverImage }
+      : require('../assets/house.png');
+
     return (
-      <>
-        {/* Avatar + Username + Stats Row */}
-        <View style={styles.profileHeaderRow}>
-          {/* Left column: Avatar and username below it */}
+      <View style={styles.referenceProfileHeader}>
+        <View style={styles.coverImageWrap}>
+          <Image source={coverSource} style={styles.coverImage} />
+          <View style={styles.coverShade} />
+          <TouchableOpacity
+            style={styles.profileBackButton}
+            onPress={() => navigation.goBack()}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+          >
+            <Ionicons name="chevron-back" size={24} color="#111" />
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.referenceProfileBody}>
           <TouchableOpacity
             onPress={() => {
-              if (isOwnProfile) {
-                pickImage();
-              } else if (avatarUri) {
-                setSelectedImageUrl(avatarUri);
-                setImageViewerVisible(true);
-              }
+              if (isOwnProfile) pickImage();
+              else if (avatarUri) navigation.navigate('Preview', { imageUri: avatarUri });
             }}
-            style={styles.avatarColumn}
+            style={styles.referenceAvatarWrap}
             disabled={uploading}
           >
             {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={styles.avatarRow} />
+              <Image source={{ uri: avatarUri }} style={styles.referenceAvatar} />
             ) : (
-              <View
-                style={[
-                  styles.avatarPlaceholderRow,
-                  { backgroundColor: theme.accent },
-                ]}
-              >
-                <Text style={styles.avatarInitialsRow}>
-                  {username.charAt(0).toUpperCase()}
-                </Text>
+              <View style={[styles.referenceAvatar, styles.referenceAvatarPlaceholder, { backgroundColor: theme.accent }]}>
+                <Text style={styles.avatarInitialsRow}>{String(username || 'U').charAt(0).toUpperCase()}</Text>
               </View>
             )}
-            {isOwnProfile && (
-              <View style={styles.editIconRow}>
-                {uploading ? (
-                  <ActivityIndicator size="small" color="white" />
-                ) : (
-                  <Ionicons name="camera" size={20} color="white" />
-                )}
-              </View>
-            )}
-            <Text
-              style={[styles.usernameUnderAvatar, { color: theme.text }]}
-              numberOfLines={1}
-            >
-              {username}
-            </Text>
+            {isOwnProfile && <View style={styles.referenceAvatarEdit}><Ionicons name="camera" size={16} color="#fff" /></View>}
           </TouchableOpacity>
 
-          {/* Right side: Stats row (posts, saved, menu icon) */}
-          <View style={styles.profileStatsRow}>
-            <View style={styles.statItemCenter}>
-              <Text style={[styles.statNumber, { color: theme.text }]}>
-                {postCount}
-              </Text>
-              <Text style={[styles.statLabel, { color: theme.textSecondary }]}>{t.posts}</Text>
-            </View>
+          <Text style={[styles.referenceUsername, { color: theme.text }]} numberOfLines={1}>{name || username || 'User'}</Text>
+          <Text style={[styles.referenceHandle, { color: theme.textSecondary }]}>@{(username || 'user').toLowerCase().replace(/\s+/g, '')}</Text>
 
+          <View style={styles.referenceStatsRow}>
+            <View style={styles.referenceStat}>
+              <Text style={[styles.referenceStatNumber, { color: theme.text }]}>{userPosts.length}</Text>
+              <Text style={[styles.referenceStatLabel, { color: theme.textSecondary }]}>{t.posts}</Text>
+            </View>
+            <View style={styles.referenceStatDivider} />
+            <View style={styles.referenceStat}>
+              <Text style={[styles.referenceStatNumber, { color: theme.text }]}>{videoCount}</Text>
+              <Text style={[styles.referenceStatLabel, { color: theme.textSecondary }]}>{t.videos}</Text>
+            </View>
             {isOwnProfile && (
-              <View style={styles.statItemCenter}>
-                <Text style={[styles.statNumber, { color: theme.text }]}>
-                  {savedCount}
-                </Text>
-                <Text style={[styles.statLabel, { color: theme.textSecondary }]}>{t.saved}</Text>
-              </View>
+              <>
+                <View style={styles.referenceStatDivider} />
+                <View style={styles.referenceStat}>
+                  <Text style={[styles.referenceStatNumber, { color: theme.text }]}>{savedCount}</Text>
+                  <Text style={[styles.referenceStatLabel, { color: theme.textSecondary }]}>{t.saved}</Text>
+                </View>
+              </>
+            )}
+          </View>
+
+          <View style={styles.referenceActionRow}>
+            {isOwnProfile ? (
+              <TouchableOpacity style={[styles.referenceActionButton, { backgroundColor: theme.accent }]} onPress={openEditSheet}>
+                <Text style={styles.referencePrimaryActionText}>{t.editProfile}</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity style={[styles.referenceActionButton, { backgroundColor: theme.accent }]} onPress={handleOpenUserChat}>
+                <Text style={styles.referencePrimaryActionText}>Message</Text>
+              </TouchableOpacity>
             )}
 
             {isOwnProfile && (
               <TouchableOpacity
-                style={styles.statItemCenter}
+                style={[styles.referenceActionButton, styles.referenceMenuButton, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}
                 onPress={openSidebar}
+                accessibilityRole="button"
+                accessibilityLabel="Open menu"
               >
-                <Ionicons name="menu-outline" size={28} color={theme.text} />
-                <Text style={[styles.statLabel, { color: theme.textSecondary }]}>Menu</Text>
+                <View style={styles.referenceMenuIconWrap}>
+                  <View style={[styles.referenceMenuLine, styles.referenceMenuLineTop]} />
+                  <View style={[styles.referenceMenuLine, styles.referenceMenuLineMiddle]} />
+                  <View style={[styles.referenceMenuLine, styles.referenceMenuLineBottom]} />
+                </View>
               </TouchableOpacity>
             )}
           </View>
-        </View>
 
-        {/* Bio section */}
-        <View style={styles.profileBioSection}>
-          {user.bio ? (
-            <Text style={[styles.profileBio, { color: theme.text }]}>{user.bio}</Text>
-          ) : null}
-          <Text style={[styles.profileLocation, { color: theme.textSecondary }]}>
-            {user.location || 'Kigali, Rwanda'}
-          </Text>
-          {(socialLinks && socialLinks.length > 0) ? (
-            <View style={styles.socialLinksRow}>
-              {socialLinks.slice(0, 3).map((link, index) => (
-                <TouchableOpacity
-                  key={`${link}-${index}`}
-                  onPress={() => {
-                    if (link) Linking.openURL(link).catch(() => Alert.alert('Invalid link', 'Unable to open this link.'));
-                  }}
-                  style={[styles.socialLinkItem, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}
-                >
-                  <Ionicons name="link-outline" size={14} color={theme.text} />
-                  <Text style={[styles.socialLinkText, { color: theme.text }]} numberOfLines={1}>{link.replace(/^https?:\/\//, '')}</Text>
-                </TouchableOpacity>
-              ))}
+          {(user.bio || user.location || (socialLinks && socialLinks.length > 0)) && (
+            <View style={styles.profileBioSection}>
+              {user.bio ? (
+                <Text style={[styles.profileBio, { color: theme.text }]}>{user.bio}</Text>
+              ) : null}
+              {user.location ? (
+                <Text style={[styles.profileLocation, { color: theme.textSecondary }]}>
+                  {user.location}
+                </Text>
+              ) : null}
+              {(socialLinks && socialLinks.length > 0) ? (
+                <View style={styles.socialLinksRow}>
+                  {socialLinks.map((link, index) => (
+                    <TouchableOpacity
+                      key={`${link}-${index}`}
+                      onPress={() => {
+                        if (typeof link !== 'string') return;
+                        Linking.openURL(link).catch(() => Alert.alert('Invalid link', 'Unable to open this link.'));
+                      }}
+                      style={[styles.socialLinkItem, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}
+                    >
+                      <Ionicons name="link-outline" size={14} color={theme.text} />
+                      <Text style={[styles.socialLinkText, { color: theme.text }]} numberOfLines={1}>
+                        {String(link).replace(/^https?:\/\//, '')}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              ) : null}
             </View>
-          ) : null}
-          {isOwnProfile && (
-            <TouchableOpacity
-              style={[styles.editProfileButton, { backgroundColor: theme.accent }]}
-              onPress={openEditSheet}
-            >
-              <Text style={styles.editProfileButtonText}>{t.editProfile}</Text>
-            </TouchableOpacity>
           )}
         </View>
-      </>
+      </View>
     );
   };
 
   const renderTabBar = () => {
-    const tabs = [{ key: 'posts', icon: 'grid-outline' }];
-    if (isOwnProfile) {
-      tabs.push({ key: 'saved', icon: 'bookmark-outline' });
-    }
+    const tabs = [
+      { key: 'posts', label: t.posts },
+      { key: 'videos', label: t.videos },
+      ...(isOwnProfile ? [{ key: 'saved', label: t.saved }] : []),
+    ];
     return (
       <View style={[styles.tabBar, { borderBottomColor: theme.border }]}>
         {tabs.map((tab) => (
@@ -752,11 +969,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
             style={[styles.tab, activeTab === tab.key && styles.activeTab]}
             onPress={() => setActiveTab(tab.key)}
           >
-            <Ionicons
-              name={tab.icon}
-              size={24}
-              color={activeTab === tab.key ? theme.accent : theme.textSecondary}
-            />
+            <Text style={[styles.tabLabel, { color: activeTab === tab.key ? theme.text : theme.textSecondary }]}>{tab.label}</Text>
           </TouchableOpacity>
         ))}
       </View>
@@ -770,83 +983,150 @@ const ProfileScreen = ({ navigation, route, language }) => {
     </>
   );
 
+  // ---------- Empty-state navigation ----------
+  const handleCreateFirstVideo = () => {
+    if (!isOwnProfile) return;
+    try {
+      navigation.navigate('AddPost', { mediaType: 'video' });
+    } catch (e) {
+      Alert.alert('Error', 'AddPost screen not found.');
+    }
+  };
+
+  const handleAddFirstPost = () => {
+    if (!isOwnProfile) return;
+    try {
+      navigation.navigate('AddPost');
+    } catch (e) {
+      Alert.alert('Error', 'AddPost screen not found.');
+    }
+  };
+
+  const handleSaveFirstPost = () => {
+    try {
+      navigation.navigate('Main', { screen: 'BuyPost', params: { activeTab: 'ushaka' } });
+    } catch (e) {
+      Alert.alert('Error', 'BuyPost screen not found.');
+    }
+  };
+
   const ListEmpty = () => {
-    if (activeTab === 'saved' && isOwnProfile) {
+    // Load error → show retry
+    if (loadError && !loading) {
       return (
         <View style={styles.emptyState}>
-          <Ionicons name="bookmark-outline" size={64} color={theme.textSecondary} />
+          <Ionicons name="cloud-offline-outline" size={64} color={theme.textSecondary} />
           <Text style={[styles.emptyStateText, { color: theme.textSecondary }]}>
-            {t.noSavedPosts}
-          </Text>
-          <Text style={[styles.emptyStateSubtext, { color: theme.textSecondary }]}>
-            {t.savePostsHint}
+            {t.profileLoadFailed}
           </Text>
           <TouchableOpacity
-            style={[styles.exploreBtn, { backgroundColor: theme.accent }]}
-            onPress={() => navigation.navigate('Search')}
+            style={[styles.emptyPrimaryButton, { backgroundColor: theme.accent }]}
+            onPress={handleRefresh}
+            activeOpacity={0.85}
           >
-            <Text style={styles.exploreBtnText}>{t.explorePosts}</Text>
+            <Ionicons name="refresh-outline" size={20} color="#fff" />
+            <Text style={styles.emptyPrimaryButtonText}>{t.retry}</Text>
           </TouchableOpacity>
         </View>
       );
     }
+
+    if (loading) {
+      return (
+        <View style={styles.emptyState}>
+          <ShaakaLoadingScreen
+            message={t.loading}
+            backgroundColor={theme.background}
+            textColor={theme.textSecondary}
+            compact
+          />
+        </View>
+      );
+    }
+
+    // SAVED
+    if (activeTab === 'saved') {
+      return (
+        <View style={styles.emptyState}>
+          <Ionicons name="bookmark-outline" size={64} color={theme.textSecondary} />
+          <Text style={[styles.emptyStateText, { color: theme.textSecondary }]}>{t.noSavedPosts}</Text>
+          <Text style={[styles.emptyStateSubtext, { color: theme.textSecondary }]}>{t.savePostsHint}</Text>
+          <TouchableOpacity
+            style={[styles.emptyPrimaryButton, { backgroundColor: theme.accent }]}
+            onPress={handleSaveFirstPost}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="bookmark-outline" size={20} color="#fff" />
+            <Text style={styles.emptyPrimaryButtonText}>{t.saveFirstPost}</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+
+    // VIDEOS
+    if (activeTab === 'videos') {
+      if (isOwnProfile) {
+        return (
+          <TouchableOpacity
+            style={styles.emptyState}
+            activeOpacity={0.75}
+            onPress={handleCreateFirstVideo}
+          >
+            <Ionicons name="videocam-outline" size={64} color={theme.textSecondary} />
+            <Text style={[styles.emptyStateText, { color: theme.textSecondary }]}>{t.noVideos}</Text>
+           
+          </TouchableOpacity>
+        );
+      }
+      return (
+        <View style={styles.emptyState}>
+          <Ionicons name="videocam-outline" size={64} color={theme.textSecondary} />
+          <Text style={[styles.emptyStateText, { color: theme.textSecondary }]}>{t.noVideos}</Text>
+        </View>
+      );
+    }
+
+    // POSTS
     return (
       <View style={styles.emptyState}>
-        <Ionicons
-          name={activeTab === 'posts' ? 'images-outline' : 'bookmark-outline'}
-          size={64}
-          color={theme.textSecondary}
-        />
-        <Text style={[styles.emptyStateText, { color: theme.textSecondary }]}>
-          {activeTab === 'posts' ? t.noPosts : t.noSavedPosts}
-        </Text>
-        {activeTab === 'saved' && (
-          <Text style={[styles.emptyStateSubtext, { color: theme.textSecondary }]}>
-            {t.savePostsHint}
-          </Text>
-        )}
-        {activeTab === 'posts' && isOwnProfile && (
+        <Ionicons name="images-outline" size={64} color={theme.textSecondary} />
+        <Text style={[styles.emptyStateText, { color: theme.textSecondary }]}>{t.noPosts}</Text>
+        {isOwnProfile && (
           <TouchableOpacity
-            style={[styles.createPostBtn, { backgroundColor: theme.accent }]}
-            onPress={() => {
-              try {
-                navigation.navigate('Main', { screen: 'BuyPost' });
-              } catch (e) {
-                Alert.alert('Error', 'BuyPost screen not found.');
-              }
-            }}
+            style={[styles.emptyPrimaryButton, { backgroundColor: theme.accent }]}
+            onPress={handleAddFirstPost}
+            activeOpacity={0.85}
           >
-            <Text style={styles.createPostBtnText}>{t.createFirstPost}</Text>
+            <Ionicons name="add-circle-outline" size={20} color="#fff" />
+            <Text style={styles.emptyPrimaryButtonText}>{t.addFirstPost}</Text>
           </TouchableOpacity>
         )}
       </View>
     );
   };
 
-  // Loading state
-  if (loading) {
-    return (
-      <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
-        <View style={styles.center}>
-          <Animated.Image
-            source={loadingLogo}
-            style={[styles.loadingImage, { transform: [{ scale: scaleAnim }] }]}
-            resizeMode="contain"
-          />
-          <Text style={[styles.loadingText, { color: theme.text }]}>{t.loading}</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   const sidebarBorderColor = isDarkMode ? '#3a3a3c' : '#d0d0d0';
 
-  const currentData = activeTab === 'posts' ? userPosts : savedPosts;
+  const effectiveTab = activeTab === 'saved' && !isOwnProfile ? 'posts' : activeTab;
+
+  const currentData =
+    effectiveTab === 'saved'
+      ? savedPosts
+      : effectiveTab === 'videos'
+        ? userPosts.filter(isVideoPost)
+        : userPosts;
+
+  if (loading && !viewedUser && !currentUser) {
+    return <ShaakaLoadingScreen message={t.loading} backgroundColor={theme.background} textColor={theme.text} />;
+  }
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
+    <SafeAreaView
+      style={[styles.container, { backgroundColor: theme.background }]}
+      edges={['left', 'right', 'bottom']}
+    >
       <FlatList
-        key={activeTab}
+        key={effectiveTab}
         ListHeaderComponent={ListHeader}
         data={currentData}
         keyExtractor={(item) => item._id}
@@ -856,6 +1136,8 @@ const ProfileScreen = ({ navigation, route, language }) => {
         contentContainerStyle={styles.postsGrid}
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={ListEmpty}
+        refreshing={refreshing}
+        onRefresh={handleRefresh}
       />
 
       {isOwnProfile && sidebarVisible && (
@@ -876,29 +1158,35 @@ const ProfileScreen = ({ navigation, route, language }) => {
           ]}
         >
           <View style={styles.sidebarContent}>
-            {/* Post - Navigate to BuyPostScreen */}
-            <TouchableOpacity
-              style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]}
-              onPress={() => handleMenuOption('addPost')}
-            >
-              <Ionicons name="grid-outline" size={20} color={theme.text} />
-              <Text style={[styles.sidebarOptionText, { color: theme.text }]}>{t.post}</Text>
+            <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('addPost')}>
+              <Ionicons name="add-circle-outline" size={20} color={theme.text} />
+              <Text style={[styles.sidebarOptionText, { color: theme.text }]}>Add Post</Text>
             </TouchableOpacity>
-
-            {/* Settings */}
-            <TouchableOpacity
-              style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]}
-              onPress={() => handleMenuOption('settings')}
-            >
+            <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('home')}>
+              <Ionicons name="home-outline" size={20} color={theme.text} />
+              <Text style={[styles.sidebarOptionText, { color: theme.text }]}>Home</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('map')}>
+              <Ionicons name="map-outline" size={20} color={theme.text} />
+              <Text style={[styles.sidebarOptionText, { color: theme.text }]}>Map</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('search')}>
+              <Ionicons name="search-outline" size={20} color={theme.text} />
+              <Text style={[styles.sidebarOptionText, { color: theme.text }]}>Search</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('messages')}>
+              <Ionicons name="chatbubble-outline" size={20} color={theme.text} />
+              <Text style={[styles.sidebarOptionText, { color: theme.text }]}>Messages</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('notifications')}>
+              <Ionicons name="notifications-outline" size={20} color={theme.text} />
+              <Text style={[styles.sidebarOptionText, { color: theme.text }]}>Notifications</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('settings')}>
               <Ionicons name="settings-outline" size={20} color={theme.text} />
               <Text style={[styles.sidebarOptionText, { color: theme.text }]}>{t.settings}</Text>
             </TouchableOpacity>
-
-            {/* Logout - Opens bottom sheet */}
-            <TouchableOpacity
-              style={styles.sidebarOption}
-              onPress={() => handleMenuOption('logout')}
-            >
+            <TouchableOpacity style={styles.sidebarOption} onPress={() => handleMenuOption('logout')}>
               <Ionicons name="log-out-outline" size={20} color="#d87428" />
               <Text style={[styles.sidebarOptionText, { color: '#d87428' }]}>{t.logout}</Text>
             </TouchableOpacity>
@@ -934,16 +1222,10 @@ const ProfileScreen = ({ navigation, route, language }) => {
               {t.logoutConfirmMessage}
             </Text>
             <View style={styles.logoutButtons}>
-              <TouchableOpacity
-                style={[styles.logoutBtn, { backgroundColor: '#47ae87' }]}
-                onPress={closeLogoutSheet}
-              >
+              <TouchableOpacity style={[styles.logoutBtn, { backgroundColor: '#47ae87' }]} onPress={closeLogoutSheet}>
                 <Text style={styles.logoutBtnText}>{t.no}</Text>
               </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.logoutBtn, { backgroundColor: '#d87428' }]}
-                onPress={confirmLogout}
-              >
+              <TouchableOpacity style={[styles.logoutBtn, { backgroundColor: '#d87428' }]} onPress={confirmLogout}>
                 <Text style={styles.logoutBtnText}>{t.yes}</Text>
               </TouchableOpacity>
             </View>
@@ -951,7 +1233,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
         </>
       )}
 
-      {/* Edit Profile Bottom Sheet */}
+      {/* EDIT PROFILE SHEET */}
       {isOwnProfile && editSheetVisible && (
         <>
           <TouchableWithoutFeedback onPress={closeEditSheet}>
@@ -968,10 +1250,8 @@ const ProfileScreen = ({ navigation, route, language }) => {
             ]}
             {...panResponder.panHandlers}
           >
-            {/* Handle */}
             <View style={styles.sheetHandle} />
 
-            {/* Header */}
             <View style={styles.sheetHeader}>
               <Text style={[styles.sheetTitle, { color: theme.text }]}>{t.editProfile}</Text>
               <TouchableOpacity onPress={closeEditSheet} style={styles.sheetCloseBtn}>
@@ -979,32 +1259,23 @@ const ProfileScreen = ({ navigation, route, language }) => {
               </TouchableOpacity>
             </View>
 
-            {/* Content */}
             <ScrollView style={styles.sheetContent} showsVerticalScrollIndicator={false}>
               <TextInput
-                style={[
-                  styles.sheetInput,
-                  {
-                    color: theme.text,
-                    borderColor: theme.border,
-                    backgroundColor: theme.cardBackground,
-                  },
-                ]}
+                style={[styles.sheetInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.cardBackground }]}
+                placeholder="Name"
+                placeholderTextColor={theme.textSecondary}
+                value={editName}
+                onChangeText={setEditName}
+              />
+              <TextInput
+                style={[styles.sheetInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.cardBackground }]}
                 placeholder={t.username}
                 placeholderTextColor={theme.textSecondary}
                 value={editUsername}
                 onChangeText={setEditUsername}
               />
-
               <TextInput
-                style={[
-                  styles.sheetInput,
-                  {
-                    color: theme.text,
-                    borderColor: theme.border,
-                    backgroundColor: theme.cardBackground,
-                  },
-                ]}
+                style={[styles.sheetInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.cardBackground }]}
                 placeholder={t.location}
                 placeholderTextColor={theme.textSecondary}
                 value={editLocation}
@@ -1015,17 +1286,10 @@ const ProfileScreen = ({ navigation, route, language }) => {
               {[0, 1, 2].map((index) => (
                 <TextInput
                   key={`social-link-${index}`}
-                  style={[
-                    styles.sheetInput,
-                    {
-                      color: theme.text,
-                      borderColor: theme.border,
-                      backgroundColor: theme.cardBackground,
-                    },
-                  ]}
+                  style={[styles.sheetInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.cardBackground }]}
                   placeholder={`Social link ${index + 1}`}
                   placeholderTextColor={theme.textSecondary}
-                  value={editSocialLinks[index] || ''}
+                  value={String(editSocialLinks[index] || '')}
                   onChangeText={(value) => {
                     const updated = [...editSocialLinks];
                     updated[index] = value;
@@ -1035,16 +1299,10 @@ const ProfileScreen = ({ navigation, route, language }) => {
               ))}
 
               <View style={styles.sheetButtons}>
-                <TouchableOpacity
-                  onPress={closeEditSheet}
-                  style={[styles.sheetCancelBtn, { borderColor: theme.border }]}
-                >
+                <TouchableOpacity onPress={closeEditSheet} style={[styles.sheetCancelBtn, { borderColor: theme.border }]}>
                   <Text style={{ color: theme.textSecondary }}>{t.cancel}</Text>
                 </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={updateProfile}
-                  style={[styles.sheetSaveBtn, { backgroundColor: theme.accent }]}
-                >
+                <TouchableOpacity onPress={updateProfile} style={[styles.sheetSaveBtn, { backgroundColor: theme.accent }]}>
                   <Text style={{ color: 'white', fontWeight: '600' }}>{t.save}</Text>
                 </TouchableOpacity>
               </View>
@@ -1053,195 +1311,159 @@ const ProfileScreen = ({ navigation, route, language }) => {
         </>
       )}
 
-      <FullScreenImageViewer
-        visible={imageViewerVisible}
-        imageUrl={selectedImageUrl}
-        onClose={() => setImageViewerVisible(false)}
-        language={language}
-      />
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  referenceProfileHeader: { backgroundColor: 'transparent' },
+  coverImageWrap: { height: 178, width: '100%', position: 'relative', overflow: 'hidden' },
+  coverImage: { width: '100%', height: '100%', resizeMode: 'cover' },
+  coverShade: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.08)' },
+  profileBackButton: { position: 'absolute', top: 14, right: 14, width: 42, height: 42, borderRadius: 21, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+  referenceProfileBody: { alignItems: 'center', paddingHorizontal: 16, paddingBottom: 4 },
+  referenceAvatarWrap: { width: 86, height: 86, marginTop: -43, borderRadius: 43, padding: 4, backgroundColor: '#fff', zIndex: 2 },
+  referenceAvatar: { width: 78, height: 78, borderRadius: 39 },
+  referenceAvatarPlaceholder: { alignItems: 'center', justifyContent: 'center' },
+  referenceAvatarEdit: { position: 'absolute', right: -2, bottom: 2, width: 25, height: 25, borderRadius: 13, backgroundColor: '#666', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff' },
+  referenceUsername: { marginTop: 8, fontSize: 22, fontWeight: '700' },
+  referenceHandle: { marginTop: 2, fontSize: 12 },
+  referenceStatsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', width: '100%', marginTop: 16 },
+  referenceStat: { alignItems: 'center', minWidth: 82 },
+  referenceStatNumber: { fontSize: 16, fontWeight: '500' },
+  referenceStatLabel: { fontSize: 11, marginTop: 4 },
+  referenceStatDivider: { width: 1, height: 28, backgroundColor: '#d8d8d8' },
+  referenceActionRow: { flexDirection: 'row', gap: 10, width: '100%', justifyContent: 'center', marginTop: 16, marginBottom: 8 },
+  referenceActionButton: { minWidth: 108, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 22, alignItems: 'center' },
+  referenceMenuButton: { minWidth: 52, width: 52, paddingHorizontal: 0, paddingVertical: 10, borderWidth: 1 },
+  referenceMenuIconWrap: { width: 22, height: 16, justifyContent: 'space-between' },
+  referenceMenuLine: { height: 2, borderRadius: 2, backgroundColor: '#47ae87' },
+  referenceMenuLineTop: { width: '60%', alignSelf: 'flex-start' },
+  referenceMenuLineMiddle: { width: '100%' },
+  referenceMenuLineBottom: { width: '70%', alignSelf: 'flex-end' },
+  referencePrimaryActionText: { color: '#fff', fontSize: 14, fontWeight: '600' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  loadingImage: {
-    width: 150,
-    height: 150,
-  },
-  loadingText: { marginTop: 22, fontSize: 16 },
   profileHeaderRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingVertical: 20,
+    paddingTop: 0,
+    paddingBottom: 20,
     borderBottomWidth: 0,
     borderBottomColor: '#e0e0e0',
   },
-  avatarColumn: {
-    alignItems: 'center',
-    position: 'relative',
-    marginRight: 16,
-  },
+  avatarColumn: { alignItems: 'center', position: 'relative', marginRight: 16 },
   avatarRow: { width: 80, height: 80, borderRadius: 40 },
-  avatarPlaceholderRow: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
+  avatarPlaceholderRow: { width: 80, height: 80, borderRadius: 40, justifyContent: 'center', alignItems: 'center' },
   avatarInitialsRow: { fontSize: 32, color: 'white', fontWeight: 'bold' },
-  editIconRow: {
-    position: 'absolute',
-    bottom: 30,
-    right: 0,
-    backgroundColor: '#7a7a7a',
-    borderRadius: 14,
-    padding: 4,
-  },
-  usernameUnderAvatar: {
-    marginTop: 8,
-    fontSize: 16,
-    fontWeight: '600',
-    textAlign: 'center',
-    maxWidth: 80,
-  },
-  profileStatsRow: {
-    flex: 1,
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    marginLeft: 16,
-    alignSelf: 'center',
-  },
-  statItemCenter: {
-    alignItems: 'center',
-    flex: 1,
-    paddingHorizontal: 2,
-  },
+  editIconRow: { position: 'absolute', bottom: 30, right: 0, backgroundColor: '#7a7a7a', borderRadius: 14, padding: 4 },
+  usernameUnderAvatar: { marginTop: 8, fontSize: 16, fontWeight: '600', textAlign: 'center', maxWidth: 80 },
+  profileStatsRow: { flex: 1, flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', marginLeft: 16, alignSelf: 'center' },
+  statItemCenter: { alignItems: 'center', flex: 1, paddingHorizontal: 2 },
   statNumber: { fontSize: 18, fontWeight: 'bold' },
   statLabel: { fontSize: 12, marginTop: 4 },
-  profileBioSection: { marginHorizontal: 20, marginTop: 0 },
-  profileBio: { fontSize: 14, marginTop: 0, lineHeight: 20 },
-  profileLocation: { fontSize: 13, marginTop: 0},
-  socialLinksRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginTop: 10,
-  },
-  socialLinkItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 0,
-    paddingHorizontal: 0,
-    borderRadius: 20,
-    borderWidth: 0,
-    marginRight: 8,
-    marginBottom: 5,
-  },
-  socialLinkText: {
-    marginLeft: 6,
-    fontSize: 12,
-    maxWidth: 140,
-  },
-  editProfileButton: {
-    marginTop: 14,
-    alignSelf: 'flex-start',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-  },
-  editProfileButtonText: {
-    color: '#fff',
-    fontWeight: '700',
-  },
+  menuIconWrapper: { width: 20, height: 15, flexDirection: 'column', justifyContent: 'space-between', marginBottom: 4 },
+  menuIconLine: { backgroundColor: '#47ae87', borderRadius: 2, height: 2 },
+  menuIconLineFirst: { width: '50%', alignSelf: 'flex-start' },
+  menuIconLineFull: { width: '100%' },
+  menuIconLineLast: { width: '50%', alignSelf: 'flex-end' },
+  profileBioSection: { marginHorizontal: 20, marginTop: 12, alignItems: 'center' },
+  profileBio: { fontSize: 14, marginTop: 0, lineHeight: 20, textAlign: 'center' },
+  profileLocation: { fontSize: 13, marginTop: 4, textAlign: 'center' },
+  socialLinksRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 10, justifyContent: 'space-between', width: '100%' },
+  socialLinkItem: { flexDirection: 'row', alignItems: 'center', width: '48%', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 20, borderWidth: 0, marginBottom: 8 },
+  socialLinkText: { marginLeft: 6, fontSize: 12, flex: 1 },
+  editProfileButton: { marginTop: 14, alignSelf: 'flex-start', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20 },
+  editProfileButtonText: { color: '#fff', fontWeight: '700' },
   postsGrid: { paddingHorizontal: 8, paddingBottom: 80 },
-  gridRow: {
-    justifyContent: 'space-between',
-    marginBottom: 8,
-  },
-  gridPostItem: {
-    width: (width - 32) / 2,
-    aspectRatio: 1,
-    marginBottom: 8,
-    position: 'relative',
-  },
-  gridPostImageContainer: {
+  gridRow: { justifyContent: 'space-between', marginBottom: 8 },
+  gridPostItem: { width: (width - 32) / 2, aspectRatio: 1, marginBottom: 8, position: 'relative' },
+
+  /* ---------- Full-bleed cover tile ---------- */
+  gridPostCover: {
     width: '100%',
     height: '100%',
-    borderRadius: 6,
+    borderRadius: 10,
     overflow: 'hidden',
+    backgroundColor: '#262626',
   },
-  gridPostImage: {
-    width: '100%',
-    height: '100%',
-    resizeMode: 'cover',
-  },
-  deleteButton: {
+  coverTile: { position: 'relative', overflow: 'hidden' },
+  coverTileImage: { width: '100%', height: '100%', resizeMode: 'cover' },
+  coverTileFallback: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', backgroundColor: '#2a2a2a' },
+  coverTileShade: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.22)' },
+  coverTileLabel: {
     position: 'absolute',
-    top: 4,
-    right: 4,
-    borderRadius: 12,
-    padding: 2,
+    top: 8,
+    left: 8,
+    right: 32,
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '800',
+    textShadowColor: 'rgba(0,0,0,0.85)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
-  unsaveButton: {
+  coverTileVideoBadge: {
     position: 'absolute',
-    bottom: 8,
+    top: 8,
     right: 8,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
     backgroundColor: 'rgba(0,0,0,0.6)',
-    borderRadius: 20,
-    padding: 6,
-  },
-  tabBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    borderBottomWidth: 0,
-    paddingVertical: 12,
-    marginTop: 4,
-  },
-  tab: { paddingHorizontal: 20, paddingVertical: 8 },
-  activeTab: {
-    borderBottomWidth: 2,
-    borderBottomColor: '#47ae87',
-  },
-  emptyState: {
-    alignItems: 'center',
     justifyContent: 'center',
-    paddingTop: 60,
-    paddingHorizontal: 24,
+    alignItems: 'center',
   },
+
+  /* Overlay action buttons */
+ deleteButton: {
+  position: 'absolute',
+  top: 0,
+  right: 0,
+  padding: 5,                 // ← no padding
+  borderTopLeftRadius: 0,
+  borderTopRightRadius: 0,
+  borderBottomRightRadius: 0,
+  borderBottomLeftRadius: 12, // ← only bottom-left rounded
+  zIndex: 5,
+},
+ gridMenuIconWrapper: { width: 18, height: 18, justifyContent: 'center', alignItems: 'center' },
+  gridMenuIconLine: { borderRadius: 999, height: 2, marginVertical: 1.5 },
+  gridMenuIconLineShort: { width: '42%' },
+  gridMenuIconLineMid: { width: '72%' },
+  gridMenuIconLineLong: { width: '100%' },
+  unsaveButton: { position: 'absolute', bottom: 6, right: 6, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 18, padding: 5, zIndex: 5 },
+
+  tabBar: { flexDirection: 'row', justifyContent: 'space-around', borderBottomWidth: 1, paddingTop: 4, paddingBottom: 0, marginTop: 4 },
+  tab: { flex: 1, alignItems: 'center', paddingVertical: 12 },
+  tabLabel: { fontSize: 13, fontWeight: '500' },
+  activeTab: { borderBottomWidth: 2, borderBottomColor: '#47ae87' },
+  emptyState: { alignItems: 'center', justifyContent: 'center', paddingTop: 60, paddingHorizontal: 24 },
   emptyStateText: { fontSize: 16, marginTop: 16, marginBottom: 8, textAlign: 'center' },
   emptyStateSubtext: { fontSize: 14, textAlign: 'center' },
-  createPostBtn: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 8,
-    marginTop: 20,
-  },
-  createPostBtnText: { color: 'white', fontWeight: '600' },
-  exploreBtn: {
-    paddingHorizontal: 24,
+  emptyPrimaryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 22,
     paddingVertical: 12,
-    borderRadius: 25,
+    borderRadius: 26,
     marginTop: 20,
+    minWidth: 220,
   },
-  exploreBtnText: { color: 'white', fontWeight: '600', fontSize: 16 },
-  transparentOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'transparent',
-    zIndex: 10,
-  },
+  emptyPrimaryButtonText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  transparentOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'transparent', zIndex: 10 },
   sidebar: {
     position: 'absolute',
     right: 0,
     top: 0,
     bottom: 0,
     width: SIDEBAR_WIDTH,
-    zIndex: 11,
-    borderLeftWidth: 1,
+    zIndex: 25,
+    borderLeftWidth: 0,
     shadowColor: '#000',
     shadowOffset: { width: -2, height: 0 },
     shadowOpacity: 0.15,
@@ -1251,28 +1473,10 @@ const styles = StyleSheet.create({
     paddingVertical: 50,
     justifyContent: 'flex-start',
   },
-  sidebarContent: {
-    flex: 1,
-    justifyContent: 'flex-start',
-  },
-  sidebarOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    borderBottomWidth: 0,
-  },
-  sidebarOptionText: {
-    fontSize: 16,
-    marginLeft: 12,
-    fontWeight: '500',
-  },
-  // Overlay for bottom sheets
-  sheetOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    zIndex: 100,
-  },
-  // Edit Bottom Sheet Styles
+  sidebarContent: { flex: 1, justifyContent: 'flex-start' },
+  sidebarOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 0 },
+  sidebarOptionText: { fontSize: 16, marginLeft: 12, fontWeight: '500' },
+  sheetOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.4)', zIndex: 100 },
   editBottomSheet: {
     position: 'absolute',
     left: 0,
@@ -1287,7 +1491,6 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
     zIndex: 101,
   },
-  // Logout Bottom Sheet Styles
   logoutBottomSheet: {
     position: 'absolute',
     left: 0,
@@ -1302,104 +1505,20 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
     zIndex: 101,
   },
-  sheetHandle: {
-    width: 40,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: '#ccc',
-    alignSelf: 'center',
-    marginBottom: 12,
-  },
-  sheetHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  sheetTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-  },
-  sheetCloseBtn: {
-    padding: 4,
-  },
-  sheetContent: {
-    flex: 1,
-  },
-  sheetInput: {
-    borderWidth: 1,
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 16,
-    marginBottom: 16,
-  },
-  sheetLabel: {
-    fontSize: 14,
-    fontWeight: '500',
-    marginBottom: 8,
-  },
-  sheetButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 8,
-    marginBottom: 20,
-    gap: 12,
-  },
-  sheetCancelBtn: {
-    flex: 1,
-    paddingVertical: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-    borderWidth: 1,
-  },
-  sheetSaveBtn: {
-    flex: 1,
-    paddingVertical: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  // Logout bottom sheet specific styles
-  logoutConfirmMsg: {
-    fontSize: 15,
-    textAlign: 'center',
-    marginBottom: 24,
-    marginTop: 8,
-    lineHeight: 22,
-  },
-  logoutButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 16,
-  },
-  logoutBtn: {
-    flex: 1,
-    borderRadius: 12,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  logoutBtnText: {
-    color: '#ffffff',
-    fontWeight: '700',
-    fontSize: 16,
-  },
+  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: '#ccc', alignSelf: 'center', marginBottom: 12 },
+  sheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  sheetTitle: { fontSize: 20, fontWeight: 'bold' },
+  sheetCloseBtn: { padding: 4 },
+  sheetContent: { flex: 1 },
+  sheetInput: { borderWidth: 1, borderRadius: 8, padding: 12, fontSize: 16, marginBottom: 16 },
+  sheetLabel: { fontSize: 14, fontWeight: '500', marginBottom: 8 },
+  sheetButtons: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, marginBottom: 20, gap: 12 },
+  sheetCancelBtn: { flex: 1, paddingVertical: 14, borderRadius: 8, alignItems: 'center', borderWidth: 1 },
+  sheetSaveBtn: { flex: 1, paddingVertical: 14, borderRadius: 8, alignItems: 'center' },
+  logoutConfirmMsg: { fontSize: 15, textAlign: 'center', marginBottom: 24, marginTop: 8, lineHeight: 22 },
+  logoutButtons: { flexDirection: 'row', justifyContent: 'space-between', gap: 16 },
+  logoutBtn: { flex: 1, borderRadius: 12, paddingVertical: 14, alignItems: 'center' },
+  logoutBtnText: { color: '#ffffff', fontWeight: '700', fontSize: 16 },
 });
-
-// Download translations
-const downloadTranslations = {
-  English: {
-    download: 'Download Image',
-    downloading: 'Downloading...',
-    downloaded: 'Image downloaded successfully.',
-    downloadFailed: 'Failed to download image. Please try again.',
-    permissionNeeded: 'Please allow access to photos to save images.',
-  },
-  Kinyarwanda: {
-    download: 'Gukuramo Ifoto',
-    downloading: 'Turi kugukuramo...',
-    downloaded: 'Ifoto yahinduwe neza.',
-    downloadFailed: 'Gukuramo ifoto byanze. Ongera ugerageze.',
-    permissionNeeded: 'Shyira uruhushya rwo kujya mu ifoto.',
-  },
-};
 
 export default ProfileScreen;

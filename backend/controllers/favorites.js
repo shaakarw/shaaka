@@ -1,6 +1,7 @@
 // controllers/favorites.js
 const Favorite = require('../models/Favorite');
 const User = require('../models/User'); // kept for reference (optional)
+require('../models/Shop');
 
 // Helper: get all place favorites as array of populated place objects
 async function getFavoritesList(userId) {

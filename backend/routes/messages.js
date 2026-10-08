@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
-const uploadAudio = require('../middleware/uploadAudio');
+const uploadMessageMedia = require('../middleware/uploadMessageMedia');
 const upload = require('../middleware/upload');
 const {
   sendMessage,
@@ -17,7 +17,7 @@ const {
 router.use(auth);
 
 // Send message (text, audio, reply)
-router.post('/send', uploadAudio, sendMessage);
+router.post('/send', uploadMessageMedia, sendMessage);
 
 // Upload multiple images
 router.post('/upload-image', upload.array('images', 10), uploadImage); // Allow up to 10 images per upload (new requirement)

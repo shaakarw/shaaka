@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // Simple theme colors (no nested objects)
 export const lightTheme = {
   background: '#dddddd',
+  mediaLoadingBackground: '#f0efefdd',
   text: '#111',
   textSecondary: '#666666',
   back: '#9c9c9c00',
@@ -14,7 +15,7 @@ export const lightTheme = {
   curve: '#dddddd',
   Color: '#111',
   select:'#5e5e5e',
-  login:'#00bc38',
+  login:'#47ae87',
   register:'#dddddd',
   home:'#666666',
   report:'#111',
@@ -32,6 +33,7 @@ export const lightTheme = {
 };
 
 export const darkTheme = {
+  mediaLoadingBackground: '#151515',
   select:'#000',
   background: '#111',
   text: '#FFFFFF',
@@ -43,7 +45,7 @@ export const darkTheme = {
   send: '#FFFFFF',
   curve: '#111',
   Color: '#111',
-  login:'#00bc38',
+  login: '#47ae87',
   register:'#00030b',
   home:'#ffffff',
   report:'#ffffff',
@@ -71,12 +73,14 @@ export const ThemeProvider = ({ children }) => {
   }, []);
 
   const loadTheme = async () => {
+    const loadingTimeout = setTimeout(() => setIsLoading(false), 3000);
     try {
       const saved = await AsyncStorage.getItem('isDarkMode');
       if (saved !== null) setIsDarkMode(JSON.parse(saved));
     } catch (error) {
       console.error(error);
     } finally {
+      clearTimeout(loadingTimeout);
       setIsLoading(false);
     }
   };

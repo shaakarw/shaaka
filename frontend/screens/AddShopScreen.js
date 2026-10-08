@@ -23,6 +23,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { useFocusEffect } from '@react-navigation/native';
+import MobileNavigation from '../components/MobileNavigation';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 
 const MALL_CATEGORY = 'shoppingmall';
 
@@ -113,8 +115,36 @@ export default function AddShopScreen({ navigation, route, language = 'English' 
 
   useFocusEffect(
     useCallback(() => {
-      fetchMalls();
-    }, [fetchMalls])
+      let isActive = true;
+
+      const checkAccess = async () => {
+        const token = await getToken();
+        if (!token || !isActive) return;
+
+        fetchMalls();
+      };
+
+      const requestLogin = async () => {
+        const token = await getToken();
+        if (token || !isActive) return;
+
+        showAppAlert(
+          t.loginRequired,
+          t.loginPrompt,
+          [
+            { text: t.cancel, style: 'cancel' },
+            { text: t.login, onPress: () => navigation.navigate('Login') },
+          ]
+        );
+      };
+
+      requestLogin();
+      checkAccess();
+
+      return () => {
+        isActive = false;
+      };
+    }, [fetchMalls, navigation, t])
   );
 
   const handleRefresh = () => {
@@ -165,6 +195,10 @@ export default function AddShopScreen({ navigation, route, language = 'English' 
     }
 
     navigation.navigate('AddShoppingMallShop', { mall });
+  };
+
+  const closeAddShopScreen = () => {
+    navigation.navigate('Main', { screen: 'Locate' });
   };
 
   const getMallImage = (mall) => {
@@ -232,7 +266,7 @@ export default function AddShopScreen({ navigation, route, language = 'English' 
     <SafeAreaView style={[styles.container, { backgroundColor }]}>
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: borderColor }]}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+        <TouchableOpacity onPress={closeAddShopScreen} style={styles.backButton} accessibilityRole="button" accessibilityLabel={t.goBack}>
           <Ionicons name="arrow-back" size={26} color={textColor} />
         </TouchableOpacity>
         <View style={styles.headerTexts}>
@@ -261,10 +295,7 @@ export default function AddShopScreen({ navigation, route, language = 'English' 
 
       {/* Content */}
       {loading ? (
-        <View style={styles.centerContainer}>
-          <ActivityIndicator size="large" color={accentColor} />
-          <Text style={[styles.centerText, { color: secondaryText }]}>{t.loading}</Text>
-        </View>
+        <ShaakaLoadingScreen message={t.loading} backgroundColor={backgroundColor} textColor={secondaryText} />
       ) : filteredMalls.length === 0 ? (
         <View style={styles.centerContainer}>
           <MaterialCommunityIcons name="shopping-outline" size={60} color={secondaryText} />
@@ -291,6 +322,7 @@ export default function AddShopScreen({ navigation, route, language = 'English' 
           }
         />
       )}
+      <MobileNavigation visible />
     </SafeAreaView>
   );
 }

@@ -65,6 +65,20 @@ const defaultConfig = {
   socialLinks: [],
 };
 
+const getTypeAccent = (type) => {
+  switch (type) {
+    case 'logout':
+    case 'error':
+      return '#d87428';
+    case 'login':
+    case 'success':
+    case 'info':
+      return '#47ae87';
+    default:
+      return '#47ae87';
+  }
+};
+
 export const BottomSheet = ({ visible, config, onClose }) => {
   const { theme } = useTheme();
   const resolvedConfig = { ...defaultConfig, ...config };
@@ -192,7 +206,17 @@ export const BottomSheet = ({ visible, config, onClose }) => {
           </View>
         ) : (
           <View style={styles.content}>
-            <Ionicons name={icon || 'information-circle-outline'} size={48} color={colors.icon} />
+            <View
+              style={[
+                styles.iconBadge,
+                {
+                  backgroundColor: type === 'error' ? '#fff1eb' : '#edf9f3',
+                  borderColor: `${getTypeAccent(type)}33`,
+                },
+              ]}
+            >
+              <Ionicons name={icon || 'information-circle-outline'} size={42} color={colors.icon} />
+            </View>
 
             <Text style={[styles.title, { color: theme.text }]}>{title}</Text>
 
@@ -208,10 +232,15 @@ export const BottomSheet = ({ visible, config, onClose }) => {
                     style={[
                       styles.button,
                       styles.secondaryButton,
-                      { backgroundColor: '#47ae87' },
+                      {
+                        backgroundColor: 'transparent',
+                        borderColor: colors.accent,
+                        borderWidth: 1,
+                        flex: 1,
+                      },
                     ]}
                   >
-                    <Text style={styles.buttonText}>{secondaryButtonText}</Text>
+                    <Text style={[styles.secondaryButtonText, { color: colors.accent }]}>{secondaryButtonText}</Text>
                   </TouchableOpacity>
                 ) : null}
 
@@ -221,7 +250,10 @@ export const BottomSheet = ({ visible, config, onClose }) => {
                     style={[
                       styles.button,
                       styles.primaryButton,
-                      { backgroundColor: '#d87428', flex: secondaryButtonText ? 1 : 1 },
+                      {
+                        backgroundColor: colors.accent,
+                        flex: secondaryButtonText ? 1 : 1,
+                      },
                     ]}
                   >
                     <Text style={styles.buttonText}>{buttonText}</Text>
@@ -286,12 +318,12 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 85,
+    bottom:0,
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     borderTopWidth: 1,
-    paddingHorizontal: 20,
-    paddingTop: 10,
+    paddingHorizontal: 0,
+    paddingTop: 0,
     paddingBottom: 0,
     zIndex: 21,
   },
@@ -307,18 +339,29 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 18,
+    paddingVertical: 24,
+  },
+  iconBadge: {
+    width: 82,
+    height: 82,
+    borderRadius: 41,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    marginBottom: 16,
   },
   title: {
     fontSize: 24,
     fontWeight: '700',
     textAlign: 'center',
-    marginBottom: 10,
+    marginBottom: 8,
   },
   message: {
     fontSize: 16,
     lineHeight: 24,
     textAlign: 'center',
-    marginBottom: 24,
+    marginBottom: 22,
     paddingHorizontal: 10,
   },
   buttonsRow: {
@@ -326,22 +369,32 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     gap: 12,
+    paddingHorizontal: 4,
   },
   button: {
     flex: 1,
-    borderRadius: 12,
+    borderRadius: 14,
     paddingVertical: 14,
     alignItems: 'center',
     justifyContent: 'center',
+    minHeight: 50,
   },
   primaryButton: {
-    minHeight: 48,
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
   },
   secondaryButton: {
-    minHeight: 48,
+    backgroundColor: 'transparent',
   },
   buttonText: {
     color: '#fff',
+    fontWeight: '700',
+    fontSize: 16,
+  },
+  secondaryButtonText: {
     fontWeight: '700',
     fontSize: 16,
   },

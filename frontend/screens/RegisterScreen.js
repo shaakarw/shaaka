@@ -136,7 +136,7 @@ const translations = {
     registerSuccess: 'Kwiyandikisha byakunze! ugiye guhita winjira...',
     registerFailed: 'Kwiyandikisha byanze. Ongera ugerageze.',
     termsTitle: 'Amasezerano',
-    termsContent: `1. Ukwemera amasezerano\nIyo winjiye, wemera gufatanya n'aya masezerano.\n\n2. Inshingano z'ukoresha\nUri we ubazwa kubungabunga amakuru ya konti yawe.\n\n3. Ibanga\nDufata ibanga ryanyu ku mutima kandi ntituzahisha amakuru yanyu adasabwe.\n\n4. Ibikorwa bitemewe\nNtimwemerewe gukoresha iyi porogaramu mubikorwa bitemewe n'amategeko.\n\n5. Guhagarika\nDufite uburenganzira bwo guhagarika konti zisenya aya masezerano.\n\n6. Guhindura amasezerano\nDushobora guhindura aya masezerano igihe cyose.\n\n7. Kuvugana\nNiba ufite ibibazo, twandikire kuri support@shaaka.com.`,
+    termsContent: `1. Ukwemera amasezerano\nIyo winjiye, wemera gufatanya n'aya masezerano.\n\n2. Inshingano z'ukoresha\nUri we ubazwa kubungabunga amakuru ya konti yawe.\n\n3. Ibanga\nTubika amakuruyanyu byizewe kandi dukora uko dushoboye ntajye hanze.\n\n4. Ibikorwa bitemewe\nNtimwemerewe gukoresha iyi porogaramu muburyo butemewe n'amategeko. Cyangwa uyikoresha ibidakwiye\n\n5. Guhagarika\nDufite uburenganzira bwo guhagarika konti utubahiriza aya masezerano.\n\n6. Guhindura amasezerano\nDushobora guhindura aya masezerano igihe cyose.Nituuyahindura tuzabamenye sha.\n\n7. Kuvugana\nNiba ufite ibibazo, twandikire kuri Kumbugankoranyambaga zacu.`,
     alreadyAccount: 'Ufite konti?',
     login: 'Kwinjira',
     checking: 'Igenzura…',

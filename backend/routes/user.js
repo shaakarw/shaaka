@@ -16,6 +16,8 @@ const {
   getUserProfile,
   getUserPosts,
   getSavedPosts,
+  getAllSavedPosts,
+  getUserSavedPosts,
   toggleSavePost,
   updateOnlineStatus,
   getUserStatus,
@@ -48,11 +50,10 @@ const uploadStoryMiddleware = multer({
   storage: storyStorage,
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|webp/;
-    const extname = allowed.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowed.test(file.mimetype);
+    const extname = path.extname(file.originalname).length > 0;
+    const mimetype = (file.mimetype || '').toLowerCase().startsWith('image/');
     if (extname && mimetype) return cb(null, true);
-    cb(new Error('Only images are allowed'));
+    cb(new Error('Only supported image files are allowed'));
   },
 }).single('image');
 
@@ -138,6 +139,8 @@ router.post('/story/view', markStoryViewed);
 // ---------- Posts ----------
 router.get('/my-posts', getUserPosts);
 router.get('/saved', getSavedPosts);
+router.get('/all-saved', getAllSavedPosts);
+router.get('/:userId/saved', getUserSavedPosts);
 router.post('/save/:postId', toggleSavePost);
 router.delete('/save/:postId', toggleSavePost);
 

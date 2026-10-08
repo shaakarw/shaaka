@@ -31,7 +31,9 @@ const DEFAULTS = {
 const computeAggregatedLimits = (user) => {
   // Respect admin overrides on the user document when present
   const postsPerDay = (user && typeof user.postUploadLimitPerDay === 'number') ? user.postUploadLimitPerDay : DEFAULTS.postsPerDay;
-  const postVideoDailyLimit = (user && typeof user.postVideoLimitPerDay === 'number') ? user.postVideoLimitPerDay : DEFAULTS.postVideoDailyLimit;
+  const postVideoDailyLimit = (user && typeof user.videoUploadLimitPerDay === 'number')
+    ? user.videoUploadLimitPerDay
+    : ((user && typeof user.postVideoLimitPerDay === 'number') ? user.postVideoLimitPerDay : DEFAULTS.postVideoDailyLimit);
   const imagesPerMessage = DEFAULTS.imagesPerMessage;
   const messageVideoDailyLimit = DEFAULTS.messageVideoDailyLimit;
 
@@ -44,6 +46,7 @@ const computeAggregatedLimits = (user) => {
     postVideoDailyLimit,
     messageVideoDailyLimit,
     maxVideoDurationSeconds: DEFAULTS.maxVideoDurationSeconds,
+    allowVideoUpload: user ? user.allowVideoUpload !== false : true,
   };
 };
 

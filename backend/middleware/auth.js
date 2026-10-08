@@ -17,7 +17,6 @@ module.exports = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    console.log('🔑 Decoded token payload:', decoded);
 
     // Find user by ID (try common field names)
     let userId = decoded.id || decoded.userId || decoded._id;

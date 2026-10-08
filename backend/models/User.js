@@ -43,9 +43,12 @@ const UserSchema = new mongoose.Schema({
     type: String, 
     default: '' 
   },
+  avatarStorageKey: { type: String, default: '' },
+  storageProvider: { type: String, default: '' },
   stories: [
     {
       image: String,
+      storageKey: { type: String, default: '' },
       createdAt: { type: Date, default: Date.now },
       views: [
         {
@@ -152,37 +155,63 @@ const UserSchema = new mongoose.Schema({
   // Admin can override these per-user limits/permissions
   postUploadLimitPerDay: {
     type: Number,
-    default: 1,
+    default: 0,
+    min: 0,
+    max: 100,
   },
   shopUploadLimitLifetime: {
     type: Number,
-    default: 1,
+    default: 0,
+    min: 0,
+    max: 100,
   },
   mallShopUploadLimitLifetime: {
     type: Number,
-    default: 1,
+    default: 0,
+    min: 0,
+    max: 100,
   },
   placeProductUploadLimitPerDay: {
     type: Number,
-    default: 1,
+    default: 0,
+    min: 0,
+    max: 100,
   },
   mallProductUploadLimitPerDay: {
     type: Number,
-    default: 1,
+    default: 0,
+    min: 0,
+    max: 100,
+  },
+  allowVideoUpload: {
+    type: Boolean,
+    default: false,
+  },
+  videoUploadLimitPerDay: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 100,
   },
 
   // ========== MESSAGE LIMITS ==========
   imagesPerMessage: {
     type: Number,
-    default: 10,
+    default: 0,
+    min: 0,
+    max: 100,
   },
   imagesRetentionDays: {
     type: Number,
-    default: 5,
+    default: 0,
+    min: 0,
+    max: 100,
   },
   messagesRetentionDays: {
     type: Number,
-    default: 30,
+    default: 0,
+    min: 0,
+    max: 100,
   },
 
   planStartDate: {

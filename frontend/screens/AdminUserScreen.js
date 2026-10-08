@@ -25,10 +25,12 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import AdminScreenHeader from '../components/AdminScreenHeader';
 
 const { width, height } = Dimensions.get('window');
 const CARD_MARGIN = 6;
-const ITEMS_PER_ROW = 3;
+const ITEMS_PER_ROW = 2;
 const CARD_WIDTH = (width - CARD_MARGIN * (ITEMS_PER_ROW + 1)) / ITEMS_PER_ROW;
 const BOTTOM_SHEET_MAX_HEIGHT = height * 0.85;
 const CLOSE_THRESHOLD = 120;
@@ -234,9 +236,11 @@ const AdminUserScreen = ({ navigation, language }) => {
     placeProductUploadLimitPerDay: 1,
     mallShopUploadLimitLifetime: 1,
     mallProductUploadLimitPerDay: 1,
-    imagesPerMessage: 10,
+    imagesPerMessage: 5,
     imagesRetentionDays: 5,
     messagesRetentionDays: 30,
+    allowVideoUpload: false,
+    videoUploadLimitPerDay: 0,
   });
   const [savingLimits, setSavingLimits] = useState(false);
 
@@ -488,20 +492,26 @@ const AdminUserScreen = ({ navigation, language }) => {
     showStatus(t.success, 'User limits updated successfully.');
   };
 
-  const syncLimitsFromDetails = () => {
+  const syncLimitsFromDetails = useCallback(() => {
     const data = userDetails || selectedUser;
     if (!data) return;
     setLimits({
-      postUploadLimitPerDay: typeof data.postUploadLimitPerDay === 'number' ? Math.max(1, data.postUploadLimitPerDay) : 1,
-      shopUploadLimitLifetime: typeof data.shopUploadLimitLifetime === 'number' ? Math.max(1, data.shopUploadLimitLifetime) : 1,
-      placeProductUploadLimitPerDay: typeof data.placeProductUploadLimitPerDay === 'number' ? Math.max(1, data.placeProductUploadLimitPerDay) : 1,
-      mallShopUploadLimitLifetime: typeof data.mallShopUploadLimitLifetime === 'number' ? Math.max(1, data.mallShopUploadLimitLifetime) : 1,
-      mallProductUploadLimitPerDay: typeof data.mallProductUploadLimitPerDay === 'number' ? Math.max(1, data.mallProductUploadLimitPerDay) : 1,
-      imagesPerMessage: typeof data.imagesPerMessage === 'number' ? Math.max(1, data.imagesPerMessage) : 10,
-      imagesRetentionDays: typeof data.imagesRetentionDays === 'number' ? Math.max(1, data.imagesRetentionDays) : 5,
-      messagesRetentionDays: typeof data.messagesRetentionDays === 'number' ? Math.max(1, data.messagesRetentionDays) : 30,
+      postUploadLimitPerDay: typeof data.postUploadLimitPerDay === 'number' ? Math.min(100, Math.max(0, data.postUploadLimitPerDay)) : 0,
+      shopUploadLimitLifetime: typeof data.shopUploadLimitLifetime === 'number' ? Math.min(100, Math.max(0, data.shopUploadLimitLifetime)) : 0,
+      placeProductUploadLimitPerDay: typeof data.placeProductUploadLimitPerDay === 'number' ? Math.min(100, Math.max(0, data.placeProductUploadLimitPerDay)) : 0,
+      mallShopUploadLimitLifetime: typeof data.mallShopUploadLimitLifetime === 'number' ? Math.min(100, Math.max(0, data.mallShopUploadLimitLifetime)) : 0,
+      mallProductUploadLimitPerDay: typeof data.mallProductUploadLimitPerDay === 'number' ? Math.min(100, Math.max(0, data.mallProductUploadLimitPerDay)) : 0,
+      imagesPerMessage: typeof data.imagesPerMessage === 'number' ? Math.min(100, Math.max(0, data.imagesPerMessage)) : 0,
+      imagesRetentionDays: typeof data.imagesRetentionDays === 'number' ? Math.min(100, Math.max(0, data.imagesRetentionDays)) : 0,
+      messagesRetentionDays: typeof data.messagesRetentionDays === 'number' ? Math.min(100, Math.max(0, data.messagesRetentionDays)) : 0,
+      allowVideoUpload: data.allowVideoUpload === true,
+      videoUploadLimitPerDay: typeof data.videoUploadLimitPerDay === 'number' ? Math.min(100, Math.max(0, data.videoUploadLimitPerDay)) : 0,
     });
-  };
+  }, [userDetails, selectedUser]);
+
+  useEffect(() => {
+    syncLimitsFromDetails();
+  }, [syncLimitsFromDetails]);
 
   const saveLimits = async () => {
     if (!selectedUser?._id) return;
@@ -519,6 +529,8 @@ const AdminUserScreen = ({ navigation, language }) => {
           imagesPerMessage: limits.imagesPerMessage,
           imagesRetentionDays: limits.imagesRetentionDays,
           messagesRetentionDays: limits.messagesRetentionDays,
+          allowVideoUpload: limits.allowVideoUpload,
+          videoUploadLimitPerDay: limits.videoUploadLimitPerDay,
         },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -652,7 +664,7 @@ const AdminUserScreen = ({ navigation, language }) => {
     if (detailsLoading) {
       return (
         <View style={styles.sheetLoadingContainer}>
-          <ActivityIndicator size="large" color={theme.accent} />
+          <ShaakaLoadingScreen backgroundColor={theme.background} textColor={theme.text} hideText compact />
         </View>
       );
     }
@@ -672,6 +684,7 @@ const AdminUserScreen = ({ navigation, language }) => {
       { key: 'imagesPerMessage', label: 'Images Per Message' },
       { key: 'imagesRetentionDays', label: 'Image Retention (Days)' },
       { key: 'messagesRetentionDays', label: 'Message Retention (Days)' },
+      { key: 'videoUploadLimitPerDay', label: 'Video Uploads / Day' },
     ];
 
     return (
@@ -703,6 +716,20 @@ const AdminUserScreen = ({ navigation, language }) => {
         {/* User Permissions & Limits */}
         <View style={[styles.sectionCard, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
           <Text style={[styles.sectionTitle, { color: theme.text }]}>User Permissions & Limits</Text>
+
+          <View style={[styles.limitRow, { borderBottomColor: theme.border }]}>
+            <View style={{ flex: 1, marginRight: 12 }}>
+              <Text style={[styles.limitLabel, { color: theme.text }]}>Allow Video Uploads</Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.allowToggle, { backgroundColor: limits.allowVideoUpload ? theme.accent : theme.border }]}
+              onPress={() => setLimits((prev) => ({ ...prev, allowVideoUpload: !prev.allowVideoUpload }))}
+              disabled={savingLimits}
+            >
+              <View style={[styles.allowToggleThumb, { transform: [{ translateX: limits.allowVideoUpload ? 18 : 0 }] }]} />
+            </TouchableOpacity>
+          </View>
+
           {LIMIT_ITEMS.map((item) => (
             <View key={item.key} style={[styles.limitRow, { borderBottomColor: theme.border }]}>
               <View style={{ flex: 1, marginRight: 12 }}>
@@ -711,8 +738,8 @@ const AdminUserScreen = ({ navigation, language }) => {
               <View style={styles.stepperRow}>
                 <TouchableOpacity
                   style={[styles.stepperBtn, { backgroundColor: theme.border }]}
-                  onPress={() => setLimits((prev) => ({ ...prev, [item.key]: Math.max(1, prev[item.key] - 1) }))}
-                  disabled={limits[item.key] <= 1 || savingLimits}
+                  onPress={() => setLimits((prev) => ({ ...prev, [item.key]: Math.max(0, Math.min(100, prev[item.key] - 1)) }))}
+                  disabled={limits[item.key] <= 0 || savingLimits}
                 >
                   <Text style={[styles.stepperBtnText, { color: theme.text }]}>−</Text>
                 </TouchableOpacity>
@@ -721,8 +748,8 @@ const AdminUserScreen = ({ navigation, language }) => {
                 </View>
                 <TouchableOpacity
                   style={[styles.stepperBtn, { backgroundColor: theme.accent }]}
-                  onPress={() => setLimits((prev) => ({ ...prev, [item.key]: prev[item.key] + 1 }))}
-                  disabled={savingLimits}
+                  onPress={() => setLimits((prev) => ({ ...prev, [item.key]: Math.min(100, Math.max(0, prev[item.key] + 1)) }))}
+                  disabled={savingLimits || limits[item.key] >= 100}
                 >
                   <Text style={styles.stepperBtnText}>+</Text>
                 </TouchableOpacity>
@@ -781,7 +808,7 @@ const AdminUserScreen = ({ navigation, language }) => {
         style={[
           styles.gridCard,
           {
-            backgroundColor: theme.background,
+            backgroundColor: theme.cardBackground,
             borderColor: theme.border,
             opacity: isBlocked ? 0.6 : 1,
           },
@@ -867,15 +894,14 @@ const AdminUserScreen = ({ navigation, language }) => {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
       {/* Header */}
-      <View style={[styles.header, { borderBottomColor: theme.border }]}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Ionicons name="arrow-back-outline" size={26} color={theme.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: theme.text }]}>{t.users}</Text>
-        <TouchableOpacity onPress={fetchUsers} style={styles.refreshBtn}>
-          <Ionicons name="refresh-outline" size={26} color={theme.text} />
-        </TouchableOpacity>
-      </View>
+      <AdminScreenHeader
+        title={t.users}
+        theme={theme}
+        onBack={() => navigation.goBack()}
+        actionIcon="refresh-outline"
+        actionLabel="Refresh users"
+        onAction={fetchUsers}
+      />
 
       {/* Search */}
       {renderSearch()}
@@ -883,7 +909,7 @@ const AdminUserScreen = ({ navigation, language }) => {
       {/* List */}
       {loading && !refreshing ? (
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={theme.accent} />
+          <ShaakaLoadingScreen backgroundColor={theme.background} textColor={theme.text} hideText />
         </View>
       ) : (
         renderUsersList()
@@ -1075,6 +1101,8 @@ const styles = StyleSheet.create({
   limitRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 0.5 },
   limitLabel: { fontSize: 13, fontWeight: '600', flex: 1, marginRight: 12 },
   stepperRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  allowToggle: { width: 48, height: 28, borderRadius: 14, padding: 4, justifyContent: 'center', alignItems: 'flex-start' },
+  allowToggleThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff' },
   stepperBtn: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   stepperBtnText: { color: '#fff', fontSize: 20, fontWeight: '700' },
   stepperValue: { minWidth: 56, height: 40, borderRadius: 10, borderWidth: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 },

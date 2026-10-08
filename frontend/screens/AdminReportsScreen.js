@@ -24,6 +24,8 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import AdminScreenHeader from '../components/AdminScreenHeader';
 
 const { width, height } = Dimensions.get('window');
 const BOTTOM_SHEET_MAX_HEIGHT = height * 0.75;
@@ -591,7 +593,7 @@ const AdminReportsScreen = ({ navigation, language }) => {
         style={[
           styles.reportCard,
           {
-            backgroundColor: theme.background,
+            backgroundColor: theme.cardBackground,
             borderColor: theme.border,
             opacity: isIgnored ? 0.5 : 1,
           },
@@ -709,13 +711,14 @@ const AdminReportsScreen = ({ navigation, language }) => {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
       {/* Header */}
-      <View style={[styles.header, { borderBottomColor: theme.border }]}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Ionicons name="arrow-back-outline" size={26} color={theme.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: theme.text }]}>{t.reports}</Text>
-        <View style={{ width: 40 }} />
-      </View>
+      <AdminScreenHeader
+        title={t.reports}
+        theme={theme}
+        onBack={() => navigation.goBack()}
+        actionIcon="refresh-outline"
+        actionLabel="Refresh reports"
+        onAction={fetchReports}
+      />
 
       {/* Search */}
       {renderSearch()}
@@ -723,7 +726,7 @@ const AdminReportsScreen = ({ navigation, language }) => {
       {/* List */}
       {loading && !refreshing ? (
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={theme.accent} />
+          <ShaakaLoadingScreen backgroundColor={theme.background} textColor={theme.text} hideText />
         </View>
       ) : (
         renderReportsList()

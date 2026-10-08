@@ -19,8 +19,8 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { useBottomSheet } from '../context/BottomSheetContext';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-const MAX_IMAGE_HEIGHT = 500; // desired max height
-const MIN_CROP_HEIGHT_DISPLAY = 40; // minimum draggable height in display pixels
+const MIN_IMAGE_HEIGHT = 300;
+const MAX_IMAGE_HEIGHT = 700;
 
 const translations = {
   English: {
@@ -36,6 +36,7 @@ const translations = {
     cancel: 'Cancel',
     cropUse: 'Crop & Use',
     error: 'Error',
+    belowLimit: 'Below 300px - this image cannot be uploaded',
   },
   Kinyarwanda: {
     cropTitle: 'Guca Ifoto',
@@ -50,6 +51,7 @@ const translations = {
     cancel: 'Reka',
     cropUse: 'Guca & Koresha',
     error: 'Ikibazo',
+    belowLimit: 'Munsi ya 300 px - iyi foto ntishobora gushyirwaho',
   },
 };
 
@@ -81,7 +83,10 @@ const CropImageScreen = ({ language = 'English' }) => {
     return Math.round((cropHeightDisplay / displaySize.height) * imageSize.height);
   }, [cropTop, cropBottom, displaySize, imageSize]);
 
-  const heightColor = cropHeightOriginal <= MAX_IMAGE_HEIGHT ? '#2ecc71' : '#e67e22';
+  const minCropHeightDisplay = imageSize.height ? (MIN_IMAGE_HEIGHT / imageSize.height) * displaySize.height : 0;
+  const maxCropHeightDisplay = imageSize.height
+    ? Math.min(displaySize.height, (MAX_IMAGE_HEIGHT / imageSize.height) * displaySize.height)
+    : 0;
 
   useEffect(() => {
     if (!imageUri) {
@@ -99,10 +104,7 @@ const CropImageScreen = ({ language = 'English' }) => {
         const dispWidth = width * ratio;
         const dispHeight = height * ratio;
         setDisplaySize({ width: dispWidth, height: dispHeight });
-        const initialCropHeightDisplay =
-          height <= MAX_IMAGE_HEIGHT
-            ? dispHeight
-            : (MAX_IMAGE_HEIGHT / height) * dispHeight;
+        const initialCropHeightDisplay = Math.min(height, MAX_IMAGE_HEIGHT) / height * dispHeight;
         const initialCropTop = (dispHeight - initialCropHeightDisplay) / 2;
         const initialCropBottom = initialCropTop + initialCropHeightDisplay;
         setCropTop(initialCropTop);
@@ -121,14 +123,13 @@ const CropImageScreen = ({ language = 'English' }) => {
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
         onPanResponderMove: (_, gesture) => {
-          const newTop = Math.max(0, cropTop + gesture.dy);
-          const minBottom = newTop + MIN_CROP_HEIGHT_DISPLAY;
-          if (minBottom > displaySize.height) return;
+          const minTop = Math.max(0, cropBottom - maxCropHeightDisplay);
+          const maxTop = Math.min(displaySize.height - minCropHeightDisplay, cropBottom - minCropHeightDisplay);
+          const newTop = Math.max(minTop, Math.min(maxTop, cropTop + gesture.dy));
           setCropTop(newTop);
-          setCropBottom(Math.max(cropBottom, minBottom));
         },
       }),
-    [cropTop, cropBottom, displaySize]
+    [cropTop, cropBottom, displaySize, minCropHeightDisplay, maxCropHeightDisplay]
   );
 
   const bottomPanResponder = useMemo(
@@ -137,14 +138,13 @@ const CropImageScreen = ({ language = 'English' }) => {
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
         onPanResponderMove: (_, gesture) => {
-          const newBottom = Math.min(displaySize.height, cropBottom + gesture.dy);
-          const maxTop = newBottom - MIN_CROP_HEIGHT_DISPLAY;
-          if (maxTop < 0) return;
+          const minBottom = cropTop + minCropHeightDisplay;
+          const maxBottom = Math.min(displaySize.height, cropTop + maxCropHeightDisplay);
+          const newBottom = Math.max(minBottom, Math.min(maxBottom, cropBottom + gesture.dy));
           setCropBottom(newBottom);
-          setCropTop(Math.min(cropTop, maxTop));
         },
       }),
-    [cropTop, cropBottom, displaySize]
+    [cropTop, cropBottom, displaySize, minCropHeightDisplay, maxCropHeightDisplay]
   );
 
   const movePanResponder = useMemo(
@@ -165,7 +165,7 @@ const CropImageScreen = ({ language = 'English' }) => {
   );
 
   const handleCrop = async () => {
-    if (cropHeightOriginal <= 0 || isCropping) return;
+    if (cropHeightOriginal < MIN_IMAGE_HEIGHT || cropHeightOriginal > MAX_IMAGE_HEIGHT || isCropping) return;
     setIsCropping(true);
     try {
       const cropData = {
@@ -266,7 +266,9 @@ const CropImageScreen = ({ language = 'English' }) => {
           {cropHeightOriginal} px
         </Text>
         <Text style={[styles.heightHint, { color: theme.textSecondary }]}>
-          {cropHeightOriginal <= MAX_IMAGE_HEIGHT
+          {cropHeightOriginal < MIN_IMAGE_HEIGHT
+            ? t.belowLimit
+            : cropHeightOriginal <= MAX_IMAGE_HEIGHT
             ? t.withinLimit
             : t.aboveLimit}
         </Text>
@@ -284,10 +286,10 @@ const CropImageScreen = ({ language = 'English' }) => {
             styles.button,
             styles.cropButton,
             { backgroundColor: theme.accent },
-            cropHeightOriginal > MAX_IMAGE_HEIGHT && { opacity: 0.7 },
+            (cropHeightOriginal < MIN_IMAGE_HEIGHT || cropHeightOriginal > MAX_IMAGE_HEIGHT) && { opacity: 0.7 },
           ]}
           onPress={handleCrop}
-          disabled={isCropping || cropHeightOriginal > MAX_IMAGE_HEIGHT}
+          disabled={isCropping || cropHeightOriginal < MIN_IMAGE_HEIGHT || cropHeightOriginal > MAX_IMAGE_HEIGHT}
         >
           {isCropping ? (
             <ActivityIndicator color="#fff" />

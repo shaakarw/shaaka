@@ -1,6 +1,6 @@
 // App.js
 import React, { useState, useCallback, Component, useEffect } from 'react';
-import { NavigationContainer, useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
+import { NavigationContainer, useNavigationContainerRef } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
@@ -8,10 +8,10 @@ import { AuthProvider } from './context/AuthContext';
 import { BottomSheetProvider } from './context/BottomSheetContext';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { LogBox, View, Text, TouchableOpacity, Image, StyleSheet, ActivityIndicator, AppState } from 'react-native';
+import { LogBox, View, Text, TouchableOpacity, StyleSheet, AppState, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StatusBar } from 'expo-status-bar';
-import { TabModeProvider, useTabMode } from './context/TabModeContext';
+import { TabModeProvider } from './context/TabModeContext';
 import axios from 'axios';
 import { BASE_URL } from './constants';
 import AddUpdateScreen from './screens/AddUpdateScreen';
@@ -25,6 +25,10 @@ import SettingsScreen from './screens/SettingsScreen';
 import SearchScreen from './screens/SearchScreen';
 import MessageScreen from './screens/MessageScreen';
 import BuyPostScreen from './screens/BuyPostScreen';
+import FeedScreen from './screens/FeedScreen';
+import MyPostsScreen from './screens/MyPostsScreen';
+import VideosScreen from './screens/VideosScreen';
+import SavedPostsScreen from './screens/SavedPostsScreen';
 import LoginScreen from './screens/LoginScreen';
 import RegisterScreen from './screens/RegisterScreen';
 import ForgotPasswordScreen from './screens/ForgotPasswordScreen';
@@ -32,6 +36,7 @@ import ChatScreen from './screens/ChatScreen';
 import InstagramChatScreen from './screens/InstagramChatScreen';
 import WelcomeHomeScreen from './screens/HomeScreen';
 import LocateScreen from './screens/LocateScreen';
+import MapScreen from './screens/MapScreen';
 import AddShopScreen from './screens/AddPlaceScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import PostDetailScreen from './screens/PostDetailScreen';
@@ -39,6 +44,7 @@ import AdminUserScreen from './screens/AdminUserScreen';
 import AdminPostsScreen from './screens/AdminPostsScreen';
 import AdminReportsScreen from './screens/AdminReportsScreen';
 import AdminShopsScreen from './screens/AdminShopsScreen';
+import AdminBusinessAddScreen from './screens/AdminBusinessAddScreen';
 import AddPostScreen from './screens/AddPostScreen';
 import ViewPlaceScreen from './screens/ViewPlaceScreen';
 import ViewShopScreen from './screens/ViewShopScreen';
@@ -47,7 +53,18 @@ import BusinessIdeasScreen from './screens/BusinessIdeasScreen';
 import NotificationsScreen from './screens/NotificationsScreen';
 import NotificationPreferencesScreen from './screens/NotificationPreferencesScreen';
 import ChangePasswordScreen from './screens/ChangePasswordScreen';
-import { Logo } from './assets';
+import PreviewScreen from './screens/PreviewScreen';
+import ShaakaLoadingScreen from './components/ShaakaLoadingScreen';
+import TopBar from './components/topbar';
+import BottomBar from './components/bottombar';
+import MobileNavigation from './components/MobileNavigation';
+import OfflineBanner from './components/OfflineBanner';
+import { networkStatus } from './services/networkStatus';
+import { syncManager } from './services/syncManager';
+import { startupPrefetch } from './services/startupPrefetch';
+import { installOfflineApiCache } from './services/offlineApiCache';
+
+installOfflineApiCache();
 
 // Payment
 
@@ -149,20 +166,21 @@ if (typeof process !== 'undefined' && process.listeners) {
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
-// Tab labels (used in CustomTabBar)
-const tabLabels = {
-  English: { Home: 'Home', Search: 'Search', BuyPost: 'Buy', Locate: 'Locate', AddShop: 'Add Shop', Message: 'Message', Settings: 'Settings' },
-  Kinyarwanda: { Home: 'Ahabanza', Search: 'Shakisha', BuyPost: 'Gura', Locate: 'Shaaka', AddShop: 'Ongerako', Message: 'Ubutumwa', Settings: 'Igenamiterere' },
-};
-
+/*
 // ==================== CUSTOM HEADER ====================
-const CustomHeader = ({ theme, language, toggleLanguage, showBackButton = false }) => {
+const LegacyCustomHeader = ({ theme, language, toggleLanguage, showBackButton = false }) => {
   const navigation = useNavigation();
   const route = useRoute();
+  const { user: authUser, refreshUser } = useAuth();
 
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [avatarUri, setAvatarUri] = useState(null);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+
+  useEffect(() => {
+    setIsLoggedIn(!!authUser);
+    setAvatarUri(authUser?.avatar || null);
+  }, [authUser]);
 
   useFocusEffect(
     useCallback(() => {
@@ -170,20 +188,28 @@ const CustomHeader = ({ theme, language, toggleLanguage, showBackButton = false 
         try {
           const loggedIn = await AsyncStorage.getItem('isLoggedIn');
           const isLogged = loggedIn === 'true';
-          setIsLoggedIn(isLogged);
+          let currentUser = authUser;
+
           if (isLogged) {
+            currentUser = (await refreshUser()) || currentUser;
+          }
+
+          if (!currentUser && isLogged) {
             const userData = await AsyncStorage.getItem('user');
             if (userData) {
-              const user = JSON.parse(userData);
-              setAvatarUri(user.avatar || null);
-            } else {
-              setAvatarUri(null);
+              currentUser = JSON.parse(userData);
             }
-          } else {
-            setAvatarUri(null);
           }
-          if (isLogged) {
+
+          setIsLoggedIn(!!currentUser);
+          setAvatarUri(currentUser?.avatar || null);
+
+          if (currentUser) {
             const token = await AsyncStorage.getItem('userToken');
+            if (!token) {
+              setUnreadNotifications(0);
+              return;
+            }
             const response = await axios.get(`${BASE_URL}/api/notifications`, {
               headers: { Authorization: `Bearer ${token}` },
             });
@@ -213,14 +239,17 @@ const CustomHeader = ({ theme, language, toggleLanguage, showBackButton = false 
   };
 
   return (
-    <View style={[styles.headerContainer, { backgroundColor: theme.background, borderBottomColor: theme.border }]}>
+    <View style={[styles.headerContainer, { backgroundColor: theme.background }]}>
       <View style={styles.headerLeft}>
         {showBackButton && (
           <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
             <Ionicons name="arrow-back" size={24} color={theme.text} />
           </TouchableOpacity>
         )}
-        <TouchableOpacity onPress={() => navigation.navigate('Main')} style={{ flexDirection: 'row' }}>
+        <TouchableOpacity
+          onPress={() => navigation.navigate('Main', { refreshKey: Date.now() })}
+          style={{ flexDirection: 'row' }}
+        >
           <Text style={[styles.appName, { color: theme.text }]}>Shaaka</Text>
         </TouchableOpacity>
         <TouchableOpacity onPress={() => navigation.navigate('Notifications')} style={{ flexDirection: 'row' }}>
@@ -253,123 +282,168 @@ const CustomHeader = ({ theme, language, toggleLanguage, showBackButton = false 
   );
 };
 
-// ==================== CUSTOM TAB BAR ====================
-const CustomTabBar = ({ state, descriptors, navigation, language, theme }) => {
-  const { tabMode } = useTabMode();
-  const currentLabels = tabLabels[language];
+// ==================== CUSTOM TAB BAR (flat, single line with +) ====================
+// The bottom bar is only rendered on these screens.
+const BAR_ROUTES = ['WelcomeHome', 'Search', 'BuyPost', 'Locate', 'Message'];
 
-  // List of all valid tab screen names
-  const allTabNames = ['WelcomeHome', 'Search', 'BuyPost', 'Locate', 'AddShop', 'Message', 'Settings'];
-  
-  // Get the currently focused route
+const CustomTabBar = ({ state, navigation, theme }) => {
+  const { tabMode } = useTabMode();
+  const insets = useSafeAreaInsets();
+
   const currentRoute = state.routes[state.index];
-  
-  // Hide the tab bar if we're not on a tab screen
-  if (!allTabNames.includes(currentRoute?.name)) {
+  const currentBuyPostTab =
+    currentRoute?.name === 'BuyPost'
+      ? currentRoute?.params?.activeTab || 'ushaka'
+      : null;
+
+  // --- Visibility rules -------------------------------------------------
+  // 1. Only show on the whitelisted screens.
+  if (!currentRoute || !BAR_ROUTES.includes(currentRoute.name)) return null;
+  // 2. BuyPost only shows the bar on the feed (ushaka) and videos tabs.
+  const allowedBuyPostTabs = ['ushaka', 'videos'];
+  if (
+    currentRoute.name === 'BuyPost' &&
+    !allowedBuyPostTabs.includes(currentBuyPostTab)
+  ) {
     return null;
   }
+  // ----------------------------------------------------------------------
 
-  const alwaysVisible = ['WelcomeHome', 'Message', 'Settings'];
-  let conditionalTabs = [];
-  if (tabMode === 'shopMode') {
-    conditionalTabs = ['Search', 'BuyPost'];
-  } else {
-    conditionalTabs = ['Locate', 'AddShop'];
-  }
+  // Which tabs are visible (same logic as before, driven by TabModeContext)
+  const alwaysVisible = ['WelcomeHome', 'Message'];
+  const conditionalTabs =
+    tabMode === 'shopMode' ? ['Search', 'BuyPost'] : ['Locate', 'AddShop'];
   const visibleTabNames = [...alwaysVisible, ...conditionalTabs];
-  const visibleRoutes = state.routes.filter(route => visibleTabNames.includes(route.name));
 
-  const getIconAndLabel = (routeName, isFocused) => {
-    let iconName, label;
+  const order = [
+    'WelcomeHome',
+    'Search',
+    'BuyPost',
+    'Locate',
+    'AddShop',
+    'Message',
+  ];
+
+  const visibleRoutes = order
+    .filter(name => visibleTabNames.includes(name))
+    .map(name => state.routes.find(r => r.name === name))
+    .filter(Boolean);
+
+  const getIcon = (routeName, isFocused) => {
     switch (routeName) {
       case 'WelcomeHome':
-        iconName = isFocused ? 'home' : 'home-outline';
-        label = currentLabels.Home;
-        break;
+        return isFocused ? 'home' : 'home-outline';
       case 'Search':
-        iconName = isFocused ? 'search' : 'search-outline';
-        label = currentLabels.Search;
-        break;
+        return isFocused ? 'search' : 'search-outline';
       case 'BuyPost':
-        iconName = isFocused ? 'cart' : 'cart-outline';
-        label = currentLabels.BuyPost;
-        break;
+        return isFocused ? 'cart' : 'cart-outline';
       case 'Locate':
-        iconName = isFocused ? 'map' : 'map-outline';
-        label = currentLabels.Locate;
-        break;
+        return isFocused ? 'map' : 'map-outline';
       case 'AddShop':
-        iconName = isFocused ? 'add-circle' : 'add-circle-outline';
-        label = currentLabels.AddShop;
-        break;
+        return isFocused ? 'add-circle' : 'add-circle-outline';
       case 'Message':
-        iconName = isFocused ? 'chatbubble' : 'chatbubble-outline';
-        label = currentLabels.Message;
-        break;
-      case 'Settings':
-        iconName = isFocused ? 'settings' : 'settings-outline';
-        label = currentLabels.Settings;
-        break;
+        return isFocused ? 'chatbubble' : 'chatbubble-outline';
       default:
-        iconName = 'ellipse-outline';
-        label = routeName;
+        return 'ellipse-outline';
     }
-    return { iconName, label };
   };
 
-  return (
-    <View style={[styles.tabBar, { backgroundColor: theme.background, borderTopColor: theme.border }]}>
-      {visibleRoutes.map((route, index) => {
-        const originalIndex = state.routes.findIndex(r => r.key === route.key);
-        const isFocused = state.index === originalIndex;
-        const { iconName, label } = getIconAndLabel(route.name, isFocused);
-        const onPress = () => {
-          try {
-            const event = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
-            if (!isFocused && !event.defaultPrevented) navigation.navigate(route.name);
-          } catch (error) {
-            console.error('Tab press error:', error);
-          }
-        };
+  const renderTab = route => {
+    const originalIndex = state.routes.findIndex(r => r.key === route.key);
+    const isFocused = state.index === originalIndex;
 
-        return (
-          <TouchableOpacity
-            key={route.key}
-            onPress={onPress}
-            style={styles.tabItem}
-            activeOpacity={0.7}
-          >
-            <Ionicons
-              name={iconName}
-              size={24}
-              color={isFocused ? theme.more : theme.textSecondary}
-            />
-            <Text
-              style={[
-                styles.tabLabel,
-                { color: isFocused ? theme.more : theme.textSecondary }
-              ]}
-            >
-              {label}
-            </Text>
-          </TouchableOpacity>
-        );
-      })}
+    const onPress = () => {
+      try {
+        const event = navigation.emit({
+          type: 'tabPress',
+          target: route.key,
+          canPreventDefault: true,
+        });
+        if (!isFocused && !event.defaultPrevented) {
+          navigation.navigate(route.name);
+        }
+      } catch (error) {
+        console.error('Tab press error:', error);
+      }
+    };
+
+    return (
+      <TouchableOpacity
+        key={route.key}
+        onPress={onPress}
+        activeOpacity={0.7}
+        style={styles.tabItem}
+        accessibilityRole="button"
+        accessibilityState={{ selected: isFocused }}
+      >
+        <Ionicons
+          name={getIcon(route.name, isFocused)}
+          size={24}
+          color={isFocused ? theme.more : theme.textSecondary}
+        />
+      </TouchableOpacity>
+    );
+  };
+
+  const handleCreatePress = () => {
+    try {
+      // Reuses the existing create-post route (Stack.Screen name="AddPost").
+      navigation.navigate('AddPost');
+    } catch (error) {
+      console.error('Create press error:', error);
+    }
+  };
+
+  // Insert the "+" icon exactly in the middle of the visible tabs
+  const midIndex = Math.floor(visibleRoutes.length / 2);
+  const leftRoutes = visibleRoutes.slice(0, midIndex);
+  const rightRoutes = visibleRoutes.slice(midIndex);
+
+  return (
+    <View
+      style={[
+        styles.tabBar,
+        {
+          backgroundColor: theme.background,
+          borderTopColor: theme.border,
+          paddingBottom: Math.max(insets.bottom, 10),
+        },
+      ]}
+    >
+      {leftRoutes.map(renderTab)}
+
+      <TouchableOpacity
+        onPress={handleCreatePress}
+        activeOpacity={0.7}
+        style={styles.tabItem}
+        accessibilityRole="button"
+        accessibilityLabel="Create post"
+      >
+        <Ionicons name="add" size={26} color={theme.more} />
+      </TouchableOpacity>
+
+      {rightRoutes.map(renderTab)}
     </View>
   );
 };
 
+*/
+
 // ==================== MAIN TABS ====================
-const MainTabs = ({ language, toggleLanguage, theme }) => {
+const MainTabs = ({ language, toggleLanguage, theme, route }) => {
+  const refreshKey = route?.params?.refreshKey || 0;
+
   return (
     <Tab.Navigator
-      tabBar={props => <CustomTabBar {...props} language={language} theme={theme} />}
+      key={refreshKey}
+      initialRouteName="WelcomeHome"
+      tabBar={props => <BottomBar {...props} theme={theme} />}
       screenOptions={{ headerShown: false }}
     >
       <Tab.Screen name="WelcomeHome">
         {props => (
           <>
-            <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
+            <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
             <WelcomeHomeScreen {...props} language={language} toggleLanguage={toggleLanguage} />
           </>
         )}
@@ -377,7 +451,7 @@ const MainTabs = ({ language, toggleLanguage, theme }) => {
       <Tab.Screen name="Search">
         {props => (
           <>
-            <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
+            <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
             <SearchScreen {...props} language={language} toggleLanguage={toggleLanguage} />
           </>
         )}
@@ -385,7 +459,7 @@ const MainTabs = ({ language, toggleLanguage, theme }) => {
       <Tab.Screen name="BuyPost">
         {props => (
           <>
-            <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
+            <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
             <BuyPostScreen {...props} language={language} toggleLanguage={toggleLanguage} />
           </>
         )}
@@ -393,7 +467,7 @@ const MainTabs = ({ language, toggleLanguage, theme }) => {
       <Tab.Screen name="Locate">
         {props => (
           <>
-            <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
+            <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
             <LocateScreen {...props} language={language} toggleLanguage={toggleLanguage} />
           </>
         )}
@@ -401,7 +475,7 @@ const MainTabs = ({ language, toggleLanguage, theme }) => {
       <Tab.Screen name="AddShop">
         {props => (
           <>
-            <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
+            <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
             <AddShopScreen {...props} language={language} toggleLanguage={toggleLanguage} />
           </>
         )}
@@ -409,7 +483,7 @@ const MainTabs = ({ language, toggleLanguage, theme }) => {
       <Tab.Screen name="Message">
         {props => (
           <>
-            <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
+            <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
             <MessageScreen {...props} language={language} toggleLanguage={toggleLanguage} />
           </>
         )}
@@ -417,7 +491,7 @@ const MainTabs = ({ language, toggleLanguage, theme }) => {
       <Tab.Screen name="Settings">
         {props => (
           <>
-            <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
+            <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
             <SettingsScreen {...props} language={language} toggleLanguage={toggleLanguage} />
           </>
         )}
@@ -429,8 +503,40 @@ const MainTabs = ({ language, toggleLanguage, theme }) => {
 // ==================== APP CONTENT ====================
 function AppContent() {
   const { theme, isDarkMode, isLoading } = useTheme();
+  const navigationRef = useNavigationContainerRef();
   const [language, setLanguage] = useState('Kinyarwanda'); // default language
+  const [isOnline, setIsOnline] = useState(networkStatus.get().isOnline);
+  const [navigationReady, setNavigationReady] = useState(false);
+  const [showMobileNavigation, setShowMobileNavigation] = useState(false);
   const toggleLanguage = () => setLanguage(prev => prev === 'English' ? 'Kinyarwanda' : 'English');
+
+  useEffect(() => {
+    let previousOnline = false;
+    let unsubscribe;
+    networkStatus.start().then(status => {
+      previousOnline = status.isOnline;
+      setIsOnline(status.isOnline);
+      if (status.isOnline) {
+        syncManager.run('app-start');
+        startupPrefetch.run('app-start');
+      }
+      unsubscribe = networkStatus.subscribe(nextStatus => {
+        setIsOnline(nextStatus.isOnline);
+        if (nextStatus.isOnline && !previousOnline) {
+          syncManager.run('connection-restored');
+          startupPrefetch.run('connection-restored');
+        }
+        previousOnline = nextStatus.isOnline;
+      });
+    });
+    return () => unsubscribe?.();
+  }, []);
+
+  useEffect(() => {
+    if (!isOnline && navigationReady && navigationRef.isReady()) {
+      navigationRef.resetRoot({ index: 0, routes: [{ name: 'Main' }] });
+    }
+  }, [isOnline, navigationReady, navigationRef]);
 
   // ---------- GLOBAL ONLINE STATUS (unchanged) ----------
   const setGlobalOnlineStatus = useCallback(async (online) => {
@@ -461,6 +567,8 @@ function AppContent() {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       if (nextAppState === 'active') {
         setGlobalOnlineStatus(true);
+        syncManager.run('foreground');
+        startupPrefetch.run('foreground');
       } else if (nextAppState === 'background' || nextAppState === 'inactive') {
         setGlobalOnlineStatus(false);
       }
@@ -472,9 +580,13 @@ function AppContent() {
 
   if (isLoading) {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: theme.background }}>
-        <ActivityIndicator size="large" color={theme.accent} />
-      </View>
+      <>
+        <StatusBar style={isDarkMode ? 'light' : 'dark'} hidden={false} translucent={false} />
+        <ShaakaLoadingScreen
+          message="Loading..."
+          backgroundColor={isDarkMode ? '#111111' : '#dddddd'}
+        />
+      </>
     );
   }
 
@@ -482,18 +594,44 @@ function AppContent() {
     <>
       <StatusBar style={isDarkMode ? 'light' : 'dark'} hidden={false} translucent={false} />
       <TabModeProvider>
-        <NavigationContainer>
+        <NavigationContainer
+          ref={navigationRef}
+          onReady={() => setNavigationReady(true)}
+          onStateChange={state => {
+            const activeRoute = state?.routes?.[state.index];
+            setShowMobileNavigation(
+              activeRoute?.name !== 'Main' && activeRoute?.name !== 'AddPost'
+            );
+          }}
+        >
+          <OfflineBanner />
           
-          <Stack.Navigator screenOptions={{ headerShown: false }}>
+          <Stack.Navigator initialRouteName="Main" screenOptions={{ headerShown: false }}>
             <Stack.Screen name="Main">
               {props => <MainTabs {...props} language={language} toggleLanguage={toggleLanguage} theme={theme} />}
+            </Stack.Screen>
+            <Stack.Screen name="Preview">
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <PreviewScreen {...props} language={language} />
+                </>
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="BuyPost">
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <BuyPostScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
             </Stack.Screen>
 
             {/* ---------- NEW: How It Works Screen ---------- */}
             <Stack.Screen name="HowItWorks">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <HowItWorksScreen {...props} language={language} />
                 </>
               )}
@@ -503,33 +641,35 @@ function AppContent() {
             <Stack.Screen name="BusinessIdeas">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <BusinessIdeasScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
             </Stack.Screen>
-<Stack.Screen name="CropImage">
-  {props => (
-    <>
-      <CustomHeader 
-        theme={theme} 
-        language={language} 
-        toggleLanguage={toggleLanguage} 
-        showBackButton={true} 
-      />
-      <CropImageScreen 
-        {...props} 
-        language={language} 
-        toggleLanguage={toggleLanguage} 
-      />
-    </>
-  )}
-</Stack.Screen>
+
+            <Stack.Screen name="CropImage">
+              {props => (
+                <>
+                  <TopBar
+                    theme={theme}
+                    language={language}
+                    toggleLanguage={toggleLanguage}
+                    showBackButton={true}
+                  />
+                  <CropImageScreen
+                    {...props}
+                    language={language}
+                    toggleLanguage={toggleLanguage}
+                  />
+                </>
+              )}
+            </Stack.Screen>
+
             {/* ---------- Screens that use a custom header ---------- */}
             <Stack.Screen name="AddUpdate">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <AddUpdateScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
@@ -538,19 +678,15 @@ function AppContent() {
             <Stack.Screen name="AddPost">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <AddPostScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                  <BottomBar {...props} theme={theme} stackRouteName="AddPost" />
                 </>
               )}
             </Stack.Screen>
 
-            <Stack.Screen name="AdminReports">
-              {props => (
-                <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
-                  <AdminReportsScreen {...props} language={language} toggleLanguage={toggleLanguage} />
-                </>
-              )}
+            <Stack.Screen name="AdminReports" options={{ headerShown: false }}>
+              {props => <AdminReportsScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
             </Stack.Screen>
 
             <Stack.Screen
@@ -562,7 +698,7 @@ function AppContent() {
             >
               {props => (
                 <>
-                  <CustomHeader
+                  <TopBar
                     theme={theme}
                     language={language}
                     toggleLanguage={toggleLanguage}
@@ -577,21 +713,18 @@ function AppContent() {
               )}
             </Stack.Screen>
 
-            <Stack.Screen name="AdminShops">
-              {props => (
-                <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
-                  <AdminShopsScreen {...props} language={language} toggleLanguage={toggleLanguage} />
-                </>
-              )}
+            <Stack.Screen name="AdminShops" options={{ headerShown: false }}>
+              {props => <AdminShopsScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
             </Stack.Screen>
 
-           
+            <Stack.Screen name="AdminBusinessAdd" options={{ headerShown: false }}>
+              {props => <AdminBusinessAddScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
+            </Stack.Screen>
 
             <Stack.Screen name="Notifications">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <NotificationsScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
@@ -600,7 +733,7 @@ function AppContent() {
             <Stack.Screen name="NotificationPreferences">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <NotificationPreferencesScreen {...props} language={language} />
                 </>
               )}
@@ -609,7 +742,7 @@ function AppContent() {
             <Stack.Screen name="ChangePassword">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <ChangePasswordScreen {...props} language={language} />
                 </>
               )}
@@ -618,7 +751,7 @@ function AppContent() {
             <Stack.Screen name="Success">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <SuccessScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
@@ -627,77 +760,58 @@ function AppContent() {
             <Stack.Screen name="Fail">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <FailScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
             </Stack.Screen>
 
-            <Stack.Screen name="AdminUser">
-              {props => (
-                <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
-                  <AdminUserScreen {...props} language={language} toggleLanguage={toggleLanguage} />
-                </>
-              )}
+            <Stack.Screen name="AdminUser" options={{ headerShown: false }}>
+              {props => <AdminUserScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
             </Stack.Screen>
 
-            <Stack.Screen name="AdminPosts">
-              {props => (
-                <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
-                  <AdminPostsScreen {...props} language={language} toggleLanguage={toggleLanguage} />
-                </>
-              )}
+            <Stack.Screen name="AdminPosts" options={{ headerShown: false }}>
+              {props => <AdminPostsScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
             </Stack.Screen>
 
             <Stack.Screen name="AddShoppingMallShop">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <AddShoppingMallShopScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
             </Stack.Screen>
 
             <Stack.Screen name="ViewShop"
-            
               options={{
                 presentation: "transparentModal",
                 headerShown: false,
               }}>
               {props => (
-                
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <ViewShopScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
             </Stack.Screen>
 
-            <Stack.Screen name="AdminLogin">
-              {props => (
-                <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
-                  <AdminLoginScreen {...props} language={language} toggleLanguage={toggleLanguage} />
-                </>
-              )}
+            <Stack.Screen name="AdminLogin" options={{ headerShown: false }}>
+              {props => <AdminLoginScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
             </Stack.Screen>
 
-            <Stack.Screen name="AdminDashboard">
-              {props => (
-                <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
-                  <AdminDashboardScreen {...props} language={language} toggleLanguage={toggleLanguage} />
-                </>
-              )}
+            <Stack.Screen name="AdminDashboard" options={{ headerShown: false }}>
+              {props => <AdminDashboardScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
+            </Stack.Screen>
+            <Stack.Screen name="AdminLiveChat" options={{ headerShown: false }}>
+              {props => <MessageScreen {...props} language={language} adminMode />}
             </Stack.Screen>
 
             {/* ---------- Login / Register / ForgotPassword / Profile / PostDetail ---------- */}
             <Stack.Screen name="Login">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <LoginScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
@@ -705,7 +819,7 @@ function AppContent() {
             <Stack.Screen name="Register">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <RegisterScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
@@ -713,7 +827,7 @@ function AppContent() {
             <Stack.Screen name="ForgotPassword">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <ForgotPasswordScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
@@ -721,7 +835,7 @@ function AppContent() {
             <Stack.Screen name="Profile">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <ProfileScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
@@ -729,8 +843,48 @@ function AppContent() {
             <Stack.Screen name="PostDetail">
               {props => (
                 <>
-                  <CustomHeader theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <PostDetailScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="Feed">
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <FeedScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="Map">
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <MapScreen {...props} />
+                </>
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="MyPosts">
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <MyPostsScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="Videos">
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <VideosScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="SavedPosts">
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
+                  <SavedPostsScreen {...props} language={language} toggleLanguage={toggleLanguage} />
                 </>
               )}
             </Stack.Screen>
@@ -744,6 +898,7 @@ function AppContent() {
             </Stack.Screen>
 
           </Stack.Navigator>
+          <MobileNavigation visible={showMobileNavigation} />
         </NavigationContainer>
       </TabModeProvider>
     </>
@@ -769,6 +924,11 @@ export default function App() {
 
 // ==================== STYLES ====================
 const styles = StyleSheet.create({
+  offlineInteractionBlocker: {
+    backgroundColor: 'transparent',
+    zIndex: 10000,
+    elevation: 10000,
+  },
   headerContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -818,11 +978,11 @@ const styles = StyleSheet.create({
   notificationBadge: {
     position: 'absolute',
     top: -3,
-    right: -5,
-    minWidth: 18,
-    height: 18,
+    right: -20,
+    minWidth: 24,
+    height: 24,
     paddingHorizontal: 4,
-    borderRadius: 9,
+    borderRadius: 16,
     backgroundColor: '#47ae87',
     alignItems: 'center',
     justifyContent: 'center',
@@ -832,22 +992,32 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
   },
+
+  // ---------- Flat bottom navigation ----------
   tabBar: {
     flexDirection: 'row',
-    paddingBottom: 0,
-    paddingTop: 8,
-    borderTopWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    paddingTop: 10,
+    paddingHorizontal: 6,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    // iOS shadow
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    // Android shadow
+    elevation: 8,
+    zIndex: 20,
   },
   tabItem: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    minHeight: 44, // comfortable touch target
   },
-  tabLabel: {
-    fontSize: 8,
-    marginTop: 0,
-    marginBottom: 40,
-  },
+
+  // ---------- Error fallback ----------
   errorFallbackContainer: {
     flex: 1,
     justifyContent: 'center',

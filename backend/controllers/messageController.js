@@ -3,42 +3,46 @@ const mongoose = require('mongoose');
 const Message = require('../models/Message');
 const User = require('../models/User');
 const Post = require('../models/Post');
-const cloudinary = require('../config/cloudinary');
-const streamifier = require('streamifier');
+const storageService = require('../services/storage/storageService');
 const { computeAggregatedLimits } = require('../utils/subscriptionHelpers_clean');
 const socketHelper = require('../socket');
 
-const parseCloudinaryPublicId = (url, expectedResourceType = 'image') => {
-  if (!url || typeof url !== 'string') return null;
-  const lower = String(url).toLowerCase();
-  const resourceType = lower.includes('/video/') || lower.includes('/video/upload') ? 'video' : 'image';
-  const normalized = String(url).trim();
-  const match = normalized.match(/\/\w+\/upload\/(?:v\d+\/)?(.+?)(?:\.[a-zA-Z0-9]+)?(?:\?.*)?$/);
-  if (!match || !match[1]) return null;
-  return {
-    cloudinaryPublicId: match[1],
-    cloudinaryResourceType: expectedResourceType || resourceType,
-  };
+const privateMediaUrl = (key, req) => key
+  ? storageService.getMediaUrl(key, { origin: storageService.getRequestOrigin(req), isPrivate: true })
+  : '';
+
+const publicMediaUrl = key => key ? storageService.getPublicMediaUrl(key) : '';
+
+const isValidPrivateMediaUrl = (url, key) => {
+  try {
+    const parsed = new URL(url);
+    return key.startsWith('shaaka/chats/') && storageService.verifyPrivateMediaUrl(
+      key,
+      parsed.searchParams.get('expires'),
+      parsed.searchParams.get('signature')
+    );
+  } catch {
+    return false;
+  }
 };
 
-const deleteCloudinaryMedia = async (message) => {
-  const publicId = message.cloudinaryPublicId || message.publicId || '';
-  const resourceType = message.cloudinaryResourceType || (message.videoUrl ? 'video' : 'image');
-  if (!publicId) return null;
-
-  try {
-    const destroyOptions = {
-      resource_type: resourceType === 'video' ? 'video' : 'image',
-    };
-    const result = await cloudinary.uploader.destroy(publicId, destroyOptions);
-    if (result?.result && result.result !== 'ok') {
-      console.warn('[Cloudinary] Non-ok destroy result:', result.result, 'for', publicId);
-    }
-    return result;
-  } catch (error) {
-    console.error('[Cloudinary] delete failed:', error.message || error);
-    return null;
+const refreshMessageMediaUrls = (message, req) => {
+  const value = message.toObject ? message.toObject() : { ...message };
+  const sourceImageUrls = Array.isArray(value.imageUrls) && value.imageUrls.length
+    ? value.imageUrls
+    : (value.imageUrl ? [value.imageUrl] : []);
+  const imageStorageKeys = Array.isArray(value.imageStorageKeys) ? value.imageStorageKeys : [];
+  const refreshedImageUrls = sourceImageUrls.map((url, index) => {
+    const key = imageStorageKeys[index] || storageService.getStorageKeyFromUrl(url) || (index === 0 ? value.imageStorageKey : '');
+    return publicMediaUrl(key) || url;
+  });
+  if (refreshedImageUrls.length) {
+    value.imageUrl = refreshedImageUrls[0];
+    if (sourceImageUrls.length > 1) value.imageUrls = refreshedImageUrls;
   }
+  value.videoUrl = privateMediaUrl(value.videoStorageKey || storageService.getStorageKeyFromUrl(value.videoUrl), req) || value.videoUrl;
+  value.audioUrl = privateMediaUrl(value.audioStorageKey || storageService.getStorageKeyFromUrl(value.audioUrl), req) || value.audioUrl;
+  return value;
 };
 
 // Helper: get UTC start/end of today
@@ -49,27 +53,43 @@ const getTodayRange = () => {
   return { start, end };
 };
 
-// Upload audio to Cloudinary
-const uploadAudioToCloudinary = (buffer) => {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { resource_type: 'video', folder: 'chat_audio', format: 'mp3' },
-      (error, result) => {
-        if (error) reject(error);
-        else resolve(result.secure_url);
-      }
-    );
-    streamifier.createReadStream(buffer).pipe(stream);
-  });
-};
-
 // Send message
 exports.sendMessage = async (req, res) => {
+  const uploadedStorageKeys = [];
   try {
-    let audioUrl = null, audioDuration = null;
-    if (req.file) {
-      audioUrl = await uploadAudioToCloudinary(req.file.buffer);
+    const clientMessageId = String(req.body.clientMessageId || '').trim();
+    if (clientMessageId) {
+      const existingMessage = await Message.findOne({ clientMessageId });
+      if (existingMessage) return res.status(200).json({ success: true, message: refreshMessageMediaUrls(existingMessage, req), idempotent: true });
+    }
+    const senderId = req.user?.id || req.body.senderId;
+    if (!senderId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+    let audioUrl = null, audioStorageKey = '', videoUrlFromFile = null, videoStorageKey = '', audioDuration = null;
+    const audioFile = req.files?.audio?.[0];
+    const videoFile = req.files?.video?.[0];
+    if (audioFile) {
+      const audioResult = await storageService.uploadMedia({
+        buffer: audioFile.buffer,
+        mimeType: audioFile.mimetype,
+        folder: `chats/${senderId}/audio`,
+        maxBytes: 25 * 1024 * 1024,
+      });
+      audioStorageKey = audioResult.storageKey;
+      uploadedStorageKeys.push(audioStorageKey);
+      audioUrl = privateMediaUrl(audioStorageKey, req);
       audioDuration = req.body.audioDuration || null;
+    }
+    if (videoFile) {
+      const videoResult = await storageService.uploadMedia({
+        buffer: videoFile.buffer,
+        mimeType: videoFile.mimetype,
+        folder: `chats/${senderId}/videos`,
+        maxBytes: 50 * 1024 * 1024,
+      });
+      videoStorageKey = videoResult.storageKey;
+      uploadedStorageKeys.push(videoStorageKey);
+      videoUrlFromFile = privateMediaUrl(videoStorageKey, req);
     }
 
     let repliedTo = req.body.repliedTo;
@@ -82,24 +102,45 @@ exports.sendMessage = async (req, res) => {
       try { replyPost = JSON.parse(replyPost); } catch { replyPost = null; }
     }
 
+    const requestedImageUrls = Array.isArray(req.body.imageUrls) ? req.body.imageUrls : [];
+    const submittedImageUrls = [...new Set([req.body.imageUrl, ...requestedImageUrls]
+      .filter(url => typeof url === 'string' && url.trim())
+      .map(url => url.trim()))];
+
     let replyPostData = null;
     if (replyPost && replyPost.postId) {
-      const postExists = await Post.findById(replyPost.postId);
+      const contextType = replyPost.contextType || 'post';
+      const postExists = contextType === 'post' && mongoose.Types.ObjectId.isValid(replyPost.postId)
+        ? await Post.findById(replyPost.postId)
+        : null;
       replyPostData = {
         postId: replyPost.postId,
-        title: replyPost.title || 'Product',
-        description: replyPost.description || '',
-        image: replyPost.image || '',
-        price: replyPost.price || null,
-        location: replyPost.location || '',
-        ownerId: replyPost.ownerId || null,
-        timestamp: replyPost.timestamp || new Date(),
-        available: !!postExists,
+        contextId: replyPost.contextId || '',
+        contextType,
+        title: replyPost.title || postExists?.productName || 'Product',
+        description: replyPost.description || postExists?.description || '',
+        image: replyPost.image || postExists?.houseImages?.[0] || '',
+        price: replyPost.price ?? postExists?.price ?? null,
+        amount: replyPost.amount || postExists?.amount || '',
+        location: replyPost.location || postExists?.location || '',
+        category: replyPost.category || postExists?.category || '',
+        bedrooms: replyPost.bedrooms ?? postExists?.bedrooms ?? null,
+        bathrooms: replyPost.bathrooms ?? postExists?.bathrooms ?? null,
+        size: replyPost.size ?? postExists?.size ?? null,
+        priceNegotiable: replyPost.priceNegotiable ?? postExists?.priceNegotiable ?? false,
+        contactNumbers: replyPost.contactNumbers || postExists?.contactNumbers || [],
+        houseImages: replyPost.houseImages || postExists?.houseImages || [],
+        videoUrl: replyPost.videoUrl || postExists?.videoUrl || '',
+        username: replyPost.username || postExists?.username || '',
+        userAvatar: replyPost.userAvatar || postExists?.userAvatar || '',
+        ownerId: replyPost.ownerId || postExists?.user || null,
+        timestamp: replyPost.timestamp || postExists?.createdAt || new Date(),
+        available: contextType !== 'post' || !!postExists,
       };
     }
 
     // ---- Enforce image active limit for messages with imageUrl (user-specific limit and retention) ----
-    if (req.body.imageUrl) {
+    if (submittedImageUrls.length) {
       const senderId = req.body.senderId || req.user.id;
       const senderUser = await User.findById(senderId);
       if (!senderUser) return res.status(404).json({ success: false, message: 'Sender user not found' });
@@ -116,15 +157,26 @@ exports.sendMessage = async (req, res) => {
       }
     }
 
-    const senderId = req.user?.id || req.body.senderId;
-    if (!senderId) {
-      return res.status(401).json({ success: false, message: 'Authentication required' });
+    const normalizedImageUrls = [];
+    const imageStorageKeys = [];
+    for (const url of submittedImageUrls) {
+      const storageKey = storageService.getStorageKeyFromUrl(url);
+      if (storageKey) {
+        if (!storageService.isPublicMediaUrl(url, storageKey) && !isValidPrivateMediaUrl(url, storageKey)) {
+          return res.status(403).json({ success: false, message: 'Chat media URL is invalid or expired' });
+        }
+        normalizedImageUrls.push(publicMediaUrl(storageKey));
+        imageStorageKeys.push(storageKey);
+      } else {
+        normalizedImageUrls.push(url);
+        imageStorageKeys.push('');
+      }
     }
-
-    const imageUrl = req.body.imageUrl || '';
-    const videoUrl = req.body.videoUrl || '';
-    const imageMeta = imageUrl ? parseCloudinaryPublicId(imageUrl, 'image') : null;
-    const videoMeta = videoUrl ? parseCloudinaryPublicId(videoUrl, 'video') : null;
+    const imageUrl = normalizedImageUrls[0] || '';
+    const imageUrls = normalizedImageUrls.length > 1 ? normalizedImageUrls : [];
+    const imageStorageKey = imageStorageKeys[0] || '';
+    uploadedStorageKeys.push(...imageStorageKeys.filter(Boolean));
+    const videoUrl = videoUrlFromFile || req.body.videoUrl || '';
 
     const messageData = {
       postId: req.body.postId || '',
@@ -137,29 +189,53 @@ exports.sendMessage = async (req, res) => {
       receiverId: req.body.receiverId,
       receiverName: req.body.receiverName,
       receiverPhone: req.body.receiverPhone,
+      clientMessageId: clientMessageId || undefined,
       text: req.body.text || '',
       imageUrl,
+      imageUrls,
+      imageStorageKeys,
       videoUrl,
       audioUrl,
+      imageStorageKey: imageStorageKey || '',
+      videoStorageKey,
+      audioStorageKey,
+      storageProvider: uploadedStorageKeys.length ? 'b2' : '',
       audioDuration,
-      cloudinaryPublicId: imageMeta?.cloudinaryPublicId || videoMeta?.cloudinaryPublicId || '',
-      cloudinaryResourceType: imageMeta?.cloudinaryResourceType || videoMeta?.cloudinaryResourceType || '',
       repliedTo,
       replyPost: replyPostData,
     };
 
     const message = new Message(messageData);
     await message.save();
+    uploadedStorageKeys.length = 0;
+
+    const receiverId = String(message.receiverId || '');
+    const room = receiverId
+      ? `chat_${[String(message.senderId), receiverId].sort().join('_')}`
+      : null;
+    const io = socketHelper.getIO();
+    if (io && room) {
+      const chatId = message.postId || `direct_${[String(message.senderId), receiverId].sort().join('_')}`;
+      io.to(room).emit('new-message', {
+        chatId: String(chatId),
+        senderId: String(message.senderId),
+        receiverId,
+        message,
+      });
+    }
 
     // Increment dailyMessagesUsed if this message has an image
-    if (req.body.imageUrl) {
+    if (imageUrl) {
       await User.findByIdAndUpdate(req.body.senderId, { $inc: { dailyMessagesUsed: 1 } });
     }
 
     res.status(201).json({ success: true, message });
   } catch (error) {
-    console.error('Send message error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    await Promise.all(uploadedStorageKeys.map(key => storageService.deleteMedia(key).catch(deleteError => {
+      console.error('[Storage] Failed to clean up an unsaved message upload:', deleteError.code || 'B2_OPERATION_FAILED');
+    })));
+    console.error('Send message error:', error.code || error.message || 'Unknown error');
+    res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Server error' });
   }
 };
 
@@ -171,6 +247,11 @@ exports.getMessages = async (req, res) => {
     const normalizedPostId = String(requestedPostId || '').trim();
     const firstUser = String(userId1 || '').trim();
     const secondUser = String(userId2 || '').trim();
+
+    const authenticatedUserId = String(req.user?.id || '').trim();
+    if (authenticatedUserId !== firstUser && authenticatedUserId !== secondUser) {
+      return res.status(403).json({ success: false, message: 'You are not a participant in this conversation' });
+    }
 
     const mongoose = require('mongoose');
     const isId1 = mongoose.Types.ObjectId.isValid(firstUser);
@@ -189,23 +270,43 @@ exports.getMessages = async (req, res) => {
         { senderPhone: secondUser, receiverPhone: firstUser }
       );
       const query = { $or: conditions };
-      if (filterByPostId && normalizedPostId && normalizedPostId !== 'undefined' && normalizedPostId !== 'null') {
-        query.postId = normalizedPostId;
+      if (filterByPostId) {
+        query.postId = normalizedPostId && normalizedPostId !== 'undefined' && normalizedPostId !== 'null'
+          ? normalizedPostId
+          : { $in: ['', null] };
       }
       return query;
     };
 
     let messages = await Message.find(buildQuery(true)).sort({ createdAt: 1 });
-    if (!messages.length) {
-      messages = await Message.find(buildQuery(false)).sort({ createdAt: 1 });
-    }
 
     const updatedMessages = await Promise.all(messages.map(async (msg) => {
-      const msgObj = msg.toObject();
-      if (msgObj.replyPost && msgObj.replyPost.postId) {
+      const msgObj = refreshMessageMediaUrls(msg, req);
+      if (msgObj.replyPost && msgObj.replyPost.postId && (msgObj.replyPost.contextType || 'post') === 'post') {
         try {
           const postExists = await Post.findById(msgObj.replyPost.postId);
           msgObj.replyPost.available = !!postExists;
+          if (postExists) {
+            msgObj.replyPost = {
+              ...msgObj.replyPost,
+              title: postExists.productName || msgObj.replyPost.title || 'Product',
+              description: postExists.description || '',
+              image: postExists.houseImages?.[0] || msgObj.replyPost.image || '',
+              price: postExists.price ?? msgObj.replyPost.price ?? null,
+              amount: postExists.amount || '',
+              location: postExists.location || '',
+              category: postExists.category || '',
+              bedrooms: postExists.bedrooms,
+              bathrooms: postExists.bathrooms,
+              size: postExists.size,
+              priceNegotiable: postExists.priceNegotiable,
+              contactNumbers: postExists.contactNumbers || [],
+              houseImages: postExists.houseImages || [],
+              videoUrl: postExists.videoUrl || '',
+              username: postExists.username || '',
+              userAvatar: postExists.userAvatar || '',
+            };
+          }
         } catch {
           msgObj.replyPost.available = false;
         }
@@ -267,6 +368,7 @@ exports.getConversations = async (req, res) => {
       .sort((a, b) => new Date(b.lastMessage.createdAt) - new Date(a.lastMessage.createdAt));
 
     for (const conv of conversations) {
+      conv.lastMessage = refreshMessageMediaUrls(conv.lastMessage, req);
       const otherId = conv.otherUserId;
       if (!otherId) continue;
       try {
@@ -309,6 +411,11 @@ exports.editMessage = async (req, res) => {
   try {
     const message = await Message.findById(req.params.messageId);
     if (!message) return res.status(404).json({ success: false, message: 'Message not found' });
+    const authUserId = req.user?.id || req.user?._id;
+    if (!authUserId) return res.status(401).json({ success: false, message: 'Authentication required' });
+    if (String(message.senderId) !== String(authUserId)) {
+      return res.status(403).json({ success: false, message: 'You can only edit messages that you sent' });
+    }
     if (message.audioUrl) return res.status(400).json({ success: false, message: 'Cannot edit voice message' });
 
     const now = new Date();
@@ -318,6 +425,8 @@ exports.editMessage = async (req, res) => {
     message.text = req.body.text;
     message.isEdited = true;
     await message.save();
+    const io = socketHelper.getIO();
+    if (io) io.emit('message-updated', { message });
     res.json({ success: true, message });
   } catch (error) {
     console.error('Edit message error:', error);
@@ -347,34 +456,17 @@ exports.deleteMessage = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You can only delete messages that you sent' });
     }
 
-    // Cloudinary deletion is best-effort but must be attempted for image/video messages.
-    if (message.cloudinaryPublicId) {
-      try {
-        await deleteCloudinaryMedia(message);
-      } catch (error) {
-        console.error('[Message delete] Cloudinary delete failed, continuing DB delete:', error.message || error);
-      }
-    } else if (message.imageUrl && String(message.imageUrl).toLowerCase().includes('cloudinary.com')) {
-      const imageMeta = parseCloudinaryPublicId(message.imageUrl, 'image');
-      if (imageMeta?.cloudinaryPublicId) {
-        try {
-          await deleteCloudinaryMedia({ ...message.toObject(), cloudinaryPublicId: imageMeta.cloudinaryPublicId, cloudinaryResourceType: 'image' });
-        } catch (error) {
-          console.error('[Message delete] Cloudinary image delete failed, continuing DB delete:', error.message || error);
-        }
-      }
-    } else if (message.videoUrl && String(message.videoUrl).toLowerCase().includes('cloudinary.com')) {
-      const videoMeta = parseCloudinaryPublicId(message.videoUrl, 'video');
-      if (videoMeta?.cloudinaryPublicId) {
-        try {
-          await deleteCloudinaryMedia({ ...message.toObject(), cloudinaryPublicId: videoMeta.cloudinaryPublicId, cloudinaryResourceType: 'video' });
-        } catch (error) {
-          console.error('[Message delete] Cloudinary video delete failed, continuing DB delete:', error.message || error);
-        }
-      }
-    }
-
+    const mediaKeys = [...new Set([
+      message.imageStorageKey || storageService.getStorageKeyFromUrl(message.imageUrl),
+      ...(message.imageStorageKeys || []),
+      ...storageService.collectStorageKeys(message.imageUrls || []),
+      message.videoStorageKey || storageService.getStorageKeyFromUrl(message.videoUrl),
+      message.audioStorageKey || storageService.getStorageKeyFromUrl(message.audioUrl),
+    ].filter(storageService.isStorageKey))];
     await Message.findByIdAndDelete(messageId);
+    await Promise.all(mediaKeys.map(key => storageService.deleteMedia(key).catch(error => {
+      console.error('[Storage] Message media deletion failed:', error.code || 'B2_OPERATION_FAILED');
+    })));
 
     const io = socketHelper.getIO();
     if (io) {
@@ -395,6 +487,7 @@ exports.deleteMessage = async (req, res) => {
 
 // Upload image (with user-wide active-image limit and file size checks)
 exports.uploadImage = async (req, res) => {
+  const uploadedStorageKeys = [];
   try {
     console.log('[uploadImage] Request received, files:', req.files ? req.files.length : 0);
 
@@ -434,25 +527,28 @@ exports.uploadImage = async (req, res) => {
       return res.status(403).json({ success: false, message: `You can only upload ${remaining} more image(s) at the moment.` });
     }
 
-    // Upload to Cloudinary
-    const uploadPromises = req.files.map(file => new Promise((resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
-        { folder: 'chat_images', transformation: [{ width: 800, crop: 'limit' }] },
-        (error, result) => {
-          if (error) reject(error);
-          else resolve(result.secure_url);
-        }
-      );
-      streamifier.createReadStream(file.buffer).pipe(stream);
-    }));
-
-    const urls = await Promise.all(uploadPromises);
+    const urls = [];
+    for (const file of req.files) {
+      const result = await storageService.uploadMedia({
+        buffer: file.buffer,
+        mimeType: file.mimetype,
+        folder: `chats/${userId}/images`,
+        maxBytes: MAX_IMAGE_BYTES,
+      });
+      uploadedStorageKeys.push(result.storageKey);
+      const imageUrl = storageService.getPublicMediaUrl(result.storageKey);
+      await storageService.verifyPublicMediaAccess(imageUrl, result.mimeType);
+      console.log('[Storage] B2 image verified:', result.fileName, result.mimeType, result.fileSize);
+      console.log('B2 IMAGE URL:', imageUrl);
+      urls.push(imageUrl);
+    }
 
     // Return uploaded URLs to client. Messages themselves are created via /send which should reference these URLs.
-    res.json({ success: true, urls });
+    res.json({ success: true, url: urls[0], urls });
   } catch (error) {
-    console.error('Upload image error:', error);
-    res.status(500).json({ success: false, message: 'Image upload failed' });
+    await Promise.all(uploadedStorageKeys.map(key => storageService.deleteMedia(key).catch(() => {})));
+    console.error('Upload image error:', error.code || error.message || 'Unknown error');
+    res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Image upload failed' });
   }
 };
 

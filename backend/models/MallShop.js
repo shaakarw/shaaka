@@ -4,6 +4,7 @@ const productSchema = new mongoose.Schema({
   price: Number,
   description: String,
   images: [String],
+  imageStorageKeys: [{ type: String }],
 });
 const mallShopSchema = new mongoose.Schema({
   mallId: { type: mongoose.Schema.Types.ObjectId, ref: 'Place', required: true },
@@ -23,6 +24,8 @@ const mallShopSchema = new mongoose.Schema({
   closingTime: String,
   // Front media image for mall shop
   images: { frontImage: String },
+  frontImageStorageKey: { type: String, default: '' },
+  storageProvider: { type: String, default: '' },
   products: [productSchema],
   lat: Number,
   lon: Number,

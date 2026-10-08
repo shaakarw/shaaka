@@ -47,11 +47,10 @@ const uploadStoryMiddleware = multer({
   storage: storyStorage,
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|webp/;
-    const extname = allowed.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowed.test(file.mimetype);
+    const extname = path.extname(file.originalname).length > 0;
+    const mimetype = (file.mimetype || '').toLowerCase().startsWith('image/');
     if (extname && mimetype) return cb(null, true);
-    cb(new Error('Only images are allowed'));
+    cb(new Error('Only supported image files are allowed'));
   },
 }).single('image');
 

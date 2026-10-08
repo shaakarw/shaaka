@@ -15,20 +15,23 @@ import {
   FlatList,
   Animated,
   Modal,
-  Platform,
+  StatusBar,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
+import { offlineDatabase } from '../services/offlineDatabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import SharedBottomNav from '../components/SharedBottomNav';
-import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system/legacy';
-import * as ImageManipulator from 'expo-image-manipulator';
-import { Asset } from 'expo-asset';
+import VideoPost from '../components/VideoPost';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import { Video, ResizeMode } from '../utils/expoAvCompat';
+import * as VideoThumbnails from 'expo-video-thumbnails';
+import * as ScreenOrientation from 'expo-screen-orientation';
 
 const { width, height } = Dimensions.get('window');
 
@@ -48,6 +51,17 @@ const getImageSource = (img) => {
   if (typeof img === 'object' && img.url) return { uri: img.url };
   return PROFILE_IMAGE;
 };
+const normalizePost = (post) => ({
+  ...post,
+  amount: post.amount || `RWF ${post.price?.toLocaleString()}`,
+  productName: post.productName || post.category || 'Product',
+  username: post.username || post.user?.username || 'User',
+  userAvatar: post.userAvatar || post.user?.avatar,
+  houseImages: post.houseImages || [],
+  contactNumber1: post.contactNumber1 || post.contactNumbers?.[0] || '',
+  contactNumber2: post.contactNumber2 || post.contactNumbers?.[1] || '',
+  priceNegotiable: post.priceNegotiable || false,
+});
 
 const translations = {
   English: {
@@ -57,10 +71,6 @@ const translations = {
     save: 'Save',
     saved: 'Saved',
     share: 'Share',
-    download: 'Download',
-    downloading: 'Downloading…',
-    downloadSuccess: 'All images saved to gallery',
-    downloadError: 'Could not download images',
     pricePrefix: ' ',
     call: 'Call',
     whatsapp: 'WhatsApp',
@@ -86,25 +96,21 @@ const translations = {
     close: 'Close',
     imageSaved: 'Image saved to gallery',
     saveFailed: 'Could not save image. Please try again.',
-    noImages: 'No images to download',
     permissionRequired: 'Permission Required',
     allowPhotos: 'Please allow access to photos to save images.',
+    shakarole:'Shaaka only connect buyer and seller',
   },
   Kinyarwanda: {
     loading: 'Turigutunganya page neza...',
-    contactSeller: 'Vugana n’umugurisha',
+    contactSeller: 'Vugana n\'umugurisha',
     message: 'Ubutumwa',
     save: 'Bika',
     saved: 'IByabitswe',
     share: 'Sangiza',
-    download: 'Gukuramo',
-    downloading: 'Gukurura…',
-    downloadSuccess: 'Amashusho yose yabitswe muri galerie',
-    downloadError: 'Ntibyashobotse gukuramo amashusho',
     pricePrefix: ' ',
     call: 'Vugisha',
     whatsapp: 'WhatsApp',
-    sellerPhone: 'Numero y’umugurisha',
+    sellerPhone: 'Numero y\'umugurisha',
     notProvided: 'Ntabwoyatanzwe',
     noPhone: 'Nta numero ya telefone',
     couldNotOpenDialer: 'Ntibyashobotse gufungura telefone',
@@ -126,14 +132,286 @@ const translations = {
     close: 'Funga',
     imageSaved: 'Amashusho yabitswe muri galerie',
     saveFailed: 'Ntibyashobotse kubika amashusho. Ongera ugerageze.',
-    noImages: 'Nta mashusho yo gukuramo',
     permissionRequired: 'Uruhusha rurakenewe',
     allowPhotos: 'Nyamuneka emera uburenganzira bwo kubika amashusho.',
+    shakarole:'Shaaka ihuza ugura nu gurisha gusa',
   },
 };
 
+// --- VIDEO PREVIEW MODAL (Different from Image Preview) ---
+const VideoPreviewModal = ({ visible, videoUrl, onClose, theme, productName }) => {
+  const videoRef = useRef(null);
+  const controlsTimeout = useRef(null);
+  const seekTrackWidth = useRef(0);
+  const [status, setStatus] = useState({});
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [isBuffering, setIsBuffering] = useState(false);
+
+  // Reactive screen size (updates on rotation)
+  const { height: windowHeight } = useWindowDimensions();
+
+  // 80% of device height normally, full height only when user taps fullscreen
+  const videoAreaHeight = isFullscreen ? windowHeight : windowHeight * 0.9;
+
+  const showControlsTemporarily = useCallback(() => {
+    setControlsVisible(true);
+    if (controlsTimeout.current) clearTimeout(controlsTimeout.current);
+    controlsTimeout.current = setTimeout(() => {
+      setControlsVisible(false);
+    }, 2500);
+  }, []);
+
+  useEffect(() => {
+    if (visible) {
+      setIsPlaying(true);
+      setIsMuted(false);
+      setControlsVisible(true);
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+      showControlsTemporarily();
+    } else {
+      setIsPlaying(false);
+      setControlsVisible(false);
+      setIsFullscreen(false);
+      if (videoRef.current) {
+        videoRef.current.pauseAsync().catch(() => {});
+      }
+    }
+
+    return () => {
+      if (controlsTimeout.current) clearTimeout(controlsTimeout.current);
+    };
+  }, [visible, showControlsTemporarily]);
+
+  const handlePlaybackStatusUpdate = useCallback((nextStatus) => {
+    setStatus(nextStatus);
+    if (!nextStatus?.isLoaded) {
+      setIsBuffering(Boolean(nextStatus?.isBuffering));
+      return;
+    }
+
+    setIsPlaying(Boolean(nextStatus.isPlaying));
+    setIsBuffering(Boolean(nextStatus.isBuffering));
+  }, []);
+
+  const togglePlayPause = useCallback(async () => {
+    if (!videoRef.current) return;
+
+    try {
+      if (isPlaying) {
+        await videoRef.current.pauseAsync();
+      } else {
+        await videoRef.current.playAsync();
+      }
+      setIsPlaying(!isPlaying);
+      showControlsTemporarily();
+    } catch (error) {
+      console.log('Video toggle error:', error);
+    }
+  }, [isPlaying, showControlsTemporarily]);
+
+  const toggleMute = useCallback(async () => {
+    if (!videoRef.current) return;
+
+    try {
+      const nextMuted = !isMuted;
+      await videoRef.current.setIsMutedAsync(nextMuted);
+      setIsMuted(nextMuted);
+      showControlsTemporarily();
+    } catch (error) {
+      console.log('Mute toggle error:', error);
+    }
+  }, [isMuted, showControlsTemporarily]);
+
+  const handleFullscreenToggle = useCallback(async () => {
+    const next = !isFullscreen;
+    try {
+      await ScreenOrientation.lockAsync(
+        next ? ScreenOrientation.OrientationLock.LANDSCAPE : ScreenOrientation.OrientationLock.PORTRAIT_UP
+      );
+      setIsFullscreen(next);
+      showControlsTemporarily();
+    } catch (error) {
+      console.log('Orientation toggle error:', error);
+    }
+  }, [isFullscreen, showControlsTemporarily]);
+
+  const handleSeekBarPress = useCallback(async (event) => {
+    if (!videoRef.current || !status?.durationMillis || !seekTrackWidth.current) return;
+
+    try {
+      const ratio = Math.min(Math.max(event.nativeEvent.locationX / seekTrackWidth.current, 0), 1);
+      const nextPosition = ratio * status.durationMillis;
+      await videoRef.current.setPositionAsync(nextPosition);
+      showControlsTemporarily();
+    } catch (error) {
+      console.log('Seek error:', error);
+    }
+  }, [status?.durationMillis, showControlsTemporarily]);
+
+  const handleClose = useCallback(async () => {
+    try {
+      if (videoRef.current) {
+        await videoRef.current.pauseAsync();
+      }
+    } catch (error) {
+      console.log('Pause on close error:', error);
+    }
+
+    try {
+      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+    } catch (error) {
+      console.log('Orientation reset error:', error);
+    }
+
+    setIsPlaying(false);
+    setControlsVisible(false);
+    setIsFullscreen(false);
+    onClose();
+  }, [onClose]);
+
+  const handleVideoPress = useCallback(() => {
+    if (controlsVisible) {
+      setControlsVisible(false);
+      if (controlsTimeout.current) clearTimeout(controlsTimeout.current);
+    } else {
+      showControlsTemporarily();
+    }
+  }, [controlsVisible, showControlsTemporarily]);
+
+  const duration = status?.durationMillis || 0;
+  const position = status?.positionMillis || 0;
+  const progressWidth = duration > 0 ? `${(position / duration) * 100}%` : '0%';
+
+  if (!videoUrl) return null;
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={handleClose}
+      statusBarTranslucent
+    >
+      <StatusBar hidden={isFullscreen} />
+
+      {/* Root: video is anchored to the BOTTOM, top 20% stays free so the
+          app's top bar / status bar area remains visible. */}
+      <View style={styles.videoModalRoot}>
+        {!isFullscreen && (
+          <TouchableOpacity
+            style={styles.videoModalBackdrop}
+            activeOpacity={1}
+            onPress={handleClose}
+          >
+            <View style={styles.videoBackdropCloseRow}>
+              <TouchableOpacity onPress={handleClose} style={styles.videoControlButton}>
+                <Ionicons name="close" size={24} color="#FFFFFF" />
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        )}
+
+        <View
+          style={[
+            styles.videoPreviewContainer,
+            {
+              height: videoAreaHeight,
+              borderTopLeftRadius: isFullscreen ? 0 : 20,
+              borderTopRightRadius: isFullscreen ? 0 : 20,
+            },
+          ]}
+        >
+          <Video
+            ref={videoRef}
+            source={{ uri: videoUrl }}
+            style={styles.videoPlayer}
+            resizeMode={ResizeMode.CONTAIN}
+            shouldPlay={isPlaying}
+            isMuted={isMuted}
+            isLooping={false}
+            onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
+            useNativeControls={false}
+          />
+
+          <TouchableOpacity
+            style={styles.videoTapArea}
+            onPress={handleVideoPress}
+            activeOpacity={1}
+          />
+
+          {controlsVisible && (
+            <View style={styles.videoControlsOverlay}>
+              <View style={styles.videoTopBar}>
+                <TouchableOpacity onPress={handleClose} style={styles.videoControlButton}>
+                  <Ionicons name="close" size={24} color="#FFFFFF" />
+                </TouchableOpacity>
+
+                {productName && (
+                  <View style={styles.videoTitleContainer}>
+                    <Text style={styles.videoTitle} numberOfLines={1}>{productName}</Text>
+                  </View>
+                )}
+
+                <View style={styles.videoTopActions}>
+                  <TouchableOpacity onPress={toggleMute} style={styles.videoControlButton}>
+                    <Ionicons name={isMuted ? 'volume-mute-outline' : 'volume-high-outline'} size={22} color="#FFFFFF" />
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={handleFullscreenToggle} style={styles.videoControlButton}>
+                    <Ionicons name={isFullscreen ? 'contract-outline' : 'expand-outline'} size={22} color="#FFFFFF" />
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              <View style={styles.videoCenterControls}>
+                <TouchableOpacity onPress={togglePlayPause} style={styles.videoPlayButton}>
+                  <Ionicons
+                    name={isPlaying ? 'pause' : 'play'}
+                    size={46}
+                    color="#FFFFFF"
+                    style={styles.videoPlayIcon}
+                  />
+                </TouchableOpacity>
+                {isBuffering && <Text style={styles.bufferingText}>Buffering...</Text>}
+              </View>
+
+              <View style={styles.videoBottomBar}>
+                <TouchableOpacity
+                  activeOpacity={1}
+                  onLayout={(event) => {
+                    seekTrackWidth.current = event.nativeEvent.layout.width;
+                  }}
+                  onPress={handleSeekBarPress}
+                  style={styles.videoProgressTrack}
+                >
+                  <View style={[styles.videoProgressFill, { width: progressWidth, backgroundColor: theme?.accent || '#4CAF50' }]} />
+                </TouchableOpacity>
+
+                <View style={styles.videoTimeContainer}>
+                  <Text style={styles.videoTimeText}>{formatTime(position)}</Text>
+                  <Text style={styles.videoTimeText}>{formatTime(duration)}</Text>
+                </View>
+              </View>
+            </View>
+          )}
+        </View>
+      </View>
+    </Modal>
+  );
+};
+
+const formatTime = (milliseconds) => {
+  if (!milliseconds) return '0:00';
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+};
+
 // --- AUTO-SLIDING IMAGE SLIDER ---
-const AutoSlidingImageSlider = ({ images, theme, onImagePress }) => {
+const AutoSlidingImageSlider = ({ images, navigation, title, description, listing }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
   const flatListRef = useRef(null);
   const scrollTimer = useRef(null);
@@ -205,8 +483,14 @@ const AutoSlidingImageSlider = ({ images, theme, onImagePress }) => {
         onTouchEnd={onTouchEnd}
         renderItem={({ item, index }) => (
           <TouchableOpacity
-            activeOpacity={0.9}
-            onPress={() => onImagePress && onImagePress(item, index)}
+            activeOpacity={0.95}
+            onPress={() => navigation.navigate('Preview', {
+              images,
+              initialIndex: index,
+              title,
+              description,
+              listing,
+            })}
           >
             <Image source={getImageSource(item)} style={styles.houseImage} resizeMode="cover" />
           </TouchableOpacity>
@@ -223,81 +507,51 @@ const AutoSlidingImageSlider = ({ images, theme, onImagePress }) => {
   );
 };
 
-// --- FULL-SCREEN IMAGE VIEWER MODAL ---
-const ImageViewerModal = ({ visible, images, initialIndex, onClose, onDownload, isDarkMode }) => {
-  if (!visible || !images || images.length === 0) return null;
-  const safeIndex = typeof initialIndex === 'number' ? Math.min(Math.max(0, initialIndex), images.length - 1) : 0;
-  const [currentIdx, setCurrentIdx] = useState(safeIndex);
+// --- VIDEO PREVIEW THUMBNAIL (for inline display) ---
+const VideoPreviewThumbnail = ({ videoUrl, onPress }) => {
+  const [thumbnailUri, setThumbnailUri] = useState(null);
 
   useEffect(() => {
-    setCurrentIdx(safeIndex);
-  }, [safeIndex, images]);
+    // Generate thumbnail from video
+    const generateThumbnail = async () => {
+      try {
+        const { uri } = await VideoThumbnails.getThumbnailAsync(videoUrl, {
+          time: 3000,
+          quality: 0.8,
+        });
+        setThumbnailUri(uri);
+      } catch (error) {
+        console.log('Error generating thumbnail:', error);
+      }
+    };
 
-  const viewerBackground = isDarkMode ? '#111111' : '#DDDDDD';
-  const viewerIconColor = isDarkMode ? '#fff' : '#000';
-  const viewerDotColor = isDarkMode ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)';
-  const viewerDotActiveColor = isDarkMode ? '#fff' : '#000';
-
-  const goPrev = () => {
-    if (currentIdx > 0) setCurrentIdx(currentIdx - 1);
-  };
-  const goNext = () => {
-    if (currentIdx < images.length - 1) setCurrentIdx(currentIdx + 1);
-  };
+    if (videoUrl) {
+      generateThumbnail();
+    }
+  }, [videoUrl]);
 
   return (
-    <Modal visible={visible} transparent={false} animationType="fade" onRequestClose={onClose}>
-      <View style={[styles.viewerContainer, { backgroundColor: viewerBackground }]}>
-        {/* Top bar */}
-        <View style={styles.viewerTopBar}>
-          <TouchableOpacity onPress={onClose}>
-            <Ionicons name="close" size={28} color={viewerIconColor} />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => onDownload && onDownload(images[currentIdx])}>
-            <Ionicons name="download-outline" size={28} color={viewerIconColor} />
-          </TouchableOpacity>
+    <TouchableOpacity
+      activeOpacity={0.9}
+      onPress={() => onPress(thumbnailUri)}
+      accessibilityRole="button"
+      accessibilityLabel="Preview video"
+      style={styles.videoThumbnailContainer}
+    >
+      {thumbnailUri ? (
+        <Image source={{ uri: thumbnailUri }} style={styles.videoThumbnail} resizeMode="cover" />
+      ) : (
+        <View style={[styles.videoThumbnailPlaceholder, { backgroundColor: '#000000' }]}>
+          <Ionicons name="videocam" size={40} color="#FFFFFF" />
         </View>
-
-        {/* Image area */}
-        <View style={styles.viewerImageArea}>
-          {currentIdx > 0 && (
-            <TouchableOpacity style={styles.viewerSideBtn} onPress={goPrev}>
-              <Ionicons name="chevron-back" size={36} color={viewerIconColor} />
-            </TouchableOpacity>
-          )}
-
-          <View style={styles.viewerImageWrapper}>
-            <Image
-              source={getImageSource(images[currentIdx])}
-              style={styles.viewerImage}
-              resizeMode="contain"
-              onError={(e) => console.log('ImageViewer image load error:', e.nativeEvent.error)}
-            />
-          </View>
-
-          {currentIdx < images.length - 1 && (
-            <TouchableOpacity style={styles.viewerSideBtn} onPress={goNext}>
-              <Ionicons name="chevron-forward" size={36} color={viewerIconColor} />
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {/* Dots */}
-        {images.length > 1 && (
-          <View style={styles.viewerDots}>
-            {images.map((_, idx) => (
-              <TouchableOpacity key={idx} onPress={() => setCurrentIdx(idx)}>
-                <View style={[
-                  styles.viewerDot,
-                  { backgroundColor: viewerDotColor },
-                  idx === currentIdx && { backgroundColor: viewerDotActiveColor, width: 12, height: 8 }
-                ]} />
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
+      )}
+      
+      {/* Video duration badge */}
+      <View style={styles.videoDurationBadge}>
+        <Ionicons name="time-outline" size={12} color="#FFFFFF" />
+        <Text style={styles.videoDurationText}>Video</Text>
       </View>
-    </Modal>
+    </TouchableOpacity>
   );
 };
 
@@ -316,11 +570,6 @@ const PostDetailScreen = ({ route, navigation }) => {
   const [house, setHouse] = useState(null);
   const [postNotFound, setPostNotFound] = useState(false);
   const [activeTab, setActiveTab] = useState('Contact');
-  const [downloadingAll, setDownloadingAll] = useState(false);
-
-  // Image viewer state
-  const [imageViewerVisible, setImageViewerVisible] = useState(false);
-  const [viewerIndex, setViewerIndex] = useState(0);
 
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
@@ -381,19 +630,6 @@ const PostDetailScreen = ({ route, navigation }) => {
   const loadPostAndUser = async () => {
     try {
       const token = await AsyncStorage.getItem('userToken');
-      if (!token) {
-        if (initialHouse) setHouse(initialHouse);
-        else if (paramPostId) await loadPostById(paramPostId);
-        else setPostNotFound(true);
-        setLoading(false);
-        return;
-      }
-
-      const userResponse = await axios.get(`${BASE_URL}/api/auth/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (userResponse.data.success) setCurrentUser(userResponse.data.user);
-
       let postData = null;
       if (paramPostId) {
         postData = await fetchPostById(paramPostId, token);
@@ -402,15 +638,44 @@ const PostDetailScreen = ({ route, navigation }) => {
         else postData = { ...initialHouse };
       }
 
-      if (postData) {
-        setHouse(postData);
+      if (
+        !postData &&
+        initialHouse &&
+        (!paramPostId || String(initialHouse._id) === String(paramPostId))
+      ) {
+        postData = initialHouse;
+      }
+      if (!postData) {
+        setPostNotFound(true);
+        return;
+      }
+
+      setHouse(postData);
+      try {
+        await offlineDatabase.putRecord('posts', postData._id, postData, { priority: 'medium' });
+      } catch (error) {
+        console.warn('Could not cache post details:', error.message);
+      }
+
+      if (!token) return;
+
+      try {
+        const userResponse = await axios.get(`${BASE_URL}/api/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (userResponse.data.success) setCurrentUser(userResponse.data.user);
+      } catch (error) {
+        console.warn('Could not refresh user while loading post:', error.message);
+      }
+
+      try {
         const savedResponse = await axios.get(`${BASE_URL}/api/posts/saved`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        const savedIds = savedResponse.data.posts.map(p => p._id);
+        const savedIds = (savedResponse.data.posts || []).map(post => post._id);
         setIsSaved(savedIds.includes(postData._id));
-      } else {
-        setPostNotFound(true);
+      } catch (error) {
+        console.warn('Could not refresh saved posts:', error.message);
       }
     } catch (error) {
       console.error('Error loading post and user:', error);
@@ -426,29 +691,37 @@ const PostDetailScreen = ({ route, navigation }) => {
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       const response = await axios.get(`${BASE_URL}/api/posts/${postId}`, { headers });
       if (response.data.success && response.data.post) {
-        const post = response.data.post;
-        return {
-          ...post,
-          _id: post._id,
-          amount: post.amount || `RWF ${post.price?.toLocaleString()}`,
-          productName: post.productName || post.category || 'Product',
-          username: post.username || post.user?.username || 'User',
-          userAvatar: post.userAvatar || post.user?.avatar,
-          houseImages: post.houseImages || [],
-          contactNumber1: post.contactNumbers?.[0] || '',
-          contactNumber2: post.contactNumbers?.[1] || '',
-          priceNegotiable: post.priceNegotiable || false,
-        };
+        const normalizedPost = normalizePost(response.data.post);
+        try {
+          await offlineDatabase.putRecord('posts', postId, normalizedPost, { priority: 'medium' });
+        } catch (error) {
+          console.warn('Could not cache fetched post:', error.message);
+        }
+        return normalizedPost;
       }
-      return null;
     } catch (error) {
       console.error('fetchPostById error:', error);
+    }
+
+    try {
+      const cachedPost = await offlineDatabase.getRecord('posts', postId);
+      if (cachedPost) return normalizePost(cachedPost);
+
+      const cachedFeed = await offlineDatabase.getRecord('feed', 'page-1');
+      const feedPost = cachedFeed?.find(post => String(post._id) === String(postId));
+      return feedPost ? normalizePost(feedPost) : null;
+    } catch (error) {
+      console.error('Could not load cached post:', error);
       return null;
     }
   };
 
   const loadPostById = async (postId) => {
-    const post = await fetchPostById(postId);
+    const post = await fetchPostById(postId) || (
+      initialHouse && String(initialHouse._id) === String(postId)
+        ? normalizePost(initialHouse)
+        : null
+    );
     if (post) setHouse(post);
     else setPostNotFound(true);
     setLoading(false);
@@ -476,11 +749,28 @@ const PostDetailScreen = ({ route, navigation }) => {
     }
   };
 
+  const [appShareLink, setAppShareLink] = useState('');
+
+  useEffect(() => {
+    const loadShareLink = async () => {
+      try {
+        const response = await axios.get(`${BASE_URL}/api/settings/share-link`);
+        if (response.data.success) {
+          setAppShareLink(response.data.shareLink || '');
+        }
+      } catch (error) {
+        console.error('Load share link error:', error.message);
+      }
+    };
+    loadShareLink();
+  }, []);
+
   const handleShare = async () => {
     if (!house) return;
     try {
+      const link = appShareLink || 'https://shaaka.app';
       await Share.share({
-        message: `${house.productName || 'Product'} - ${house.location}\n${house.description}`,
+        message: `${house.productName || 'Product'} - ${house.location}\n${house.description}\n\n${link}`,
         title: house.productName || 'Product',
       });
     } catch (error) { console.log(error); }
@@ -502,282 +792,8 @@ const PostDetailScreen = ({ route, navigation }) => {
     } else Alert.alert(t.noPhone, t.notProvided);
   };
 
-  // --- Helper: Download remote image ---
-  const downloadRemoteImage = async (url, filenameHint) => {
-    try {
-      // Get file extension from URL
-      let extension = 'jpg';
-      try {
-        const urlObj = new URL(url);
-        const pathSegments = urlObj.pathname.split('/');
-        const filename = pathSegments[pathSegments.length - 1] || 'image.jpg';
-        if (filename.includes('.')) {
-          extension = filename.split('.').pop().split('?')[0] || 'jpg';
-        }
-      } catch (e) {
-        // If URL parsing fails, use jpg as default
-      }
-
-      const localFilename = `${filenameHint}_${Date.now()}.${extension}`;
-      const localPath = `${FileSystem.cacheDirectory || FileSystem.documentDirectory}${localFilename}`;
-      
-      // Download the file
-      const result = await FileSystem.downloadAsync(url, localPath);
-      
-      if (result.status !== 200 || !result.uri) {
-        throw new Error('Download failed with status: ' + result.status);
-      }
-      
-      return result.uri;
-    } catch (err) {
-      console.log('Remote download error:', err);
-      
-      // Try alternative download method using fetch
-      try {
-        const response = await fetch(url, {
-          headers: {
-            'Accept': 'image/*',
-          },
-        });
-        
-        if (!response.ok) {
-          throw new Error('Fetch failed with status: ' + response.status);
-        }
-        
-        const blob = await response.blob();
-        const reader = new FileReader();
-        
-        return new Promise((resolve, reject) => {
-          reader.onload = async () => {
-            try {
-              const base64 = reader.result.split(',')[1];
-              const localFilename = `${filenameHint}_${Date.now()}.jpg`;
-              const localPath = `${FileSystem.cacheDirectory || FileSystem.documentDirectory}${localFilename}`;
-              await FileSystem.writeAsStringAsync(localPath, base64, {
-                encoding: FileSystem.EncodingType.Base64
-              });
-              resolve(localPath);
-            } catch (err) {
-              reject(err);
-            }
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
-      } catch (fallbackErr) {
-        console.log('Fallback download error:', fallbackErr);
-        return null;
-      }
-    }
-  };
-
-  // --- Helper: Save base64 image ---
-  const saveBase64Image = async (base64String, filenameHint) => {
-    try {
-      const matches = base64String.match(/^data:image\/([^;]+);base64,(.*)$/);
-      if (!matches) {
-        throw new Error('Invalid base64 data');
-      }
-      
-      const extension = matches[1] || 'jpg';
-      const base64 = matches[2];
-      const localFilename = `${filenameHint}_${Date.now()}.${extension}`;
-      const localPath = `${FileSystem.cacheDirectory || FileSystem.documentDirectory}${localFilename}`;
-      
-      await FileSystem.writeAsStringAsync(localPath, base64, {
-        encoding: FileSystem.EncodingType.Base64
-      });
-      
-      return localPath;
-    } catch (err) {
-      console.log('Base64 save error:', err);
-      return null;
-    }
-  };
-
-  // --- Helper: save an image to gallery ---
-  const saveImageToGallery = async (img, filenameHint = 'shaaka') => {
-    if (!img) {
-      console.log('No image provided');
-      return false;
-    }
-
-    try {
-      // Request permissions
-      const { status } = await MediaLibrary.requestPermissionsAsync(false, ['photo']);
-      if (status !== 'granted') {
-        Alert.alert(t.permissionRequired, t.allowPhotos);
-        return false;
-      }
-
-      let imageUri = null;
-      
-      // Handle different image types
-      if (typeof img === 'string') {
-        // String could be URL or base64
-        if (img.startsWith('data:image')) {
-          // Handle base64
-          imageUri = await saveBase64Image(img, filenameHint);
-        } else if (img.startsWith('http://') || img.startsWith('https://')) {
-          // Handle remote URL
-          imageUri = await downloadRemoteImage(img, filenameHint);
-        } else if (img.startsWith('file://')) {
-          // Local file
-          imageUri = img;
-        }
-      } else if (typeof img === 'object') {
-        if (img.uri) {
-          if (img.uri.startsWith('http://') || img.uri.startsWith('https://')) {
-            imageUri = await downloadRemoteImage(img.uri, filenameHint);
-          } else {
-            imageUri = img.uri;
-          }
-        } else if (img.url) {
-          if (img.url.startsWith('http://') || img.url.startsWith('https://')) {
-            imageUri = await downloadRemoteImage(img.url, filenameHint);
-          } else {
-            imageUri = img.url;
-          }
-        }
-      } else if (typeof img === 'number') {
-        // Handle require() images
-        try {
-          const asset = await Asset.fromModule(img).downloadAsync();
-          imageUri = asset.localUri || asset.uri;
-        } catch (err) {
-          console.log('Error loading asset:', err);
-          return false;
-        }
-      }
-
-      if (!imageUri) {
-        console.log('Could not determine image URI');
-        return false;
-      }
-
-      // Normalize remote formats such as WebP before adding them to the gallery.
-      const normalizedImage = await ImageManipulator.manipulateAsync(
-        imageUri,
-        [],
-        { compress: 1, format: ImageManipulator.SaveFormat.JPEG }
-      );
-      const asset = await MediaLibrary.createAssetAsync(normalizedImage.uri);
-      if (!asset) throw new Error('The image could not be added to the device gallery');
-      
-      // Add to album
-      const albumName = 'Shaaka';
-      try {
-        const album = await MediaLibrary.getAlbumAsync(albumName);
-        if (!album) {
-          await MediaLibrary.createAlbumAsync(albumName, asset, false);
-        } else {
-          await MediaLibrary.addAssetsToAlbumAsync([asset], album.id, false);
-        }
-      } catch (e) {
-        console.log('Could not create/add album:', e);
-      }
-
-      return true;
-    } catch (err) {
-      console.log('saveImageToGallery error:', err);
-      return false;
-    }
-  };
-
-  // --- Download a single image (tapped) ---
-  const handleDownloadSingleImage = async (image) => {
-    try {
-      const ok = await saveImageToGallery(image, 'shaaka_image');
-      if (ok) {
-        Alert.alert(t.savedTitle, t.imageSaved);
-      } else {
-        Alert.alert(t.error, t.saveFailed);
-      }
-    } catch (error) {
-      console.log('Single download error:', error);
-      Alert.alert(t.error, t.saveFailed);
-    }
-  };
-
-  // --- Download ALL images (button) ---
-  const downloadAllImages = async () => {
-    if (!house || !house.houseImages || house.houseImages.length === 0) {
-      Alert.alert(t.noImages, '');
-      return;
-    }
-
-    setDownloadingAll(true);
-    let savedCount = 0;
-    let errors = [];
-
-    try {
-      for (let i = 0; i < house.houseImages.length; i++) {
-        const image = house.houseImages[i];
-        try {
-          const ok = await saveImageToGallery(
-            image,
-            `shaaka_${(house.productName || 'product').replace(/\s+/g, '_')}_${i + 1}`
-          );
-          if (ok) {
-            savedCount++;
-          } else {
-            errors.push(`Image ${i + 1}`);
-          }
-        } catch (e) {
-          console.log(`Error saving image ${i + 1}:`, e);
-          errors.push(`Image ${i + 1}`);
-        }
-      }
-
-      if (savedCount > 0) {
-        let message = `${savedCount} of ${house.houseImages.length} image(s) ${t.downloadSuccess.toLowerCase()}`;
-        if (errors.length > 0) {
-          message += `\nFailed to save: ${errors.join(', ')}`;
-        }
-        Alert.alert(t.downloadSuccess, message);
-      } else {
-        Alert.alert(t.downloadError, t.saveFailed);
-      }
-    } catch (error) {
-      console.log('Download all error:', error);
-      Alert.alert(t.error, t.downloadError);
-    } finally {
-      setDownloadingAll(false);
-    }
-  };
-
-  // ---- Image viewer handlers ----
-  const openImageViewer = (item, index) => {
-    setViewerIndex(index);
-    setImageViewerVisible(true);
-  };
-
-  const handleViewerDownload = (image) => {
-    handleDownloadSingleImage(image);
-  };
-
   const renderLoading = () => {
-    if (loadingLogo) {
-      return (
-        <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
-          <View style={styles.center}>
-            <Animated.Image
-              source={loadingLogo}
-              style={[styles.loadingImage, { transform: [{ scale: scaleAnim }] }]}
-              resizeMode="contain"
-            />
-            <Text style={[styles.loadingText, { color: theme.text }]}>{t.loading}</Text>
-          </View>
-        </SafeAreaView>
-      );
-    }
-    return (
-      <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={theme.accent} />
-        </View>
-      </SafeAreaView>
-    );
+    return <ShaakaLoadingScreen message={t.loading} backgroundColor={theme.background} textColor={theme.text} />;
   };
 
   useEffect(() => {
@@ -797,7 +813,7 @@ const PostDetailScreen = ({ route, navigation }) => {
           <Text style={[styles.loginPromptTitle, { color: theme.text }]}>{t.loginTitle}</Text>
           <Text style={[styles.loginPromptText, { color: theme.textSecondary }]}>{t.loginRequired}</Text>
           <TouchableOpacity
-            style={[styles.loginButton, { borderColor: theme.accent, borderWidth: 1 }]}
+            style={[styles.loginButton, { borderColor: theme.accent, borderWidth: 0 }]}
             onPress={() => navigation.navigate('Login')}
           >
             <Text style={[styles.loginButtonText, { color: theme.accent }]}>{t.login}</Text>
@@ -818,17 +834,46 @@ const PostDetailScreen = ({ route, navigation }) => {
   const priceNegotiable = house.priceNegotiable;
   const callNumber = house.contactNumber1;
   const whatsappNumber = house.contactNumber2;
-  const sellerId = house.user?._id || house.user;
+  const sellerId = house.user?._id || house.user?.id || house.userId || house.user;
+  const viewerId = currentUser?._id || authUser?._id || authUser?.id;
+  const isOwnPost = Boolean(viewerId && sellerId && String(viewerId) === String(sellerId));
+  const previewListing = {
+    title: productName,
+    price,
+    location,
+    sellerName,
+    sellerAvatar,
+    contactNumber: callNumber,
+    thumbnail: house.houseImages?.[0],
+  };
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['bottom']}>
       <View style={{ flex: 1 }}>
-        {/* Image Slider – now opens image viewer on tap */}
-        <AutoSlidingImageSlider
-          images={house.houseImages}
-          theme={theme}
-          onImagePress={openImageViewer}
-        />
+        {/* Inline video thumbnail opens the shared full-screen preview. */}
+        {house.videoUrl && (
+          <VideoPreviewThumbnail
+            videoUrl={house.videoUrl}
+            onPress={thumbnailUri => navigation.navigate('Preview', {
+              imageUri: house.videoUrl,
+              videoThumbnail: thumbnailUri || house.videoThumbnail,
+              title: productName,
+              description,
+              listing: previewListing,
+            })}
+          />
+        )}
+
+        {/* Inline image slider; enlarged image preview is disabled here. */}
+        {!house.videoUrl && (
+          <AutoSlidingImageSlider
+            images={house.houseImages}
+            navigation={navigation}
+            title={productName}
+            description={description}
+            listing={previewListing}
+          />
+        )}
 
         {/* Fixed Header Area */}
         <View style={[styles.fixedHeaderArea, { backgroundColor: theme.background }]}>
@@ -842,12 +887,7 @@ const PostDetailScreen = ({ route, navigation }) => {
                 <Text style={[styles.tagText, { color: theme.textSecondary }]}>{location}</Text>
               </View>
               <View style={styles.ratingRow}>
-                <Ionicons name="star" size={16} color={theme.accent} />
-                <Ionicons name="star" size={16} color={theme.accent} />
-                <Ionicons name="star" size={16} color={theme.accent} />
-                <Ionicons name="star" size={16} color={theme.accent} />
-                <Ionicons name="star" size={16} color={theme.border} />
-                <Text style={[styles.ratingText, { color: theme.textSecondary }]}>12.5k (User)</Text>
+                <Text style={[styles.ratingText, { color: theme.textSecondary }]}>{t.shakarole}</Text>
               </View>
             </View>
             <View style={styles.priceContainer}>
@@ -922,11 +962,12 @@ const PostDetailScreen = ({ route, navigation }) => {
           )}
         </ScrollView>
 
-        {/* Sticky Bottom Bar – Message + Save + Download + Share */}
+        {/* Sticky Bottom Bar – Message + Save + Share */}
         <View style={[styles.stickyBottomContainer, { backgroundColor: theme.background, borderTopColor: theme.border }]}>
-          <TouchableOpacity
-            style={[styles.messageBtn, { backgroundColor: theme.accent }]}
-            onPress={() => {
+          {!isOwnPost && (
+            <TouchableOpacity
+              style={[styles.messageBtn, { backgroundColor: theme.accent }]}
+              onPress={() => {
               // Build replyPost object just like in BuyPostScreen
               const sellerId = house.user?._id || house.user;
               const replyPost = {
@@ -936,8 +977,19 @@ const PostDetailScreen = ({ route, navigation }) => {
                 image: (house.houseImages && house.houseImages.length > 0)
                   ? (typeof house.houseImages[0] === 'string' ? house.houseImages[0] : house.houseImages[0]?.uri || house.houseImages[0])
                   : null,
-                price: house.price || null,
+                  price: house.price ?? null,
+                  amount: house.amount || '',
                 location: house.location || '',
+                  category: house.category || '',
+                  bedrooms: house.bedrooms ?? null,
+                  bathrooms: house.bathrooms ?? null,
+                  size: house.size ?? null,
+                  priceNegotiable: !!house.priceNegotiable,
+                  contactNumbers: house.contactNumbers || [],
+                  houseImages: house.houseImages || [],
+                  videoUrl: house.videoUrl || '',
+                  username: house.username || '',
+                  userAvatar: house.userAvatar || house.user?.avatar || '',
                 ownerId: sellerId,
                 timestamp: house.createdAt || new Date().toISOString(),
               };
@@ -951,51 +1003,40 @@ const PostDetailScreen = ({ route, navigation }) => {
                 language: language,
                 replyPost: replyPost,
               });
-            }}
-          >
-            <Ionicons name="chatbubble-outline" size={20} color="#FFFFFF" />
-            <Text style={styles.messageBtnText}>{t.message}</Text>
-          </TouchableOpacity>
+              }}
+            >
+              <Ionicons name="chatbubble-outline" size={20} color="#FFFFFF" />
+              <Text style={styles.messageBtnText}>{t.message}</Text>
+            </TouchableOpacity>
+          )}
 
           <View style={styles.iconBtnGroup}>
-            <TouchableOpacity
-              style={[styles.iconBtn, { borderColor: theme.border, backgroundColor: theme.buttons }]}
-              onPress={toggleSave}
-            >
-              <Ionicons name={isSaved ? 'bookmark' : 'bookmark-outline'} size={22} color={theme.text} />
-            </TouchableOpacity>
+  <TouchableOpacity
+    style={[styles.iconBtn, { borderColor: theme.border }]}
+    onPress={toggleSave}
+  >
+    <Ionicons
+      name={isSaved ? 'bookmark' : 'bookmark-outline'}
+      size={22}
+      color={theme.text}
+    />
+  </TouchableOpacity>
 
-            <TouchableOpacity
-              style={[styles.iconBtn, { borderColor: theme.border, backgroundColor: theme.buttons }]}
-              onPress={downloadAllImages}
-              disabled={downloadingAll}
-            >
-              {downloadingAll ? (
-                <ActivityIndicator size="small" color={theme.text} />
-              ) : (
-                <Ionicons name="download-outline" size={22} color={theme.text} />
-              )}
-            </TouchableOpacity>
+  <TouchableOpacity
+    style={[styles.iconBtn, { borderColor: theme.border }]}
+    onPress={handleShare}
+  >
+    <Ionicons
+      name="share-social-outline"
+      size={22}
+      color={theme.text}
+    />
+  </TouchableOpacity>
+</View>
 
-            <TouchableOpacity
-              style={[styles.iconBtn, { borderColor: theme.border, backgroundColor: theme.buttons }]}
-              onPress={handleShare}
-            >
-              <Ionicons name="share-social-outline" size={22} color={theme.text} />
-            </TouchableOpacity>
-          </View>
         </View>
       </View>
 
-      {/* Full-screen image viewer modal */}
-      <ImageViewerModal
-        visible={imageViewerVisible}
-        images={house.houseImages}
-        initialIndex={viewerIndex}
-        onClose={() => setImageViewerVisible(false)}
-        onDownload={handleViewerDownload}
-        isDarkMode={isDarkMode}
-      />
     </SafeAreaView>
   );
 };
@@ -1004,7 +1045,20 @@ const PostDetailScreen = ({ route, navigation }) => {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  loadingImage: { width: 150, height: 150 },
+  loadingBadge: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#00000000',
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
+  },
+  loadingImage: { width: 110, height: 110 },
   loadingText: { marginTop: 22, fontSize: 16 },
 
   // Slider
@@ -1012,24 +1066,210 @@ const styles = StyleSheet.create({
   houseImage: { width: width, height: 320 },
   dotsContainer: {
     position: 'absolute',
-    bottom: 20,
-    flexDirection: 'row',
+    Top:0,
+    left:20,
+    paddingTop:7,
+    flexDirection: 'column',
     alignSelf: 'center',
     gap: 8,
   },
-  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.5)' },
-  activeDot: { backgroundColor: '#ffffff', width: 12, height: 8 },
+  dot: { width: 10, height: 8, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.5)', },
+  activeDot: { backgroundColor: '#ffffff', width: 20, height: 8 },
+
+  // Video Thumbnail (Inline)
+  videoThumbnailContainer: {
+    width: '100%',
+    height: 320,
+    backgroundColor: '#000000',
+    position: 'relative',
+  },
+  videoThumbnail: {
+    width: '100%',
+    height: '100%',
+  },
+  videoThumbnailPlaceholder: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  videoThumbnailOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.3)',
+  },
+  videoPlayButtonCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 0,
+    borderColor: '#FFFFFF',
+    marginBottom: 8,
+  },
+  videoThumbnailText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  videoDurationBadge: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    gap: 4,
+  },
+  videoDurationText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+
+  // Video Preview Modal
+  videoModalRoot: {
+    flex: 1,
+    justifyContent: 'flex-end',      // pin the player to the bottom
+    backgroundColor: 'transparent',
+  },
+  videoModalBackdrop: {
+    flex: 1,                          // this is the top 20% (free) area
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  videoBackdropCloseRow: {
+    paddingTop: 44,
+    paddingHorizontal: 16,
+    alignItems: 'flex-start',
+  },
+  videoPreviewContainer: {
+    width: '100%',
+    backgroundColor: '#000000',
+    overflow: 'hidden',
+  },
+  videoPlayer: {
+    flex: 1,
+  },
+  videoControlsOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'space-between',
+  },
+  videoTopBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 8,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  videoControlButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  videoTitleContainer: {
+    flex: 1,
+    marginHorizontal: 12,
+  },
+  videoTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  videoTopActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  videoCenterControls: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    transform: [{ translateX: -25 }, { translateY: -25 }],
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  videoPlayButton: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 0,
+    borderColor: '#FFFFFF',
+  },
+  videoPlayIcon: {
+    marginLeft: 2,
+  },
+  bufferingText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    marginTop: 8,
+  },
+  videoBottomBar: {
+    paddingHorizontal: 16,
+    paddingBottom: 20,
+    paddingTop: 8,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  videoProgressTrack: {
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  videoProgressFill: {
+    height: '100%',
+    borderRadius: 2,
+  },
+  videoTimeContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  videoTimeText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+  },
+  videoTapArea: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 1,
+  },
 
   // Fixed header area
   fixedHeaderArea: {
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    marginTop: -40,
-    paddingTop: 20,
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+    marginTop: 30,
+   
+    paddingTop: 0,
     paddingHorizontal: 20,
     zIndex: 2,
     elevation: 10,
-    shadowColor: '#000',
+    shadowColor: '#00000000',
     shadowOffset: { width: 0, height: -4 },
     shadowOpacity: 0.1,
     shadowRadius: 10,
@@ -1073,12 +1313,12 @@ const styles = StyleSheet.create({
   // Tabs
   tabBar: {
     flexDirection: 'row',
-    borderBottomWidth: 1,
-    marginHorizontal: 20,
+    borderBottomWidth: 0,
+    marginHorizontal: 5,
     marginBottom: 16,
   },
   tabItem: { paddingVertical: 10, paddingHorizontal: 12, marginRight: 8 },
-  activeTabItem: { borderBottomWidth: 2 },
+  activeTabItem: { borderBottomWidth: 0 },
   tabText: { fontSize: 15, fontWeight: '500' },
   activeTabText: { fontWeight: '700' },
 
@@ -1088,7 +1328,7 @@ const styles = StyleSheet.create({
   description: { fontSize: 15, lineHeight: 22 },
 
   // Contact
-  contactTabSection: { paddingHorizontal: 20, marginBottom: 24 },
+  contactTabSection: { paddingHorizontal: 15, marginBottom: 24 },
   contactBox: { borderRadius: 16, borderWidth: 0, padding: 5 },
   contactLinkRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   contactText: { fontSize: 14 },
@@ -1101,7 +1341,7 @@ const styles = StyleSheet.create({
     gap: 12,
     paddingHorizontal: 20,
     paddingVertical: 12,
-    borderTopWidth: 1,
+    borderTopWidth: 0,
   },
   messageBtn: {
     flex: 1.5,
@@ -1116,7 +1356,7 @@ const styles = StyleSheet.create({
   iconBtnGroup: { flex: 1.5, flexDirection: 'row', gap: 8 },
   iconBtn: {
     flex: 1,
-    borderWidth: 1,
+    borderWidth: 0,
     borderRadius: 30,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1126,63 +1366,8 @@ const styles = StyleSheet.create({
   loginPromptContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 40 },
   loginPromptTitle: { fontSize: 24, fontWeight: 'bold', marginTop: 20, marginBottom: 10 },
   loginPromptText: { fontSize: 16, textAlign: 'center', marginBottom: 30 },
-  loginButton: { paddingHorizontal: 30, paddingVertical: 12, borderRadius: 30, borderWidth: 1 },
+  loginButton: { paddingHorizontal: 30, paddingVertical: 12, borderRadius: 30, borderWidth: 0 },
   loginButtonText: { fontSize: 16, fontWeight: '600' },
-
-  // Image viewer styles
-  viewerContainer: {
-    flex: 1,
-  },
-  viewerTopBar: {
-    position: 'absolute',
-    top: 50,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    zIndex: 10,
-  },
-  viewerImageArea: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  viewerSideBtn: {
-    width: 60,
-    height: '100%',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 5,
-  },
-  viewerImageWrapper: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  viewerImage: {
-    width: '90%',
-    height: '80%',
-  },
-  viewerDots: {
-    position: 'absolute',
-    bottom: 40,
-    flexDirection: 'row',
-    alignSelf: 'center',
-    gap: 10,
-    zIndex: 10,
-  },
-  viewerDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  viewerDotActive: {
-    backgroundColor: '#fff',
-    width: 12,
-    height: 8,
-  },
 });
 
 export default PostDetailScreen;

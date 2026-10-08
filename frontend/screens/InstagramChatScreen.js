@@ -19,6 +19,7 @@ import * as ImagePicker from 'expo-image-picker';
 import axios from 'axios';
 import { Ionicons } from '@expo/vector-icons';
 import { BASE_URL } from '../constants';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 
 const MESSAGES_KEY = '@user_messages';
 const DEFAULT_AVATAR = require('../assets/profile1.png');
@@ -134,11 +135,7 @@ const InstagramChatScreen = ({ route, navigation }) => {
     }
   };
 
-  if (loading) return (
-    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
-      <View style={styles.center}><ActivityIndicator size="large" color={theme.accent} /></View>
-    </SafeAreaView>
-  );
+  if (loading) return <ShaakaLoadingScreen message="Loading messages..." backgroundColor={theme.background} textColor={theme.text} />;
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}> 

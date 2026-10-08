@@ -1,11 +1,12 @@
 // controllers/userController.js
 const User = require('../models/User');
+const SavedPost = require('../models/SavedPost');
 const socketHelper = require('../socket');
 const Post = require('../models/Post');
 const Place = require('../models/Place');
 const Message = require('../models/Message'); // 🔥 ADDED
-const cloudinary = require('../config/cloudinary');
-const streamifier = require('streamifier');
+const fs = require('fs');
+const storageService = require('../services/storage/storageService');
 const { setOnline, isOnline } = require('../utils/onlineStore');
 const { computeAggregatedLimits, getActiveSubscriptions } = require('../utils/subscriptionHelpers_clean');
 const { notifyUser } = require('../services/notificationService');
@@ -18,8 +19,17 @@ const cleanExpiredStories = async (userId = null) => {
   const users = await User.find(filter);
   for (const user of users) {
     const originalLength = user.stories.length;
+    const expiredKeys = user.stories
+      .filter(story => story.createdAt < twoDaysAgo)
+      .map(story => story.storageKey)
+      .filter(storageService.isStorageKey);
     user.stories = user.stories.filter(s => s.createdAt >= twoDaysAgo);
-    if (user.stories.length < originalLength) await user.save();
+    if (user.stories.length < originalLength) {
+      await user.save();
+      await Promise.all(expiredKeys.map(key => storageService.deleteMedia(key).catch(error => {
+        console.error('[Storage] Expired story cleanup failed:', error.code || 'B2_OPERATION_FAILED');
+      })));
+    }
   }
 };
 
@@ -36,6 +46,7 @@ exports.getMe = async (req, res) => {
     // Compute aggregated limits and active subscriptions
     const totalLimits = computeAggregatedLimits(user);
     const activeSubscriptions = getActiveSubscriptions(user);
+    const videoLimit = typeof user.videoUploadLimitPerDay === 'number' ? Math.max(0, user.videoUploadLimitPerDay) : 0;
 
     // Today's date range
     const today = new Date();
@@ -49,6 +60,13 @@ exports.getMe = async (req, res) => {
       createdAt: { $gte: today, $lt: tomorrow }
     });
     const remainingPosts = Math.max((totalLimits.postsPerDay || 1) - postsToday, 0);
+
+    const videosToday = await Post.countDocuments({
+      user: user._id,
+      videoUrl: { $exists: true, $ne: '' },
+      createdAt: { $gte: today, $lt: tomorrow }
+    });
+    const remainingVideos = Math.max(videoLimit - videosToday, 0);
 
     // ----- Today's places -----
     const placesToday = await Place.countDocuments({
@@ -93,6 +111,10 @@ exports.getMe = async (req, res) => {
     userObj.remainingPlaces = remainingPlaces;
     userObj.messageImagesToday = messageImagesToday; // 🔥 added
     userObj.remainingImages = remainingImages;       // 🔥 added
+    userObj.allowVideoUpload = user.allowVideoUpload === true;
+    userObj.videoUploadLimitPerDay = videoLimit;
+    userObj.videosToday = videosToday;
+    userObj.remainingVideos = remainingVideos;
     userObj.totalPaid = totalPaid;
     userObj.paymentCount = paymentCount;
     userObj.firstPaymentDate = firstPayment ? firstPayment.paymentDate : null;
@@ -112,77 +134,85 @@ exports.getMe = async (req, res) => {
 
 // @route   POST /api/user/avatar
 exports.uploadAvatar = async (req, res) => {
+  let uploadedStorageKey = '';
   try {
     if (!req.user || !req.user.id) {
       return res.status(401).json({ success: false, message: 'No user context' });
     }
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
+    const currentUser = await User.findById(req.user.id).select('avatarStorageKey');
+    if (!currentUser) return res.status(404).json({ success: false, message: 'User not found' });
+    const previousStorageKey = currentUser.avatarStorageKey;
 
-    const uploadStream = (buffer) => {
-      return new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          { folder: 'avatars', transformation: [{ width: 300, height: 300, crop: 'fill' }] },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        );
-        streamifier.createReadStream(buffer).pipe(stream);
-      });
-    };
-
-    const result = await uploadStream(req.file.buffer);
-    const avatarUrl = result.secure_url;
+    const result = await storageService.uploadMedia({
+      buffer: req.file.buffer,
+      mimeType: req.file.mimetype,
+      folder: `users/${req.user.id}/profile`,
+      maxBytes: 10 * 1024 * 1024,
+    });
+    uploadedStorageKey = result.storageKey;
+    const avatarUrl = storageService.getMediaUrl(result.storageKey, {
+      origin: storageService.getRequestOrigin(req),
+    });
 
     const user = await User.findByIdAndUpdate(
       req.user.id,
-      { avatar: avatarUrl },
+      { avatar: avatarUrl, avatarStorageKey: result.storageKey, storageProvider: 'b2' },
       { new: true }
     ).select('-password');
+    uploadedStorageKey = '';
+
+    if (previousStorageKey && previousStorageKey !== result.storageKey) {
+      await storageService.deleteMedia(previousStorageKey).catch(error => {
+        console.error('[Storage] Replaced avatar cleanup failed:', error.code || 'B2_OPERATION_FAILED');
+      });
+    }
 
     res.json({ success: true, avatarUrl, user });
   } catch (error) {
-    console.error('uploadAvatar error:', error);
-    res.status(500).json({ success: false, message: 'Upload failed' });
+    if (uploadedStorageKey) await storageService.deleteMedia(uploadedStorageKey).catch(() => {});
+    console.error('uploadAvatar error:', error.code || error.message || 'Unknown error');
+    res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Upload failed' });
   }
 };
 
 // @route   POST /api/user/story
 exports.uploadStory = async (req, res) => {
+  let uploadedStorageKey = '';
   try {
     if (!req.user || !req.user.id) return res.status(401).json({ success: false, message: 'Authentication required' });
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
 
-    const fs = require('fs');
-    const result = await new Promise((resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
-        { folder: 'stories', transformation: [{ width: 720, height: 1280, crop: 'limit' }] },
-        (err, r) => {
-          if (err) return reject(err);
-          resolve(r);
-        }
-      );
-      if (req.file && req.file.buffer) {
-        streamifier.createReadStream(req.file.buffer).pipe(stream);
-      } else if (req.file && req.file.path) {
-        const fileStream = fs.createReadStream(req.file.path);
-        fileStream.pipe(stream);
-      } else {
-        return reject(new Error('No file buffer or path available'));
-      }
-    });
-
-    const imageUrl = result.secure_url;
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
+    const buffer = req.file.buffer || fs.readFileSync(req.file.path);
+    const result = await storageService.uploadMedia({
+      buffer,
+      mimeType: req.file.mimetype,
+      folder: `users/${req.user.id}/stories`,
+      maxBytes: 10 * 1024 * 1024,
+    });
+    uploadedStorageKey = result.storageKey;
+
+    const imageUrl = storageService.getMediaUrl(result.storageKey, {
+      origin: storageService.getRequestOrigin(req),
+    });
+
+    const existingStoryKeys = (user.stories || []).map(story => story.storageKey).filter(storageService.isStorageKey);
     user.stories = user.stories || [];
-    user.stories.unshift({ image: imageUrl, createdAt: new Date(), views: [] });
+    user.stories.unshift({ image: imageUrl, storageKey: result.storageKey, createdAt: new Date(), views: [] });
 
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
     user.stories = user.stories.filter(s => s.createdAt >= twoDaysAgo);
     user.stories = user.stories.slice(0, 10);
     await user.save();
+    uploadedStorageKey = '';
+    const retainedStoryKeys = new Set(user.stories.map(story => story.storageKey));
+    const removedStoryKeys = existingStoryKeys.filter(key => !retainedStoryKeys.has(key));
+    await Promise.all(removedStoryKeys.map(key => storageService.deleteMedia(key).catch(error => {
+      console.error('[Storage] Removed story cleanup failed:', error.code || 'B2_OPERATION_FAILED');
+    })));
 
     try {
       if (req.file && req.file.path) {
@@ -193,8 +223,9 @@ exports.uploadStory = async (req, res) => {
 
     res.json({ success: true, story: user.stories[0] });
   } catch (error) {
-    console.error('uploadStory error:', error);
-    res.status(500).json({ success: false, message: 'Story upload failed' });
+    if (uploadedStorageKey) await storageService.deleteMedia(uploadedStorageKey).catch(() => {});
+    console.error('uploadStory error:', error.code || error.message || 'Unknown error');
+    res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Story upload failed' });
   }
 };
 
@@ -285,9 +316,16 @@ exports.updateProfile = async (req, res) => {
     if (!req.user || !req.user.id) {
       return res.status(401).json({ success: false, message: 'No user context' });
     }
-    const { username, location, bio, socialLinks } = req.body;
-    const existingUser = await User.findById(req.user.id).select('username');
+    const { username, name, location, bio, socialLinks } = req.body;
+    const existingUser = await User.findById(req.user.id).select('username name');
     const updateData = {};
+
+    if (typeof name === 'string') {
+      const nextName = name.trim();
+      if (nextName.length > 0) {
+        updateData.name = nextName;
+      }
+    }
 
     if (username) {
       const existing = await User.findOne({ username: username.toLowerCase(), _id: { $ne: req.user.id } });
@@ -380,12 +418,70 @@ exports.getSavedPosts = async (req, res) => {
     const user = await User.findById(req.user.id).populate({
       path: 'savedPosts',
       populate: { path: 'user', select: 'username avatar' },
-      select: 'description price houseImages location createdAt category productName'
+      select: 'description price houseImages videoUrl videoThumbnail mediaUrl imageUrl location createdAt category productName user'
     });
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
     res.json({ success: true, posts: user.savedPosts || [] });
   } catch (error) {
     console.error('getSavedPosts error:', error);
+    res.status(500).json({ success: false, message: 'Server error', details: error.message });
+  }
+};
+
+exports.getAllSavedPosts = async (req, res) => {
+  try {
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const savedEntries = await SavedPost.find({})
+      .populate({
+        path: 'post',
+        populate: { path: 'user', select: 'username avatar' },
+      })
+      .populate('user', 'username avatar')
+      .sort({ savedAt: -1 });
+
+    const uniquePosts = new Map();
+    for (const entry of savedEntries) {
+      if (!entry.post) continue;
+      const id = entry.post._id.toString();
+      if (!uniquePosts.has(id)) {
+        uniquePosts.set(id, {
+          ...entry.post.toObject(),
+          savedBy: entry.user?._id || null,
+          saverUsername: entry.user?.username || null,
+        });
+      }
+    }
+
+    res.json({ success: true, posts: [...uniquePosts.values()] });
+  } catch (error) {
+    console.error('getAllSavedPosts error:', error);
+    res.status(500).json({ success: false, message: 'Server error', details: error.message });
+  }
+};
+
+exports.getUserSavedPosts = async (req, res) => {
+  try {
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const targetUserId = req.params.userId;
+    const user = await User.findById(targetUserId).populate({
+      path: 'savedPosts',
+      populate: { path: 'user', select: 'username avatar' },
+      select: 'description price houseImages videoUrl videoThumbnail mediaUrl imageUrl location createdAt category productName user'
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    res.json({ success: true, posts: user.savedPosts || [] });
+  } catch (error) {
+    console.error('getUserSavedPosts error:', error);
     res.status(500).json({ success: false, message: 'Server error', details: error.message });
   }
 };
@@ -456,11 +552,17 @@ exports.deleteAvatar = async (req, res) => {
     if (!req.user || !req.user.id) {
       return res.status(401).json({ success: false, message: 'Authentication required' });
     }
+    const currentUser = await User.findById(req.user.id).select('avatarStorageKey');
+    if (!currentUser) return res.status(404).json({ success: false, message: 'User not found' });
+    const storageKey = currentUser.avatarStorageKey;
     const user = await User.findByIdAndUpdate(
-      req.user.id, 
-      { avatar: '' }, 
+      req.user.id,
+      { $set: { avatar: '', avatarStorageKey: '' } },
       { new: true }
     ).select('-password');
+    if (storageKey) await storageService.deleteMedia(storageKey).catch(error => {
+      console.error('[Storage] Avatar deletion failed:', error.code || 'B2_OPERATION_FAILED');
+    });
     res.json({ success: true, user });
   } catch (error) {
     console.error('deleteAvatar error:', error);

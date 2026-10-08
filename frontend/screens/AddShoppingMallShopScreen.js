@@ -21,9 +21,11 @@ import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
-import { useAuth } from '../context/AuthContext';
+import ArrowUploadLoader from '../components/ArrowUploadLoader';
+import { useAuth, useUserLimits } from '../context/AuthContext';
 import { computeAggregatedLimits } from '../utils/subscriptionHelpers';
 import { normalizeRwandaPhone, isValidRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 
 const { width, height } = Dimensions.get('window');
 const CATEGORY_ICON_SIZE = 28;
@@ -1016,7 +1018,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
             >
               {publishing ? (
                 <View style={styles.publishProgress}>
-                  <ActivityIndicator size="small" color="#fff" />
+                  <ArrowUploadLoader color="#fff" size={34} />
                   <Text style={styles.publishButtonText}>{t.publishing.replace('{progress}', progress)}</Text>
                 </View>
               ) : (
@@ -1034,11 +1036,29 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
                     </TouchableOpacity>
                   </View>
                   <ScrollView showsVerticalScrollIndicator={false}>
-                    {shopFrontImage && (
-                      <Image source={{ uri: shopFrontImage }} style={styles.previewImage} />
-                    )}
+                    <View style={styles.previewHeroWrap}>
+                      {shopFrontImage ? (
+                        <Image source={{ uri: shopFrontImage }} style={styles.previewImage} />
+                      ) : (
+                        <View style={[styles.previewImage, styles.previewImagePlaceholder, { backgroundColor: borderColor }]}>
+                          <Ionicons name="storefront-outline" size={48} color={secondaryText} />
+                        </View>
+                      )}
+                      <View style={styles.previewHeroShade} />
+                      <TouchableOpacity style={styles.previewFavoriteButton} accessibilityRole="button" accessibilityLabel="Save shop preview">
+                        <Ionicons name="heart-outline" size={22} color="#555" />
+                      </TouchableOpacity>
+                    </View>
                     <View style={styles.previewInfo}>
-                      <Text style={[styles.previewName, { color: textColor }]}>{shopName || t.previewName}</Text>
+                      <View style={styles.previewTitleRow}>
+                        <View style={styles.previewTitleBlock}>
+                          <Text style={[styles.previewName, { color: textColor }]}>{shopName || t.previewName}</Text>
+                          <Text style={[styles.previewAddress, { color: secondaryText }]}>
+                            <Ionicons name="location" size={14} color={accentColor} /> {mall?.name || 'Shopping mall'}
+                          </Text>
+                        </View>
+                        <Ionicons name="checkmark-circle" size={24} color={accentColor} />
+                      </View>
                       {selectedCategory && (
                         <View style={styles.previewCategory}>
                           <MaterialCommunityIcons
@@ -1051,8 +1071,29 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
                           </Text>
                         </View>
                       )}
+                      <Text style={[styles.previewSectionLabel, { color: textColor }]}>Description</Text>
+                      <Text style={[styles.previewDescription, { color: secondaryText }]}>
+                        {shopDescription || 'No shop description provided.'}
+                      </Text>
+
+                      <Text style={[styles.previewSectionLabel, { color: textColor }]}>Facilities</Text>
+                      <View style={styles.previewFacilitiesRow}>
+                        <View style={styles.previewFacility}>
+                          <Ionicons name="location-outline" size={21} color={accentColor} />
+                          <Text style={[styles.previewFacilityLabel, { color: secondaryText }]} numberOfLines={1}>{shopNumber || 'Shop number'}</Text>
+                        </View>
+                        <View style={styles.previewFacility}>
+                          <Ionicons name="call-outline" size={21} color={accentColor} />
+                          <Text style={[styles.previewFacilityLabel, { color: secondaryText }]} numberOfLines={1}>{phone || t.noPhone}</Text>
+                        </View>
+                        <View style={styles.previewFacility}>
+                          <Ionicons name="cube-outline" size={21} color={accentColor} />
+                          <Text style={[styles.previewFacilityLabel, { color: secondaryText }]}>{products.length} products</Text>
+                        </View>
+                      </View>
+
                       <Text style={[styles.previewAddress, { color: secondaryText }]}>
-                        Shop #{shopNumber}{floorNumber ? `, Floor ${floorNumber}` : ''} • {shopAddress}
+                        {floorNumber ? `Floor ${floorNumber} • ` : ''}{shopAddress || 'Address not specified'}
                       </Text>
 
                       {currentUser && (
@@ -1096,15 +1137,21 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
                         </View>
                       )}
                       <Text style={[styles.previewStatus, { color: accentColor }]}>{t.previewStatus}</Text>
-                      <View style={styles.previewActions}>
-                        <TouchableOpacity style={[styles.previewActionBtn, { backgroundColor: accentColor }]}>
-                          <Ionicons name="call" size={20} color="#fff" />
-                          <Text style={styles.previewActionText}>{t.call}</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity style={[styles.previewActionBtn, { backgroundColor: accentColor }]}>
-                          <Ionicons name="navigate" size={20} color="#fff" />
-                          <Text style={styles.previewActionText}>{t.direction}</Text>
-                        </TouchableOpacity>
+                      <View style={[styles.previewActionFooter, { borderTopColor: borderColor }]}>
+                        <View>
+                          <Text style={[styles.previewPriceLabel, { color: secondaryText }]}>Shop</Text>
+                          <Text style={[styles.previewPrice, { color: textColor }]}>{shopNumber || 'Ready'}</Text>
+                        </View>
+                        <View style={styles.previewActions}>
+                          <TouchableOpacity style={[styles.previewActionBtn, { backgroundColor: accentColor }]}>
+                            <Ionicons name="call" size={18} color="#fff" />
+                            <Text style={styles.previewActionText}>{t.call}</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={[styles.previewActionBtn, { backgroundColor: accentColor }]}>
+                            <Ionicons name="navigate" size={18} color="#fff" />
+                            <Text style={styles.previewActionText}>{t.direction}</Text>
+                          </TouchableOpacity>
+                        </View>
                       </View>
                     </View>
                   </ScrollView>
@@ -1183,15 +1230,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
 
   // ----- Loading / checking state -----
   if (checkingShop || loadingUser) {
-    return (
-      <SafeAreaView style={[styles.container, { backgroundColor }]}>
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-          <ActivityIndicator size="large" color={accentColor} />
-          <Text style={{ color: textColor, marginTop: 16 }}>Checking your account...</Text>
-        </View>
-        {renderThemedAlert()}
-      </SafeAreaView>
-    );
+    return <ShaakaLoadingScreen message="Checking your account..." backgroundColor={backgroundColor} textColor={textColor} />;
   }
 
   // ----- Main render -----
@@ -1381,7 +1420,7 @@ const styles = StyleSheet.create({
   publishButtonText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   publishProgress: { flexDirection: 'row', alignItems: 'center' },
   previewModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center' },
-  previewModalContent: { marginHorizontal: 20, borderRadius: 16, maxHeight: '80%' },
+  previewModalContent: { marginHorizontal: 20, borderRadius: 18, maxHeight: '88%', overflow: 'hidden' },
   previewHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1391,12 +1430,23 @@ const styles = StyleSheet.create({
     borderBottomColor: '#ddd',
   },
   previewTitle: { fontSize: 20, fontWeight: 'bold' },
-  previewImage: { width: '100%', height: 200, resizeMode: 'cover' },
+  previewHeroWrap: { height: 220, position: 'relative' },
+  previewImage: { width: '100%', height: 220, resizeMode: 'cover' },
+  previewImagePlaceholder: { alignItems: 'center', justifyContent: 'center' },
+  previewHeroShade: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.04)' },
+  previewFavoriteButton: { position: 'absolute', right: 14, bottom: 14, width: 42, height: 42, borderRadius: 21, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
   previewInfo: { padding: 16 },
+  previewTitleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  previewTitleBlock: { flex: 1, paddingRight: 10 },
   previewName: { fontSize: 22, fontWeight: 'bold' },
-  previewCategory: { flexDirection: 'row', alignItems: 'center', marginVertical: 6 },
+  previewCategory: { flexDirection: 'row', alignItems: 'center', marginTop: 9, marginBottom: 2 },
   previewCategoryText: { marginLeft: 6, fontSize: 16 },
-  previewAddress: { fontSize: 14, marginVertical: 2 },
+  previewAddress: { fontSize: 13, marginTop: 5 },
+  previewSectionLabel: { fontSize: 14, fontWeight: '700', marginTop: 18, marginBottom: 7 },
+  previewDescription: { fontSize: 13, lineHeight: 19 },
+  previewFacilitiesRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
+  previewFacility: { alignItems: 'center', flex: 1, paddingHorizontal: 3 },
+  previewFacilityLabel: { fontSize: 10, marginTop: 5, textAlign: 'center' },
   previewOwner: { marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#ddd' },
   previewOwnerTitle: { fontSize: 14, fontWeight: '600', marginBottom: 6 },
   previewOwnerRow: { flexDirection: 'row', alignItems: 'center' },
@@ -1417,13 +1467,16 @@ const styles = StyleSheet.create({
   previewProductItem: { flexDirection: 'row', justifyContent: 'space-between', borderBottomWidth: 0.5, paddingVertical: 4 },
   previewProductName: { fontSize: 14 },
   previewProductPrice: { fontSize: 14, fontWeight: '500' },
-  previewStatus: { fontSize: 16, fontWeight: '600', marginVertical: 4 },
-  previewActions: { flexDirection: 'row', marginTop: 12 },
+  previewStatus: { fontSize: 14, fontWeight: '600', marginTop: 14 },
+  previewActionFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, marginTop: 14, paddingTop: 14 },
+  previewPriceLabel: { fontSize: 11 },
+  previewPrice: { fontSize: 18, fontWeight: '700', marginTop: 2 },
+  previewActions: { flexDirection: 'row', marginTop: 0 },
   previewActionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     borderRadius: 20,
     marginRight: 12,
   },

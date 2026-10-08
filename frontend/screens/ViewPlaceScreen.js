@@ -28,11 +28,8 @@ import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
-import { Video } from 'expo-av';
+import { Video } from '../utils/expoAvCompat';
 import { useFocusEffect } from '@react-navigation/native';
-import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system';
-import FullScreenImageViewer from '../components/FullScreenImageViewer';
 
 const { height, width } = Dimensions.get('window');
 const MODAL_HEIGHT_80 = height * 0.7;
@@ -192,10 +189,6 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const [ownerData, setOwnerData] = useState(null);
   const [loadingOwner, setLoadingOwner] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
-  const [carouselVisible, setCarouselVisible] = useState(false);
-  const [carouselImages, setCarouselImages] = useState([]);
-  const [carouselIndex, setCarouselIndex] = useState(0);
-
   // ----- Shopping Mall specific state -----
   const [shops, setShops] = useState([]);
   const [loadingShops, setLoadingShops] = useState(false);
@@ -601,9 +594,26 @@ export default function ViewPlaceScreen({ route, navigation }) {
     }
   };
 
+  const [appShareLink, setAppShareLink] = useState('');
+
+  useEffect(() => {
+    const loadShareLink = async () => {
+      try {
+        const response = await axios.get(`${BASE_URL}/api/settings/share-link`);
+        if (response.data.success) {
+          setAppShareLink(response.data.shareLink || '');
+        }
+      } catch (error) {
+        console.error('Load share link error:', error.message);
+      }
+    };
+    loadShareLink();
+  }, []);
+
   const handleShare = async () => {
     try {
-      const message = `📍 ${place.name}\n${place.address || ''}\nCategory: ${categoryLabel}`;
+      const link = appShareLink || 'https://shaaka.app';
+      const message = `📍 ${place.name}\n${place.address || ''}\nCategory: ${categoryLabel}\n\n${link}`;
       await Share.share({ message });
     } catch (e) {
       Alert.alert('Error', 'Could not share place.');
@@ -618,6 +628,43 @@ export default function ViewPlaceScreen({ route, navigation }) {
     } catch (error) {
       Alert.alert('Error', 'Could not update favorite. Please try again.');
     }
+  };
+
+  const handleMessageOwner = () => {
+    const ownerId = ownerData?._id || place?.userId;
+    const ownerName = ownerData?.username || ownerData?.name || place?.ownerName || 'Place owner';
+    const ownerPhone = ownerData?.phone || place?.phone || '';
+    const contextId = place?.id || place?._id || place?.placeId || `place_${place?.name || 'place'}`;
+
+    if (!ownerId) {
+      Alert.alert('Error', 'Owner information is not available yet.');
+      return;
+    }
+
+    const replyPost = {
+      postId: contextId,
+      contextType: 'place',
+      contextId,
+      title: place?.name || 'Place',
+      description: place?.description || '',
+      image: place?.images?.street || place?.images?.cover || place?.image || '',
+      price: null,
+      amount: '',
+      location: place?.address || '',
+      category: place?.category || '',
+      username: ownerName,
+      ownerId,
+      timestamp: new Date().toISOString(),
+    };
+
+    navigation.navigate('Chat', {
+      sellerId: ownerId,
+      sellerName: ownerName,
+      sellerPhone: ownerPhone,
+      postId: contextId,
+      postTitle: place?.name || 'Place',
+      replyPost,
+    });
   };
 
   const handleReport = () => {
@@ -694,97 +741,10 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const openCarousel = (startIndex = 0) => {
     const allImages = getAllImages();
     if (allImages.length === 0) return;
-    setCarouselImages(allImages);
-    setCarouselIndex(Math.min(startIndex, allImages.length - 1));
-    setCarouselVisible(true);
-  };
-
-  const closeCarousel = () => {
-    setCarouselVisible(false);
-    setCarouselImages([]);
-    setCarouselIndex(0);
-  };
-
-  const downloadCarouselImage = async (imageUrl) => {
-    try {
-      if (!imageUrl || typeof imageUrl !== 'string') {
-        Alert.alert('Error', 'No image URL available');
-        return;
-      }
-
-      const permission = await MediaLibrary.requestPermissionsAsync();
-      if (permission.status !== 'granted') {
-        Alert.alert('Permission needed', 'Please allow access to photos to save images.');
-        return;
-      }
-
-      const url = new URL(imageUrl);
-      const filenameFromUrl = url.pathname.split('/').pop() || 'shaaka-image.jpg';
-      const extension = filenameFromUrl.includes('.') ? filenameFromUrl.split('.').pop() : 'jpg';
-      const filename = `${Date.now()}_${filenameFromUrl.replace(/[^a-zA-Z0-9_.-]/g, '_') || 'shaaka_image'}.${extension}`;
-      const fileUri = `${FileSystem.documentDirectory}${filename}`;
-
-      const downloadResult = await FileSystem.downloadAsync(imageUrl, fileUri);
-      if (downloadResult.status !== 200 || !downloadResult.uri) {
-        throw new Error('Download failed');
-      }
-
-      const asset = await MediaLibrary.createAssetAsync(downloadResult.uri);
-      const albumName = 'Shaaka';
-      const album = await MediaLibrary.getAlbumAsync(albumName);
-      if (!album) {
-        await MediaLibrary.createAlbumAsync(albumName, asset, false);
-      } else {
-        await MediaLibrary.addAssetsToAlbumAsync([asset], album.id, false);
-      }
-
-      Alert.alert('Success', 'Image downloaded successfully.');
-    } catch (error) {
-      console.error('Download error:', error);
-      Alert.alert('Error', 'Failed to download image. Please try again.');
-    }
-  };
-
-  const renderCarouselItem = ({ item }) => {
-    const media = getPrimaryMedia({ imageUrl: item, videoUrl: item });
-    if (media?.type === 'video') {
-      return (
-        <View
-          style={{
-            width: width,
-            height: '100%',
-            justifyContent: 'center',
-            alignItems: 'center',
-          }}
-        >
-          <Video
-            source={{ uri: media.url }}
-            style={{ width: '100%', height: '100%' }}
-            resizeMode="contain"
-            shouldPlay
-            isMuted
-            isLooping
-            useNativeControls={false}
-          />
-        </View>
-      );
-    }
-
-    return (
-      <View
-        style={{
-          width: width,
-          height: '100%',
-          justifyContent: 'center',
-          alignItems: 'center',
-        }}
-      >
-        <Image
-          source={{ uri: item }}
-          style={{ width: '100%', height: '100%', resizeMode: 'contain' }}
-        />
-      </View>
-    );
+    navigation.navigate('Preview', {
+      images: allImages,
+      initialIndex: Math.min(startIndex, allImages.length - 1),
+    });
   };
 
   const renderContactButton = (icon, label, value, onPress) => {
@@ -1181,11 +1141,11 @@ export default function ViewPlaceScreen({ route, navigation }) {
     if (place.products && place.products.length > 0) {
       result.push({
         title: 'Products',
-        data: filteredProducts,
-        renderItem: renderProductItem,
+        data: Array.from(
+          { length: Math.ceil(filteredProducts.length / 2) },
+          (_, index) => filteredProducts.slice(index * 2, index * 2 + 2)
+        ),
         key: 'products',
-        numColumns: 2,
-        columnWrapperStyle: styles.productRow,
       });
     }
 
@@ -1429,10 +1389,24 @@ export default function ViewPlaceScreen({ route, navigation }) {
         {/* Main scrollable content (SectionList) */}
         <SectionList
           sections={sections}
-          keyExtractor={(item, index) => `${item._id || item.id || index}`}
+          keyExtractor={(item, index) => {
+            const firstItem = Array.isArray(item) ? item[0] : item;
+            return `${firstItem?._id || firstItem?.id || index}`;
+          }}
           renderItem={({ section, item }) => {
             if (section.key === 'products') {
-              return renderProductItem({ item });
+              return (
+                <View style={styles.productRow}>
+                  {item.map((product, productIndex) => (
+                    <View
+                      key={product._id || product.id || productIndex}
+                      style={styles.productColumn}
+                    >
+                      {renderProductItem({ item: product })}
+                    </View>
+                  ))}
+                </View>
+              );
             }
             if (section.key === 'shops') {
               return renderShopItem({ item });
@@ -1559,6 +1533,16 @@ export default function ViewPlaceScreen({ route, navigation }) {
                     >
                       <Ionicons name="navigate" size={22} color="#fff" />
                       <Text style={styles.actionBtnText}>Directions</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.actionBtn,
+                        { backgroundColor: '#2bb673' },
+                      ]}
+                      onPress={handleMessageOwner}
+                    >
+                      <Ionicons name="chatbubble-ellipses-outline" size={22} color="#fff" />
+                      <Text style={styles.actionBtnText}>Message</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[
@@ -1878,63 +1862,6 @@ export default function ViewPlaceScreen({ route, navigation }) {
         </>
       )}
 
-      {/* ----- CAROUSEL MODAL ----- */}
-      <Modal
-        visible={carouselVisible}
-        transparent
-        onRequestClose={closeCarousel}
-        animationType="fade"
-      >
-        <TouchableOpacity
-          style={styles.carouselBackdrop}
-          activeOpacity={1}
-          onPress={closeCarousel}
-        />
-        <View style={styles.carouselOverlayContainer}>
-          <SafeAreaView style={styles.carouselOverlay}>
-            <FlatList
-              data={carouselImages}
-              horizontal
-              pagingEnabled
-              showsHorizontalScrollIndicator={false}
-              keyExtractor={(_, idx) => idx.toString()}
-              renderItem={renderCarouselItem}
-              initialScrollIndex={carouselIndex}
-              getItemLayout={(data, index) => ({
-                length: width,
-                offset: width * index,
-                index,
-              })}
-              onScrollToIndexFailed={() => {}}
-              style={{ width, height: '100%' }}
-              contentContainerStyle={{
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-              onScroll={(event) => {
-                const offsetX = event.nativeEvent.contentOffset.x;
-                setCarouselIndex(Math.round(offsetX / width));
-              }}
-              scrollEventThrottle={200}
-            />
-            <TouchableOpacity
-              style={styles.carouselClose}
-              onPress={closeCarousel}
-            >
-              <Ionicons name="close" size={32} color="#fff" />
-            </TouchableOpacity>
-            <Text style={styles.carouselCounter}>
-              {carouselIndex + 1} / {carouselImages.length}
-            </Text>
-            <TouchableOpacity
-              style={styles.carouselDownload}
-              onPress={() => downloadCarouselImage(carouselImages[carouselIndex])}
-            >
-              <Ionicons name="download-outline" size={24} color="#fff" />
-            </TouchableOpacity>
-          </SafeAreaView>
-        </View>
-      </Modal>
     </View>
   );
 }
@@ -2149,11 +2076,17 @@ addProductBtnText: {
     marginLeft: 4,
   },
   productRow: {
+    flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: 12,
+    paddingHorizontal: 12,
+  },
+  productColumn: {
+    flex: 1,
+    marginHorizontal: 4,
   },
   productGridItem: {
-    width: (width - 48) / 2,
+    width: '100%',
     borderRadius: 8,
     overflow: 'hidden',
     padding: 8,
@@ -2162,8 +2095,7 @@ addProductBtnText: {
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
-    marginHorizontal: 8,
-    marginBottom: 8,
+    marginBottom: 0,
   },
   productGridImage: {
     width: '100%',
@@ -2288,17 +2220,6 @@ addProductBtnText: {
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 20,
-  },
-  carouselDownload: {
-    position: 'absolute',
-    bottom: 20,
-    right: 20,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
   },
   shopSectionHeader: {
     flexDirection: 'row',

@@ -13,6 +13,7 @@ router.use(auth);
 
 // Create a new shop inside a mall
 router.post('/', mallShopController.createMallShop);
+router.get('/mine', mallShopController.getMyMallShops);
 
 
 // Get all shops for a specific mall (query param: mallId)
