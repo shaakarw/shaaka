@@ -9,7 +9,6 @@ import {
   StyleSheet,
   ScrollView,
   Dimensions,
-  Animated,
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -20,10 +19,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import { networkStatus } from '../services/networkStatus';
+import { finishStartupPerformance } from '../services/startupPerformance';
 import { offlineDatabase } from '../services/offlineDatabase';
 import { mediaCache } from '../services/mediaCache';
 import { BASE_URL } from '../constants';
-import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import ProductHeroDeck from '../components/ProductHeroDeck';
 import { getUserDisplayName } from '../utils/userIdentity';
 
@@ -46,9 +45,7 @@ const translations = {
     login: 'Login',
     register: 'Register',
     users: ' 10,000⁺   Users ',
-    popularProducts: 'Popular products',
     trendingProducts: 'Trending now',
-    seeAllPosts: 'See all products',
     loading: 'Murakazaneza kuri Shaaka App...',
     loginRequired: 'Login Required',
     loginMessage: 'Please login to view post details',
@@ -63,12 +60,10 @@ const translations = {
     login: 'Injira',
     register: 'Iyandikishe',
     users: ' 10,000⁺  Byabayikoresha ',
-    popularProducts: 'Ibicuruzwa bikunzwe',
     trendingProducts: 'Ibikunzwe ubu',
-    seeAllPosts: 'Reba ibicuruzwa byose',
     loading: 'Murakazaneza kuri Shaaka App...',
     loginRequired: 'Ugomba kwinjira',
-    loginMessage: 'Nyamuneka winjire kugira ngo urebe ibyo ushaka',
+    loginMessage: 'Nyamuneka injira kugira ngo urebe ibyo ushaka',
     cancel: 'Hagarika',
   },
 };
@@ -93,7 +88,7 @@ const mapPost = (post) => ({
   featured: post.featured || false,
   trending: post.trending || false,
   // 👇 Video fields — required by the deck to render the video badge
-  videoUrl: post.videoUrl || '',
+  videoUrl: post.videoUrl || post.videoHlsUrl || post.video?.url || '',
   videoThumbnail: post.videoThumbnail || '',
   videoLink: post.videoLink || '',
   videoDuration: post.videoDuration || 0,
@@ -101,26 +96,55 @@ const mapPost = (post) => ({
   videoId: post.videoId || '',
 });
 
-const hasDeckMedia = (post) =>
-  Boolean(
-    (Array.isArray(post.houseImages) && post.houseImages.find(Boolean)) ||
-      post.videoUrl ||
-      post.videoThumbnail
+const getPostImage = post => {
+  const image = (Array.isArray(post.houseImages) && post.houseImages.find(Boolean))
+    || post.videoThumbnail
+    || post.imageUrl;
+  if (typeof image === 'string') return image;
+  if (image?.uri || image?.url) return image.uri || image.url;
+
+  const videoUrl = post.videoUrl;
+  if (!videoUrl?.includes('res.cloudinary.com')) return null;
+  const uploadMarker = '/video/upload/';
+  if (!videoUrl.includes(uploadMarker)) return null;
+  return videoUrl
+    .replace(uploadMarker, '/video/upload/so_5/')
+    .replace(/\.[^/.?]+(?=\?|$)/, '.jpg');
+};
+
+const buildHomeSections = posts => {
+  const trendingPosts = posts.filter(
+    post => post.status !== 'stopped' && post.trending && getPostImage(post)
   );
 
-const WelcomeHomeScreen = ({ navigation, language }) => {
-  const { isDarkMode } = useTheme();
+  return [{ key: 'trending', posts: trendingPosts }];
+};
+
+const makeProtectedHomeSections = sections => sections.map(section => ({
+  ...section,
+  posts: section.posts.map(post => {
+    const postData = { ...post };
+    for (const key of ['avatar', 'userAvatar', 'logo', 'frontImage', 'imageUrl', 'videoThumbnail', 'images', 'products']) {
+      delete postData[key];
+    }
+    return { ...postData, houseImages: [getPostImage(post)] };
+  }),
+}));
+
+const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
+  const { theme, isDarkMode } = useTheme();
   const { setTabMode } = useTabMode();
   const [activeCard, setActiveCard] = useState('buySell');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [loading, setLoading] = useState(true);
 
   const [allPosts, setAllPosts] = useState([]);
+  const [featuredSections, setFeaturedSections] = useState([]);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const homeStartedAt = useRef(Date.now());
+  const firstUsableLogged = useRef(false);
+  const firstProductsLogged = useRef(false);
 
   const t = translations[language] || translations.English;
-
-  const scaleAnim = useRef(new Animated.Value(1)).current;
 
   const colors = {
     background: isDarkMode ? '#111' : '#ffffff',
@@ -138,60 +162,89 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
     authButtonBg: isDarkMode ? '#3a3a3a' : '#e8e8e8',
     howItWorksBg: isDarkMode ? '#2a2a2a' : '#ffffff',
   };
-
-  useEffect(() => {
-    if (loading) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(scaleAnim, {
-            toValue: 1.2,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-          Animated.timing(scaleAnim, {
-            toValue: 1,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-        ])
-      ).start();
-    }
-  }, [loading, scaleAnim]);
+  const deckColors = {
+    ...colors,
+    login: theme.login || '#47ae87',
+    brand: theme.login || '#47ae87',
+    title: colors.textPrimary,
+    text: colors.textPrimary,
+    overlay: '#000000',
+    glow: 'rgba(71, 174, 134, 0.16)',
+    glowShadow: theme.login || '#47ae87',
+  };
 
   const fetchPosts = useCallback(async () => {
-    setLoading(true);
-    const cachedFeed = await offlineDatabase.getRecord('feed', 'page-1');
-    if (cachedFeed) {
-      setAllPosts(
-        (await mediaCache.hydrate(cachedFeed))
-          .map(mapPost)
-          .filter((p) => p.status !== 'stopped')
-      );
-    }
-    if (!networkStatus.get().isOnline) {
-      setLoading(false);
-      return;
-    }
-    try {
-      const postsResponse = await axios.get(`${BASE_URL}/api/posts`, {
+    const isOnline = networkStatus.get().isOnline;
+    const feedRequest = isOnline
+      ? axios.get(`${BASE_URL}/api/posts`, {
         params: { page: 1, limit: 50 },
-      });
+        timeout: 8000,
+      }).then(response => ({ response }), error => ({ error }))
+      : null;
+    const [cachedFeed, cachedSections] = await Promise.all([
+      offlineDatabase.getRecord('feed', 'page-1'),
+      offlineDatabase.getRecord('home', 'featured-sections'),
+    ]);
+    if (Array.isArray(cachedFeed)) {
+      const cachedPosts = cachedFeed.map(mapPost).filter(post => post.status !== 'stopped');
+      setAllPosts(cachedPosts);
+      setFeaturedSections(buildHomeSections(cachedPosts));
+    } else if (cachedSections?.length) {
+      const cachedTrending = cachedSections.find(section => section.key === 'trending');
+      const cachedPosts = (cachedTrending?.posts || []).map(mapPost).filter(post => post.trending);
+      setAllPosts(cachedPosts);
+      setFeaturedSections(buildHomeSections(cachedPosts));
+    }
+    if (!feedRequest) return;
+    try {
+      const requestResult = await feedRequest;
+      if (requestResult.error) throw requestResult.error;
+      const postsResponse = requestResult.response;
       const activePosts = (postsResponse.data.posts || [])
         .map(mapPost)
         .filter((p) => p.status !== 'stopped');
       setAllPosts(activePosts);
-      await offlineDatabase.putRecord(
+      const nextSections = buildHomeSections(activePosts);
+      setFeaturedSections(nextSections);
+
+      offlineDatabase.putRecord(
         'feed',
         'page-1',
-        await mediaCache.hydrate(postsResponse.data.posts || []),
+        postsResponse.data.posts || [],
         { priority: 'medium' }
-      );
+      ).catch(() => {});
+      const imageSections = nextSections.map(section => ({
+        ...section,
+        posts: section.posts.slice(0, 3),
+      }));
+      const hydratedSections = await mediaCache.hydrate(makeProtectedHomeSections(imageSections), {
+        protected: true,
+      });
+      setFeaturedSections(nextSections.map((section, sectionIndex) => ({
+        ...section,
+        posts: section.posts.map((post, postIndex) => ({
+          ...post,
+          _homeImageUri: postIndex < 3
+            ? getPostImage(hydratedSections[sectionIndex]?.posts?.[postIndex] || {})
+            : undefined,
+        })),
+      })));
+      await offlineDatabase.putRecord('home', 'featured-sections', hydratedSections, {
+        priority: 'high',
+        protected: true,
+      });
     } catch (error) {
       console.error('Posts fetch error:', error);
-    } finally {
-      setLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (!allPosts.length || firstProductsLogged.current) return;
+    firstProductsLogged.current = true;
+    if (typeof __DEV__ === 'undefined' || __DEV__) {
+      console.info(`[Perf] home-first-products ${Date.now() - homeStartedAt.current}ms count=${allPosts.length}`);
+    }
+  }, [allPosts]);
 
   useEffect(() => {
     fetchPosts();
@@ -208,7 +261,7 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
     navigation.navigate('PostDetail', { house: post, language });
   };
 
-  const handleUserProfilePress = (product) => {
+  const handleUserProfilePress = product => {
     const userId = product?.userId || product?.user?._id || product?.user;
     if (!userId) return;
 
@@ -267,35 +320,21 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
     action();
   };
 
-  // ---------------------------------------------------------------
-  // Hero deck data — Trending first, fallback to all posts with media.
-  // ---------------------------------------------------------------
-  const trendingPosts = allPosts.filter(
-    (post) => post.trending && hasDeckMedia(post)
-  );
-
-  const fallbackPosts = allPosts.filter((post) => hasDeckMedia(post));
-
-  const heroDeckPosts = (trendingPosts.length > 0 ? trendingPosts : fallbackPosts)
-    .slice(0, 8);
-
-  const deckTitle = trendingPosts.length > 0
-    ? t.trendingProducts
-    : t.popularProducts;
-
-  if (loading) {
-    return (
-      <ShaakaLoadingScreen
-        message={t.loading}
-        backgroundColor={isDarkMode ? '#111' : '#dddd'}
-        textColor={colors.textSecondary}
-      />
-    );
-  }
+  const homeSections = featuredSections.length
+    ? featuredSections
+    : buildHomeSections(allPosts);
 
   return (
     <SafeAreaView
       edges={['bottom', 'left', 'right']}
+      onLayout={() => {
+        if (firstUsableLogged.current) return;
+        firstUsableLogged.current = true;
+        finishStartupPerformance();
+        if ((typeof __DEV__ === 'undefined' || __DEV__) && launchStartedAt) {
+          console.info(`[Perf] launch-to-home-layout ${Date.now() - launchStartedAt}ms`);
+        }
+      }}
       style={[styles.safeArea, { backgroundColor: colors.background }]}
     >
       <View style={styles.curve} pointerEvents="none">
@@ -310,7 +349,7 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
               StyleSheet.absoluteFill,
               {
                 backgroundColor: isDarkMode
-                  ? 'rgba(0, 0, 0, 0.82)'
+                  ? 'rgba(0, 0, 0, 0.86)'
                   : 'rgba(224, 224, 224, 0.86)',
               },
             ]}
@@ -320,8 +359,8 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
               styles.curveTopExtra,
               {
                 backgroundColor: isDarkMode
-                  ? 'rgba(0, 0, 0, 0.35)'
-                  : 'rgba(245, 245, 245, 0.35)',
+                  ? 'rgba(0, 0, 0, 0)'
+                  : 'rgba(245, 245, 245, 0)',
               },
             ]}
           />
@@ -436,26 +475,26 @@ const WelcomeHomeScreen = ({ navigation, language }) => {
               </TouchableOpacity>
             </View>
 
-            <View style={styles.productSectionHeader}>
-              <Text style={[styles.productSectionTitle, { color: colors.textPrimary }]}>
-                {deckTitle}
-              </Text>
-              {trendingPosts.length > 0 && (
-                <View style={styles.trendingBadge}>
-                  <Ionicons name="flame" size={12} color="#fff" />
-                  <Text style={styles.trendingBadgeText}>{t.trendingProducts}</Text>
+            {homeSections.map(section => {
+              if (!section.posts?.length) return null;
+              return (
+                <View key={section.key} style={styles.heroSection}>
+                  <View style={styles.heroSectionHeader}>
+                    <View style={styles.heroSectionBadge}>
+                      <Ionicons name="flame" size={18} color="#fff" />
+                      <Text style={styles.heroSectionBadgeText}>{t.trendingProducts}</Text>
+                    </View>
+                  </View>
+                  <ProductHeroDeck
+                    products={section.posts}
+                    colors={deckColors}
+                    showProgress={false}
+                    onPressProduct={handlePostResultPress}
+                    onPressUserProfile={handleUserProfilePress}
+                  />
                 </View>
-              )}
-            </View>
-
-            <View style={styles.productSection}>
-              <ProductHeroDeck
-                products={heroDeckPosts}
-                colors={colors}
-                onPressProduct={handlePostResultPress}
-                onPressUserProfile={handleUserProfilePress}
-              />
-            </View>
+              );
+            })}
           </View>
         </ScrollView>
 
@@ -549,18 +588,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 20,
   },
-  topContent: {
-    alignItems: 'center',
-    width: '100%',
-  },
+  topContent: { alignItems: 'center', width: '100%' },
   welcomeText: {
     fontSize: Math.min(width * 0.07, 30),
     fontWeight: 'bold',
     fontFamily: 'Irish Grover',
     textAlign: 'center',
-    marginBottom: 16,
+    width: '100%',
+    marginBottom: 8,
   },
-
   selectionContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -586,46 +622,34 @@ const styles = StyleSheet.create({
   },
   selectionTitle: {
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '700',
     textAlign: 'center',
     flexShrink: 1,
   },
-
-  productSection: {
-    width: '92%',
-    marginTop: 20,
+  heroSection: {
+    width: '100%',
+    paddingTop: 20,
+    paddingBottom: 12,
     alignItems: 'center',
   },
-  productSectionHeader: {
+  heroSectionHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    width: '92%',
-    marginTop: 6,
-    marginBottom: 10,
+     alignItems: 'flex-start',
+    justifyContent: 'flex-start',
+    width: '100%',
+    marginBottom: 20,
+    paddingHorizontal: 4,
   },
-  productSectionTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  trendingBadge: {
+  heroSectionBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#d87428',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 12,
-    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 18,
+    gap: 6,
   },
-  trendingBadgeText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  seeAllText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
+  heroSectionBadgeText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   bottomContentContainer: {
     paddingHorizontal: 16,
     paddingVertical: 12,

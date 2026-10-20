@@ -39,7 +39,7 @@ const getDetectedHostUrl = () => {
 const CANDIDATE_API_URLS = [
   ENV_API_URL,
   getDetectedHostUrl(),
-  ...LOCAL_LAN_API_URLS,
+  ...LOCAL_LAN_API_URLS,     
   EMULATOR_API_URL,
   LOCALHOST_API_URL,
 ].filter(Boolean);

@@ -28,6 +28,11 @@ import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useBottomSheet } from '../context/BottomSheetContext';
 import AppAlert from '../utils/alert';
+import { OFFLINE_STORAGE_ENABLED_KEY, offlineDatabase, setOfflineStorageEnabled } from '../services/offlineDatabase';
+import { offlineStorage } from '../services/offlineStorage';
+import { mediaCache } from '../services/mediaCache';
+import { reelVideoCache } from '../services/reelVideoCache';
+import { startupPrefetch } from '../services/startupPrefetch';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BOTTOM_SHEET_HEIGHT = SCREEN_HEIGHT * 0.7;
@@ -40,6 +45,13 @@ const translations = {
   English: {
     settings: 'Settings',
     appearance: 'Appearance',
+    offlineData: 'Save data for offline use',
+    disableOfflineDataTitle: 'Turn off offline data?',
+    disableOfflineDataConfirm: 'Downloaded offline content and cached images will be deleted. Messages waiting to sync will be kept.',
+    cancel: 'Cancel',
+    offlineDataEnableFailed: 'Could not update offline data settings. Please try again.',
+    offlineDataCleared: 'Offline data cleared',
+    offlineDataClearFailed: 'Could not clear offline data. Please try again.',
     darkMode: 'Dark Mode',
     account: 'Account',
     personalInfo: 'Personal Information',
@@ -104,6 +116,13 @@ const translations = {
  Kinyarwanda: {
     settings: 'Igenamiterere',
     appearance: 'Igaragara rya shaaka',
+    offlineData: 'Bika amakuru ',
+    disableOfflineDataTitle: 'Uzime kubika amakuru yo gukoresha nta murongo?',
+    disableOfflineDataConfirm: 'Amakuru n’amafoto byari byarabitswe bizasibwa. Ubutumwa butaroherezwa buzasigara.',
+    cancel: 'Hagarika',
+    offlineDataEnableFailed: 'Ntibyashobotse guhindura igenamiterere. Ongera ugerageze.',
+    offlineDataCleared: 'Amakuru yabitswe yasibwe',
+    offlineDataClearFailed: 'Ntibyashobotse gusiba amakuru yabitswe. Ongera ugerageze.',
     darkMode: 'Kwijima',
     account: 'Konti',
     personalInfo: 'Amakuru bwite',
@@ -217,6 +236,8 @@ export default function SettingsScreen({ navigation, route, language = 'English'
   const { user, logout, refreshUser } = useAuth();
   const { showBottomSheet } = useBottomSheet();
   const [refreshing, setRefreshing] = useState(false);
+  const [offlineDataEnabled, setOfflineDataEnabled] = useState(true);
+  const [updatingOfflineData, setUpdatingOfflineData] = useState(false);
   const t = translations[language] || translations.English;
 
   // Screen-local swipe sheet state removed; all dialogs now use the shared global sheet.
@@ -231,6 +252,12 @@ export default function SettingsScreen({ navigation, route, language = 'English'
     };
 
     checkAdminSession();
+  }, []);
+
+  useEffect(() => {
+    AsyncStorage.getItem(OFFLINE_STORAGE_ENABLED_KEY)
+      .then(value => setOfflineDataEnabled(value !== 'false'))
+      .catch(() => setOfflineDataEnabled(true));
   }, []);
 
   // Collapsible sections
@@ -294,6 +321,40 @@ export default function SettingsScreen({ navigation, route, language = 'English'
     setRefreshing(true);
     await refreshUser();
     setRefreshing(false);
+  };
+
+  const updateOfflineDataPreference = async enabled => {
+    setUpdatingOfflineData(true);
+    try {
+      await setOfflineStorageEnabled(enabled);
+      setOfflineDataEnabled(enabled);
+      if (enabled) {
+        await startupPrefetch.run('settings-enabled');
+        return;
+      }
+      await mediaCache.clearCachedFiles();
+      await reelVideoCache.clear();
+      await Promise.all([
+        offlineDatabase.clearCachedData(),
+        offlineStorage.clear(),
+      ]);
+      AppAlert.alert(t.offlineDataCleared, '');
+    } catch (error) {
+      AppAlert.alert('Error', t.offlineDataEnableFailed);
+    } finally {
+      setUpdatingOfflineData(false);
+    }
+  };
+
+  const handleOfflineDataToggle = enabled => {
+    if (enabled) {
+      updateOfflineDataPreference(true);
+      return;
+    }
+    AppAlert.confirm(t.disableOfflineDataTitle, t.disableOfflineDataConfirm, [
+      { text: t.yes, onPress: () => updateOfflineDataPreference(false) },
+      { text: t.cancel, style: 'cancel' },
+    ]);
   };
 
   const openSocialLink = async (url, fallbackUrl) => {
@@ -455,6 +516,21 @@ export default function SettingsScreen({ navigation, route, language = 'English'
           </View>
         </View>
 
+        {/* OFFLINE DATA */}
+        <View style={styles.section}>
+          <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
+            <Text style={[styles.settingText1, { color: theme.text }]}>{t.offlineData}</Text>
+            <Switch
+              value={offlineDataEnabled}
+              onValueChange={handleOfflineDataToggle}
+              disabled={updatingOfflineData}
+              trackColor={{ false: '#767577', true: theme.accent }}
+              thumbColor={offlineDataEnabled ? '#fff' : '#f4f3f4'}
+            />
+          </View>
+          {updatingOfflineData && <ActivityIndicator color={theme.accent} />}
+        </View>
+
         {/* ACCOUNT (collapsible) */}
         <View style={styles.section}>
           <TouchableOpacity
@@ -594,6 +670,9 @@ const styles = StyleSheet.create({
   sectionHeader: { fontSize: 14, fontWeight: '600', textTransform: 'uppercase', marginBottom: 8, marginLeft: 4 },
   settingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 0 },
   settingText: { fontSize: 16 },
+  settingText1:{
+fontSize: 15 
+  },
   chevron: { fontSize: 20, fontWeight: '300', marginRight: 4 },
   versionText: { fontSize: 14 },
   languageToggle: { flexDirection: 'row', alignItems: 'center' },

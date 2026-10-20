@@ -90,7 +90,12 @@ router.post('/:id/products', auth, async (req, res) => {
     }
     place.products.push(product);
     await place.save();
-    res.status(201).json({ success: true, message: 'Product added', product });
+    res.status(201).json({
+      success: true,
+      message: 'Product added',
+      product: place.products[place.products.length - 1],
+      place,
+    });
   } catch (error) {
     console.error('POST /places/:id/products error:', error);
     res.status(500).json({ success: false, message: 'Server error' });

@@ -30,6 +30,7 @@ export const lightTheme = {
   nice:'#0000',
   search:'#e4e4e4ce',
   title:'#ffff',
+  reel:"#c4c3c3dd",
 };
 
 export const darkTheme = {
@@ -60,28 +61,24 @@ export const darkTheme = {
   nice:'#0000',
   search:'#e4e4e4ce',
   title:'#ffff',
+  reel:"#1a1a1a",
 };
 
 const ThemeContext = createContext();
 
 export const ThemeProvider = ({ children }) => {
   const [isDarkMode, setIsDarkMode] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     loadTheme();
   }, []);
 
   const loadTheme = async () => {
-    const loadingTimeout = setTimeout(() => setIsLoading(false), 3000);
     try {
       const saved = await AsyncStorage.getItem('isDarkMode');
       if (saved !== null) setIsDarkMode(JSON.parse(saved));
     } catch (error) {
       console.error(error);
-    } finally {
-      clearTimeout(loadingTimeout);
-      setIsLoading(false);
     }
   };
 
@@ -94,7 +91,7 @@ export const ThemeProvider = ({ children }) => {
   const theme = isDarkMode ? darkTheme : lightTheme;
 
   return (
-    <ThemeContext.Provider value={{ theme, isDarkMode, toggleTheme, isLoading }}>
+    <ThemeContext.Provider value={{ theme, isDarkMode, toggleTheme }}>
       {children}
     </ThemeContext.Provider>
   );

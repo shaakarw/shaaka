@@ -1,6 +1,11 @@
 // App.js
 import React, { useState, useCallback, Component, useEffect } from 'react';
-import { NavigationContainer, useNavigationContainerRef } from '@react-navigation/native';
+import {
+  DarkTheme,
+  DefaultTheme,
+  NavigationContainer,
+  useNavigationContainerRef,
+} from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
@@ -45,6 +50,7 @@ import AdminPostsScreen from './screens/AdminPostsScreen';
 import AdminReportsScreen from './screens/AdminReportsScreen';
 import AdminShopsScreen from './screens/AdminShopsScreen';
 import AdminBusinessAddScreen from './screens/AdminBusinessAddScreen';
+import BusinessIdeasAdminScreen from './screens/BusinessIdeasAdminScreen';
 import AddPostScreen from './screens/AddPostScreen';
 import ViewPlaceScreen from './screens/ViewPlaceScreen';
 import ViewShopScreen from './screens/ViewShopScreen';
@@ -430,7 +436,7 @@ const CustomTabBar = ({ state, navigation, theme }) => {
 */
 
 // ==================== MAIN TABS ====================
-const MainTabs = ({ language, toggleLanguage, theme, route }) => {
+const MainTabs = ({ language, toggleLanguage, theme, route, isLoading }) => {
   const refreshKey = route?.params?.refreshKey || 0;
 
   return (
@@ -444,7 +450,15 @@ const MainTabs = ({ language, toggleLanguage, theme, route }) => {
         {props => (
           <>
             <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={false} />
-            <WelcomeHomeScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+            {isLoading ? (
+              <ShaakaLoadingScreen
+                message="Loading..."
+                backgroundColor={theme.background}
+                textColor={theme.text}
+              />
+            ) : (
+              <WelcomeHomeScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+            )}
           </>
         )}
       </Tab.Screen>
@@ -503,6 +517,15 @@ const MainTabs = ({ language, toggleLanguage, theme, route }) => {
 // ==================== APP CONTENT ====================
 function AppContent() {
   const { theme, isDarkMode, isLoading } = useTheme();
+  const baseNavigationTheme = isDarkMode ? DarkTheme : DefaultTheme;
+  const navigationTheme = {
+    ...baseNavigationTheme,
+    colors: {
+      ...baseNavigationTheme.colors,
+      background: theme.background,
+      card: theme.background,
+    },
+  };
   const navigationRef = useNavigationContainerRef();
   const [language, setLanguage] = useState('Kinyarwanda'); // default language
   const [isOnline, setIsOnline] = useState(networkStatus.get().isOnline);
@@ -578,24 +601,13 @@ function AppContent() {
 
   // ---------- END ONLINE STATUS ----------
 
-  if (isLoading) {
-    return (
-      <>
-        <StatusBar style={isDarkMode ? 'light' : 'dark'} hidden={false} translucent={false} />
-        <ShaakaLoadingScreen
-          message="Loading..."
-          backgroundColor={isDarkMode ? '#111111' : '#dddddd'}
-        />
-      </>
-    );
-  }
-
   return (
     <>
       <StatusBar style={isDarkMode ? 'light' : 'dark'} hidden={false} translucent={false} />
       <TabModeProvider>
         <NavigationContainer
           ref={navigationRef}
+          theme={navigationTheme}
           onReady={() => setNavigationReady(true)}
           onStateChange={state => {
             const activeRoute = state?.routes?.[state.index];
@@ -608,7 +620,7 @@ function AppContent() {
           
           <Stack.Navigator initialRouteName="Main" screenOptions={{ headerShown: false }}>
             <Stack.Screen name="Main">
-              {props => <MainTabs {...props} language={language} toggleLanguage={toggleLanguage} theme={theme} />}
+              {props => <MainTabs {...props} language={language} toggleLanguage={toggleLanguage} theme={theme} isLoading={isLoading} />}
             </Stack.Screen>
             <Stack.Screen name="Preview">
               {props => (
@@ -623,6 +635,7 @@ function AppContent() {
                 <>
                   <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <BuyPostScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                  <BottomBar {...props} theme={theme} stackRouteName="BuyPost" />
                 </>
               )}
             </Stack.Screen>
@@ -719,6 +732,9 @@ function AppContent() {
 
             <Stack.Screen name="AdminBusinessAdd" options={{ headerShown: false }}>
               {props => <AdminBusinessAddScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
+            </Stack.Screen>
+            <Stack.Screen name="BusinessIdeasAdmin" options={{ headerShown: false }}>
+              {props => <BusinessIdeasAdminScreen {...props} language={language} />}
             </Stack.Screen>
 
             <Stack.Screen name="Notifications">

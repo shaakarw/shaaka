@@ -166,19 +166,22 @@ const runPlanExpiry = async () => {
  * Initialize all cron jobs.
  * Runs immediately on startup and then every hour.
  */
-const initCronJobs = () => {
+const initCronJobs = ({ initialDelayMs = 0 } = {}) => {
   console.log('[Cron] Initializing cron jobs...');
 
-  // Run immediately on startup
-  runDailyReset();
-  runAutoDelete();
-  runPlanExpiry();
+  const startJobs = () => {
+    runDailyReset();
+    runAutoDelete();
+    runPlanExpiry();
 
-  // Run every hour
-  const HOUR_IN_MS = 60 * 60 * 1000;
-  setInterval(runDailyReset, HOUR_IN_MS);
-  setInterval(runAutoDelete, HOUR_IN_MS);
-  setInterval(runPlanExpiry, HOUR_IN_MS);
+    const HOUR_IN_MS = 60 * 60 * 1000;
+    setInterval(runDailyReset, HOUR_IN_MS);
+    setInterval(runAutoDelete, HOUR_IN_MS);
+    setInterval(runPlanExpiry, HOUR_IN_MS);
+  };
+
+  if (initialDelayMs > 0) setTimeout(startJobs, initialDelayMs);
+  else startJobs();
 
   console.log('[Cron] Cron jobs scheduled (every hour).');
 };

@@ -117,6 +117,10 @@ exports.sendMessage = async (req, res) => {
         postId: replyPost.postId,
         contextId: replyPost.contextId || '',
         contextType,
+        shopId: replyPost.shopId || (contextType === 'shop' ? replyPost.contextId || replyPost.postId : ''),
+        mallId: replyPost.mallId || '',
+        lat: replyPost.lat ?? null,
+        lon: replyPost.lon ?? null,
         title: replyPost.title || postExists?.productName || 'Product',
         description: replyPost.description || postExists?.description || '',
         image: replyPost.image || postExists?.houseImages?.[0] || '',
@@ -346,6 +350,7 @@ exports.getConversations = async (req, res) => {
         conversationsMap.set(key, {
           postId: msg.postId,
           postTitle: msg.postTitle,
+          replyPost: msg.replyPost || null,
           otherUserId: otherId,
           otherUserName: senderKey === String(userId) ? msg.receiverName : msg.senderName,
           otherUserAvatar: senderKey === String(userId) ? msg.receiverAvatar : msg.senderAvatar,
@@ -355,6 +360,9 @@ exports.getConversations = async (req, res) => {
         });
       }
       const conv = conversationsMap.get(key);
+      if (!conv.replyPost && msg.replyPost) {
+        conv.replyPost = msg.replyPost;
+      }
       if (!conv.lastMessage || new Date(msg.createdAt) > new Date(conv.lastMessage.createdAt)) {
         conv.lastMessage = msg;
       }

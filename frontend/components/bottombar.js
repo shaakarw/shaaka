@@ -116,7 +116,7 @@ const BottomBar = ({ state, navigation, theme, stackRouteName }) => {
 };
 
 const styles = StyleSheet.create({
-  tabBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingTop: 10, paddingHorizontal: 6, borderTopWidth: StyleSheet.hairlineWidth, shadowColor: '#000', shadowOffset: { width: 0, height: -2 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 8, zIndex: 20 },
+  tabBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingTop: 10, paddingHorizontal: 6, borderTopWidth: StyleSheet.hairlineWidth, shadowColor: '#00000000', shadowOffset: { width: 0, height: -2 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 8, zIndex: 20 },
   tabItem: { flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 44 },
   settingsShortcutCircle: { width: 40, height: 40, borderRadius: 20, borderWidth: 0, borderColor: '#47ae87', alignItems: 'center', justifyContent: 'center' },
 });

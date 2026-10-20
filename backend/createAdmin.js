@@ -16,8 +16,11 @@ const createAdmin = async () => {
     await mongoose.connect(MONGO_URI);
     console.log('✅ Connected to MongoDB');
 
-    const phone = '0799882580';
-    const password = '1234';
+    const phone = process.env.ADMIN_PHONE;
+    const password = process.env.ADMIN_PASSWORD;
+    if (!phone || !password) {
+      throw new Error('ADMIN_PHONE and ADMIN_PASSWORD must be configured');
+    }
 
     console.log('🔍 Checking for admin user with phone:', phone);
 
@@ -35,17 +38,15 @@ const createAdmin = async () => {
 
       const isMatch = await bcrypt.compare(password, existing.password);
       if (!isMatch) {
-        existing.password = await bcrypt.hash(password, 10);
+        existing.password = password;
         await existing.save();
-        console.log('🔑 Password reset to "1234"');
+        console.log('🔑 Admin password reset');
       }
 
       console.log('✅ Admin is ready – you can now log in with:');
       console.log(`   Phone: ${phone}`);
-      console.log(`   Password: ${password}`);
     } else {
       console.log('❌ Admin not found – creating new...');
-      const hashed = await bcrypt.hash(password, 10);
       // ✅ Use a valid 16‑digit ID number
       const idNumber = '1234567890123456';
 
@@ -53,7 +54,7 @@ const createAdmin = async () => {
         phone,
         username: 'Admin',
         idNumber: idNumber,          // Now 16 digits
-        password: hashed,
+        password,
         role: 'admin',
         name: 'Admin',
         avatar: '',
@@ -63,7 +64,6 @@ const createAdmin = async () => {
       });
       console.log('✅ Admin created with ID:', admin._id);
       console.log(`   Phone: ${phone}`);
-      console.log(`   Password: ${password}`);
     }
 
     await mongoose.disconnect();

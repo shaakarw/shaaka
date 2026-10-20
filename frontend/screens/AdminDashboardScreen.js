@@ -393,7 +393,7 @@ const AdminDashboardScreen = ({ navigation, language }) => {
       },
       { key: 'posts', icon: 'document-text-outline', label: 'Posts', onPress: () => navigation.navigate('AdminPosts') },
       { key: 'reports', icon: 'flag-outline', label: 'Reports', onPress: () => navigation.navigate('AdminReports') },
-      { key: 'business', icon: 'briefcase-outline', label: 'Ideas', onPress: () => navigation.navigate('AdminBusinessAdd') },
+      { key: 'business', icon: 'briefcase-outline', label: 'Ideas', onPress: () => navigation.navigate('BusinessIdeasAdmin') },
       { key: 'chat', icon: 'chatbubbles-outline', label: t.liveChat, onPress: () => navigation.navigate('AdminLiveChat') },
       { key: 'password', icon: 'lock-closed-outline', label: t.passwordAccess, onPress: () => navigation.navigate('ChangePassword', { adminMode: true }) },
       {
@@ -701,7 +701,7 @@ const AdminDashboardScreen = ({ navigation, language }) => {
         ]}
       >
         <View style={styles.topBarHeading}>
-          <Text style={[styles.topBarEyebrow, { color: theme.accent }]}>SHAaka / ADMIN</Text>
+          <Text style={[styles.topBarEyebrow, { color: theme.accent }]}>Shaaka / ADMIN</Text>
           <Text style={[styles.topBarTitle, { color: theme.text }]} numberOfLines={1}>Dashboard</Text>
         </View>
         <TouchableOpacity

@@ -18,6 +18,7 @@ router.get('/', getAllPosts);
 router.post('/', auth, upload.fields([
   { name: 'images', maxCount: 10 },
   { name: 'video', maxCount: 1 },
+  { name: 'thumbnail', maxCount: 1 },
 ]), createPost);
 router.get('/me', auth, getMyPosts);
 router.get('/saved', auth, getSavedPosts);

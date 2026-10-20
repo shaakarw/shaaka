@@ -1,4 +1,5 @@
 // controllers/postController.js
+const mongoose = require('mongoose');
 const Post = require('../models/Post');
 const User = require('../models/User');
 const SavedPost = require('../models/SavedPost');
@@ -13,6 +14,22 @@ const {
   getTodayUsageFromDB,
   MAX_IMAGES_PER_POST,
 } = require('../utils/subscriptionHelpers_clean');
+
+const encodePostCursor = post => Buffer.from(JSON.stringify({
+  createdAt: post.createdAt.toISOString(),
+  id: String(post._id),
+})).toString('base64url');
+
+const decodePostCursor = value => {
+  try {
+    const decoded = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+    const createdAt = new Date(decoded.createdAt);
+    if (!Number.isFinite(createdAt.getTime()) || !/^[a-f\d]{24}$/i.test(decoded.id)) return null;
+    return { createdAt, id: decoded.id };
+  } catch {
+    return null;
+  }
+};
 
 // ---------- CREATE POST ----------
 // @route   POST /api/posts
@@ -46,6 +63,7 @@ exports.createPost = async (req, res) => {
 
     const imageFiles = (req.files && req.files.images) || [];
     const videoFile = req.files?.video?.[0];
+    const videoThumbnailFile = req.files?.thumbnail?.[0];
 
     if (videoFile) {
       if (user.allowVideoUpload !== true) {
@@ -129,6 +147,9 @@ exports.createPost = async (req, res) => {
     if (imageFiles.length === 0 && !videoFile) {
       return res.status(400).json({ success: false, message: 'Please attach at least one image or video to create a post.' });
     }
+    if (videoThumbnailFile && !videoFile) {
+      return res.status(400).json({ success: false, message: 'A video thumbnail requires an attached video.' });
+    }
 
     const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
     const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
@@ -137,6 +158,9 @@ exports.createPost = async (req, res) => {
     }
     if (videoFile && (!videoFile.buffer || videoFile.buffer.length > MAX_VIDEO_BYTES)) {
       return res.status(400).json({ success: false, message: 'Video exceeds the 50 MB size limit.' });
+    }
+    if (videoThumbnailFile && (!videoThumbnailFile.buffer || videoThumbnailFile.buffer.length > MAX_IMAGE_BYTES)) {
+      return res.status(400).json({ success: false, message: 'Video thumbnail exceeds the 3 MB size limit.' });
     }
 
     // ---------- 7. Handle image uploads ----------
@@ -172,6 +196,7 @@ exports.createPost = async (req, res) => {
     let videoUrl = '';
     let videoHlsUrl = '';
     let videoThumbnail = '';
+    let videoThumbnailStorageKey = '';
     let videoId = '';
     let videoStorageKey = '';
     let uploadedVideoDuration = Number(req.body.videoDuration) || 0;
@@ -188,7 +213,19 @@ exports.createPost = async (req, res) => {
       videoUrl = storageService.getMediaUrl(videoStorageKey, {
         origin: storageService.getRequestOrigin(req),
       });
-      videoHlsUrl = videoUrl;
+      if (videoThumbnailFile) {
+        const thumbnailResult = await storageService.uploadMedia({
+          buffer: videoThumbnailFile.buffer,
+          mimeType: videoThumbnailFile.mimetype,
+          folder: `posts/${postId}/thumbnails`,
+          maxBytes: MAX_IMAGE_BYTES,
+        });
+        uploadedStorageKeys.push(thumbnailResult.storageKey);
+        videoThumbnailStorageKey = thumbnailResult.storageKey;
+        videoThumbnail = storageService.getMediaUrl(videoThumbnailStorageKey, {
+          origin: storageService.getRequestOrigin(req),
+        });
+      }
     }
 
     const postData = {
@@ -212,6 +249,7 @@ exports.createPost = async (req, res) => {
       videoStorageKey,
       videoDuration: uploadedVideoDuration,
       videoThumbnail,
+      videoThumbnailStorageKey,
       videoLink: req.body.videoLink || '',
       productName: productName || undefined,
     };
@@ -259,6 +297,79 @@ exports.createPost = async (req, res) => {
 // @route   GET /api/posts
 exports.getAllPosts = async (req, res) => {
   try {
+    if (req.query.pagination === 'cursor') {
+      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
+      const filter = {
+        status: { $ne: 'stopped' },
+        createdAt: { $type: 'date' },
+      };
+      if (req.query.trending === 'true') filter.trending = true;
+
+      if (req.query.cursor) {
+        const cursor = decodePostCursor(String(req.query.cursor));
+        if (!cursor) {
+          return res.status(400).json({ success: false, message: 'Invalid feed cursor.' });
+        }
+        filter.$or = [
+          { createdAt: { $lt: cursor.createdAt } },
+          { createdAt: cursor.createdAt, _id: { $lt: new mongoose.Types.ObjectId(cursor.id) } },
+        ];
+      }
+
+      const batchSize = Math.min(Math.max(limit * 2, 40), 100);
+      const posts = [];
+      let batchFilter = filter;
+      while (posts.length <= limit) {
+        const candidates = await Post.find(batchFilter)
+          .sort({ createdAt: -1, _id: -1 })
+          .limit(batchSize)
+          .select('-videoStorageKey -videoThumbnailStorageKey -houseImageStorageKeys')
+          .populate('user', 'username avatar blocked accountDeletionStatus')
+          .lean();
+        if (!candidates.length) break;
+
+        for (const post of candidates) {
+          const creator = post.user;
+          if (
+            !creator ||
+            creator.blocked === true ||
+            creator.accountDeletionStatus === 'deleted'
+          ) {
+            continue;
+          }
+          post.user = {
+            _id: creator._id,
+            username: creator.username,
+            avatar: creator.avatar,
+          };
+          posts.push(post);
+          if (posts.length > limit) break;
+        }
+
+        if (posts.length > limit || candidates.length < batchSize) break;
+        const lastCandidate = candidates[candidates.length - 1];
+        batchFilter = {
+          ...filter,
+          $or: [
+            { createdAt: { $lt: lastCandidate.createdAt } },
+            {
+              createdAt: lastCandidate.createdAt,
+              _id: { $lt: lastCandidate._id },
+            },
+          ],
+        };
+      }
+
+      const hasMore = posts.length > limit;
+      if (hasMore) posts.pop();
+      return res.json({
+        success: true,
+        posts,
+        hasMore,
+        nextCursor: hasMore && posts.length ? encodePostCursor(posts[posts.length - 1]) : null,
+      });
+    }
+
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.max(parseInt(req.query.limit, 10) || 20, 1);
     const skip = (page - 1) * limit;
@@ -269,7 +380,8 @@ exports.getAllPosts = async (req, res) => {
         .sort({ trending: -1, featured: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate('user', 'username avatar'),
+        .populate('user', 'username avatar')
+        .lean(),
       Post.countDocuments(filter),
     ]);
 
@@ -387,4 +499,3 @@ exports.deletePost = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
-

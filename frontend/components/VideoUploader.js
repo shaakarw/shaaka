@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, StyleSheet } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, StyleSheet, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
+import { Video as VideoCompressor, getVideoMetaData } from '../utils/videoCompressor';
 
-const VideoUploader = ({ value, onChange, videoLink, onVideoLinkChange, theme, disabled = false, disabledMessage = 'Video uploads are not allowed for this account. Please contact the admin for support.' }) => {
+const VideoUploader = ({ value, onChange, videoLink, onVideoLinkChange, theme, maxMediaHeight, disabled = false, disabledMessage = 'Video uploads are not allowed for this account. Please contact the admin for support.' }) => {
   const [picking, setPicking] = useState(false);
+  const [resizeNotice, setResizeNotice] = useState('');
   const selectVideo = async () => {
     if (disabled) {
       onChange(null, disabledMessage);
@@ -21,9 +23,47 @@ const VideoUploader = ({ value, onChange, videoLink, onVideoLinkChange, theme, d
       });
       if (!result.canceled && result.assets?.[0]) {
         const asset = result.assets[0];
-        onChange({ uri: asset.uri, type: asset.mimeType || 'video/mp4', name: asset.fileName || `post_${Date.now()}.mp4`, duration: asset.duration ? asset.duration / 1000 : 0, width: asset.width, height: asset.height });
+        let uri = asset.uri;
+        let dimensions = Platform.OS === 'web'
+          ? { width: asset.width, height: asset.height }
+          : await getVideoMetaData(uri);
+        const sourceHeight = Number(asset.height) || Number(dimensions.height);
+        let resized = false;
+
+        if (!Number.isFinite(sourceHeight)) {
+          throw new Error('Unable to read this video\'s dimensions. Please select another video.');
+        }
+        if (sourceHeight > maxMediaHeight) {
+          if (Platform.OS === 'web') {
+            throw new Error(`This video is too tall for your phone. Please resize it to a maximum height of ${maxMediaHeight} pixels before selecting it.`);
+          }
+          uri = await VideoCompressor.compress(uri, {
+            compressionMethod: 'manual',
+            maxSize: maxMediaHeight,
+            minimumFileSizeForCompress: 0,
+          });
+          dimensions = await getVideoMetaData(uri);
+          if (!Number.isFinite(Number(dimensions.height)) || Number(dimensions.height) > maxMediaHeight) {
+            throw new Error(`The resized video still exceeds the ${maxMediaHeight}-pixel height limit. Please choose a shorter-height video.`);
+          }
+          resized = true;
+        }
+
+        setResizeNotice(resized ? `Video resized to fit the ${maxMediaHeight}-pixel height limit.` : '');
+        const extension = String(dimensions.extension || 'mp4').toLowerCase();
+        onChange({
+          uri,
+          type: resized ? (extension === 'mov' ? 'video/quicktime' : `video/${extension}`) : asset.mimeType || 'video/mp4',
+          name: resized ? `post_${Date.now()}.${extension}` : asset.fileName || `post_${Date.now()}.mp4`,
+          duration: asset.duration ? asset.duration / 1000 : Number(dimensions.duration) || 0,
+          width: Number(dimensions.width) || Number(asset.width),
+          height: Number(dimensions.height) || Number(asset.height),
+          originalWidth: Number(asset.width) || Number(dimensions.width),
+          originalHeight: sourceHeight,
+        });
       }
     } catch (error) {
+      setResizeNotice('');
       onChange(null, error.message || 'Unable to select video.');
     } finally {
       setPicking(false);
@@ -41,11 +81,12 @@ const VideoUploader = ({ value, onChange, videoLink, onVideoLinkChange, theme, d
         <Text style={[styles.buttonText, { color: disabled ? theme.textSecondary : theme.text }]}>{value ? 'Change video' : disabled ? 'Video not allowed' : 'Add a video'}</Text>
       </TouchableOpacity>
       {value ? (
-        <TouchableOpacity style={styles.remove} onPress={() => onChange(null)}>
+        <TouchableOpacity style={styles.remove} onPress={() => { setResizeNotice(''); onChange(null); }}>
           <Ionicons name="close-circle" size={22} color="#d87428" />
           <Text style={{ color: theme.textSecondary }}>Remove video</Text>
         </TouchableOpacity>
       ) : null}
+      {resizeNotice ? <Text style={[styles.notice, { color: theme.textSecondary }]}>{resizeNotice}</Text> : null}
       <TextInput
         style={[styles.linkInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.cardBackground }]}
         placeholder="Video link (optional)"
@@ -66,6 +107,7 @@ const styles = StyleSheet.create({
   button: { minHeight: 54, borderWidth: 1, borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
   buttonText: { fontSize: 14, fontWeight: '600' },
   remove: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 8 },
+  notice: { fontSize: 12, marginTop: 8 },
   linkInput: { height: 46, borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, marginTop: 10 },
 });
 

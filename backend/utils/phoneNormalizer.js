@@ -37,7 +37,7 @@ function normalizeForAuth(raw) {
   if (digits.startsWith('250')) {
     const rest = digits.slice(3);
     if (rest.length === 9 && rest.startsWith('7')) {
-      return rest;
+      return `0${rest}`;
     }
     return null;
   }

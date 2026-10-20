@@ -5,6 +5,7 @@ import {
   StyleSheet,
   Text,
   Animated,
+  Easing,
   SafeAreaView,
   TextInput,
   TouchableOpacity,
@@ -159,6 +160,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       savedPlacesHint: 'Tap the ❤️ on any place to save it.',
       deleteShop: 'Delete Shop',
       deleteConfirm: 'Are you sure you want to delete this place?',
+      deleteMallShopConfirm: 'Are you sure you want to delete this shop from the mall?',
       deleteCancel: 'Cancel',
       deleteOk: 'Delete',
       deleteError: 'Error',
@@ -206,6 +208,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       savedPlacesHint: 'Kanda  kuri ahantu hose kugirango ubibike.',
       deleteShop: 'Siba iduka',
       deleteConfirm: 'Ese urabyemera gusiba iri duka?',
+      deleteMallShopConfirm: 'Ese urashaka gusiba iri duka ryo mu isoko rinini?',
       deleteCancel: 'Reka',
       deleteOk: 'Siba',
       deleteError: 'Ikibazo',
@@ -276,10 +279,12 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   const [showSearchPanel, setShowSearchPanel] = useState(false);
 
   const [allMallShops, setAllMallShops] = useState([]);
+  const [myMallShops, setMyMallShops] = useState([]);
   const [allMallShopsLoaded, setAllMallShopsLoaded] = useState(false);
   const [shopSearchResults, setShopSearchResults] = useState([]);
 
-  const scaleAnim = useRef(new Animated.Value(1)).current;
+  // 👇 NEW: spin animation replaces the old scale pulse
+  const spinAnim = useRef(new Animated.Value(0)).current;
   const isClearingRoute = useRef(false);
   const isRouteActive = useRef(false);
 
@@ -355,16 +360,29 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     })();
   }, []);
 
+  // 👇 SPINNING animation (replaces the previous scale pulse)
   useEffect(() => {
-    if (loading) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(scaleAnim, { toValue: 1.2, duration: 1000, useNativeDriver: true }),
-          Animated.timing(scaleAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
-        ])
-      ).start();
-    }
-  }, [loading]);
+    if (!loading) return undefined;
+
+    spinAnim.setValue(0);
+    const animation = Animated.loop(
+      Animated.timing(spinAnim, {
+        toValue: 1,
+        duration: 2400,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
+    );
+    animation.start();
+
+    return () => animation.stop();
+  }, [loading, spinAnim]);
+
+  // Interpolate the animated value into a 0deg → 360deg rotation
+  const spin = spinAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -475,6 +493,43 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   };
 
+  const fetchMyMallShops = useCallback(async () => {
+    try {
+      const token = await AsyncStorage.getItem('userToken');
+      if (!token) {
+        setMyMallShops([]);
+        return;
+      }
+      if (!networkStatus.get().isConnected || !networkStatus.get().isInternetReachable) {
+        const cachedShops = await mapOfflineCache.getMallShops();
+        const viewerId = user?._id || user?.id;
+        setMyMallShops(cachedShops.filter(shop => {
+          const owner = shop.owner || shop.ownerId || shop.userId;
+          const ownerId = typeof owner === 'object' ? owner?._id || owner?.id : owner;
+          return viewerId && String(ownerId) === String(viewerId);
+        }));
+        return;
+      }
+      const response = await axios.get(`${BASE_URL}/api/mall-shops/mine`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const ownedShops = response.data?.shops || [];
+      setMyMallShops(ownedShops);
+      setAllMallShops(current => {
+        const otherShops = current.filter(shop =>
+          !ownedShops.some(owned => String(owned._id) === String(shop._id))
+        );
+        const updatedShops = [...ownedShops, ...otherShops];
+        mapOfflineCache.saveMallShops(updatedShops).catch(error => {
+          console.warn('Could not cache owned mall shops:', error.message);
+        });
+        return updatedShops;
+      });
+    } catch (error) {
+      console.error('Error fetching owned mall shops:', error);
+    }
+  }, [user?._id, user?.id]);
+
   // Favourites
   const loadFavoriteIds = async () => {
     try {
@@ -493,7 +548,8 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     useCallback(() => {
       autoOpenedMyShops.current = false;
       loadFavoriteIds();
-    }, [])
+      fetchMyMallShops();
+    }, [fetchMyMallShops])
   );
 
   useEffect(() => networkStatus.subscribe(status => {
@@ -570,10 +626,8 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     if (!params.showMallShops) return;
 
     const tryShowMallShops = async () => {
-      // ensure mall shops are loaded
       if (!allMallShopsLoaded) await fetchAllMallShops();
       if (!mapReady || !allMallShopsLoaded) return;
-      // convert mall shops into place-like objects and add to map
       const mallPlaces = allMallShops.map(s => buildMallPlaceFromShop(s));
       if (webViewRef.current && mallPlaces.length > 0) {
         webViewRef.current.injectJavaScript(`
@@ -589,7 +643,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   // Center on the user in Rwanda, or the closest shop when they are outside it.
   useEffect(() => {
-    if (initialNearestSet.current) return; // already done
+    if (initialNearestSet.current) return;
     if (!mapReady || !userLocation || !webViewRef.current) return;
 
     const isUserInRwanda =
@@ -748,7 +802,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       if (isOnline) fetchShopsBySearch(trimmed);
     }
 
-    // Filter map markers to show only matching local places
     const matchedIds = matched.map(p => p._id);
     const nearbyIds = nearby.map(p => p._id);
     const allMatchIds = [...new Set([...matchedIds, ...nearbyIds])];
@@ -914,21 +967,92 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   const buildMallPlaceFromShop = (shop) => {
     const mallName = shop.mall?.name || shop.mallName || 'Shopping Mall';
-    const mallLat = shop.mall?.lat || shop.lat || 0;
-    const mallLon = shop.mall?.lon || shop.lon || 0;
+    const shopId = String(shop._id || shop.id || shop.shopId || '');
+    const mallLat = shop.lat ?? shop.mall?.lat ?? 0;
+    const mallLon = shop.lon ?? shop.mall?.lon ?? 0;
 
     return {
-      _id: shop.mall?._id || shop.mallId || shop._id,
-      name: mallName,
+      _id: shopId,
+      id: shopId,
+      shopId,
+      type: 'mallshop',
+      name: shop.name || shop.title || mallName,
       category: 'shoppingmall',
+      icon: 'store',
       lat: mallLat,
       lon: mallLon,
-      address: shop.mall?.address || shop.address || '',
+      address: shop.address || shop.mall?.address || '',
+      mallName,
+      shopNumber: shop.shopNumber || '',
       images: {
         street: shop.images?.frontImage || shop.images?.frontVideo || null,
       },
     };
   };
+
+  useEffect(() => {
+    const requestedShopId = route?.params?.focusMallShopId;
+    if (!requestedShopId || !mapReady || !webViewRef.current) return;
+
+    const listedShop = allMallShops.find(shop =>
+      String(shop._id || shop.id || shop.shopId) === String(requestedShopId)
+    );
+    const requestedShop = listedShop || route?.params?.focusMallShop;
+    if (!requestedShop) return;
+
+    const mapShop = buildMallPlaceFromShop({ ...requestedShop, _id: requestedShopId });
+    if (mapShop.lat && mapShop.lon) {
+      setSingleSelectedPlaceId(mapShop.id);
+      webViewRef.current.injectJavaScript(`
+        if (window.addPlaces) window.addPlaces([${JSON.stringify(mapShop)}]);
+        if (window.mapInstance) {
+          window.mapInstance.flyTo({ center: [${mapShop.lon}, ${mapShop.lat}], zoom: 17 });
+        }
+        if (window.highlightSinglePlace) window.highlightSinglePlace(${JSON.stringify(mapShop.id)});
+      `);
+    }
+    const openDetails = route?.params?.openMallShopDetails;
+    navigation.setParams({
+      focusMallShopId: undefined,
+      focusMallShop: undefined,
+      openMallShopDetails: undefined,
+    });
+    if (openDetails) navigation.navigate('ViewShop', { shopId: requestedShopId });
+  }, [route?.params?.focusMallShopId, route?.params?.focusMallShop, route?.params?.openMallShopDetails, mapReady, allMallShops, navigation]);
+
+  useEffect(() => {
+    const context = route?.params?.openPlaceContext;
+    if (!context || !mapReady) return;
+
+    const placeId = context.contextId || context.postId || context._id;
+    const place = places.find(item => String(item._id || item.id) === String(placeId)) || {
+      _id: placeId,
+      id: placeId,
+      name: context.title || 'Place',
+      description: context.description || '',
+      category: context.category || 'other',
+      address: context.location || '',
+      lat: context.lat,
+      lon: context.lon,
+      location: {
+        latitude: context.lat,
+        longitude: context.lon,
+      },
+      images: { street: context.image || '' },
+      userId: context.ownerId,
+    };
+
+    if (place.lat && place.lon && webViewRef.current) {
+      webViewRef.current.injectJavaScript(`
+        if (window.mapInstance) {
+          window.mapInstance.flyTo({ center: [${place.lon}, ${place.lat}], zoom: 17 });
+        }
+        if (window.highlightSinglePlace) window.highlightSinglePlace(${JSON.stringify(String(placeId))});
+      `);
+    }
+    navigation.setParams({ openPlaceContext: undefined });
+    navigation.navigate('ViewPlace', { place });
+  }, [route?.params?.openPlaceContext, mapReady, places, navigation]);
 
   const handleShopResultPress = (shop) => {
     const mapLocation = {
@@ -1027,6 +1151,10 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         if (!can) return;
 
         const place = data.place;
+        if (place.type === 'mallshop' && place.shopId) {
+          navigation.navigate('ViewShop', { shopId: place.shopId });
+          return;
+        }
         if (place.address && typeof place.address === 'object') {
           place.address = getAddressString(place);
         }
@@ -1037,7 +1165,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   };
 
-  // -------------------- CLEAR ROUTE (removes line and closes panel) --------------------
+  // -------------------- CLEAR ROUTE --------------------
   const clearRoute = () => {
     isClearingRoute.current = true;
     if (webViewRef.current) {
@@ -1055,7 +1183,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }, 500);
   };
 
-  // -------------------- DRAW ROUTE with routeColor (white in dark mode, black in light) --------------------
+  // -------------------- DRAW ROUTE --------------------
   const drawRouteToPlace = async (place, profile = 'foot') => {
     if (!place?.lat || !place?.lon) return;
 
@@ -1078,7 +1206,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       const { latitude, longitude } = location.coords;
       routeDestinationRef.current = { lat: place.lat, lon: place.lon };
 
-      // ★★★ Dynamic route color: black in light mode, white in dark mode ★★★
       const routeColor = isDarkMode ? '#FFFFFF' : '#000000';
 
       if (webViewRef.current) {
@@ -1170,13 +1297,22 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   };
 
   // My Shops
-  const userPlaces = places.filter(p => p.userId === user?._id);
+  const viewerId = user?._id || user?.id;
+  const userPlaces = places.filter(place => {
+    const owner = place.userId || place.owner || place.ownerId;
+    const ownerId = typeof owner === 'object' ? owner?._id || owner?.id : owner;
+    return viewerId && String(ownerId) === String(viewerId);
+  });
+  const myBusinesses = [
+    ...userPlaces,
+    ...myMallShops.map(shop => ({ ...shop, isMallShop: true })),
+  ];
 
   useEffect(() => {
-    if (!mapReady || !user?._id || userPlaces.length === 0 || autoOpenedMyShops.current) return;
+    if (!mapReady || !viewerId || myBusinesses.length === 0 || autoOpenedMyShops.current) return;
     autoOpenedMyShops.current = true;
     setMyShopsVisible(true);
-  }, [mapReady, user?._id, userPlaces.length]);
+  }, [mapReady, viewerId, myBusinesses.length]);
 
   const deletePlace = async (placeId) => {
     Alert.alert(
@@ -1204,14 +1340,50 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     );
   };
 
+  const deleteMallShop = async (shopId) => {
+    Alert.alert(
+      t.deleteShop,
+      t.deleteMallShopConfirm,
+      [
+        { text: t.deleteCancel, style: 'cancel' },
+        {
+          text: t.deleteOk,
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const token = await AsyncStorage.getItem('userToken');
+              await axios.delete(`${BASE_URL}/api/mall-shops/${shopId}`, {
+                headers: { Authorization: `Bearer ${token}` },
+              });
+              setMyMallShops(current => current.filter(shop => String(shop._id) !== String(shopId)));
+              setAllMallShops(current => {
+                const updatedShops = current.filter(shop => String(shop._id) !== String(shopId));
+                mapOfflineCache.saveMallShops(updatedShops).catch(error => {
+                  console.warn('Could not update cached mall shops after deletion:', error.message);
+                });
+                return updatedShops;
+              });
+              setMyShopsVisible(false);
+            } catch (error) {
+              console.error('Error deleting mall shop:', error);
+              Alert.alert(t.deleteError, t.deleteFailed);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const renderMyShopItem = ({ item }) => {
     const cat = CATEGORIES.find(c => c.id === item.category);
     const icon = cat ? cat.icon : 'map-marker';
-    const addressStr = getAddressString(item);
+    const addressStr = item.isMallShop
+      ? [item.mallName, item.shopNumber ? `Shop ${item.shopNumber}` : null].filter(Boolean).join(' • ')
+      : getAddressString(item);
     return (
       <View style={[styles.myShopItem, { borderBottomColor: theme.border }]}>
         <View style={styles.myShopInfo}>
-          <MaterialCommunityIcons name={icon} size={24} color={theme.accent} />
+          <MaterialCommunityIcons name={item.isMallShop ? 'store' : icon} size={24} color={theme.accent} />
           <View style={styles.myShopTexts}>
             <Text style={[styles.myShopName, { color: theme.text }]}>{item.name}</Text>
             <Text style={[styles.myShopAddress, { color: theme.textSecondary }]}>
@@ -1219,7 +1391,10 @@ function LocateScreen({ navigation, route, language = 'English' }) {
             </Text>
           </View>
         </View>
-        <TouchableOpacity onPress={() => deletePlace(item._id)} style={styles.myShopActionBtn}>
+        <TouchableOpacity
+          onPress={() => item.isMallShop ? deleteMallShop(item._id) : deletePlace(item._id)}
+          style={styles.myShopActionBtn}
+        >
           <Ionicons name="trash-outline" size={22} color="#ff3b30" />
         </TouchableOpacity>
       </View>
@@ -1231,10 +1406,9 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     ? 'https://api.thunderforest.com/transport-dark/{z}/{x}/{y}.png?apikey=ad15f28266904ce28f417e5f7b45e832'
     : 'https://api.thunderforest.com/transport/{z}/{x}/{y}.png?apikey=ad15f28266904ce28f417e5f7b45e832';
 
-  // ★ This is used for the initial route color as well (fallback) – but we already use the dynamic one above
   const routeColor = isDarkMode ? '#FFFFFF' : '#000000';
 
-  // ---- Map HTML with filterPlaces added ----
+  // ---- Map HTML ----
   const mapHtml = `
     <!DOCTYPE html>
     <html>
@@ -1527,7 +1701,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   };
 
-  // Custom map controls
   const zoomInMap = () => {
     if (webViewRef.current) {
       webViewRef.current.injectJavaScript(`window.zoomInMap();`);
@@ -1594,7 +1767,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     );
   };
 
-  // Modals
   const openMyShops = async () => {
     const can = await requireAuth();
     if (!can) return;
@@ -1612,7 +1784,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
               <Ionicons name="close" size={28} color={textColor} />
             </TouchableOpacity>
           </View>
-          {userPlaces.length === 0 ? (
+          {myBusinesses.length === 0 ? (
             <View style={styles.emptyContainer}>
               <MaterialCommunityIcons name="store-off" size={60} color={secondaryText} />
               <Text style={[styles.emptyText, { color: secondaryText }]}>{t.noShopsYet}</Text>
@@ -1628,9 +1800,9 @@ function LocateScreen({ navigation, route, language = 'English' }) {
             </View>
           ) : (
             <FlatList
-              data={userPlaces}
+              data={myBusinesses}
               renderItem={renderMyShopItem}
-              keyExtractor={(item) => item._id}
+              keyExtractor={(item) => `${item.isMallShop ? 'mall-' : 'place-'}${item._id}`}
               contentContainerStyle={styles.myShopsList}
             />
           )}
@@ -1725,7 +1897,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         );
       }
 
-      // Mall shop items
       if (item.type === 'mallshop') {
         const lowerQuery = searchQuery.toLowerCase().trim();
         const cat = CATEGORIES.find(c => c.id === item.category);
@@ -1764,7 +1935,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         );
       }
 
-      // Regular place items
       const lowerQuery = searchQuery.toLowerCase().trim();
       const cat = CATEGORIES.find(c => c.id === item.category);
       let matchField = '';
@@ -1866,7 +2036,11 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         {loading && (
           <View style={[styles.loadingOverlay, { backgroundColor: overlayColor }]}>
             <View style={styles.loadingBadge}>
-              <Animated.Image source={loadingLogo} style={[styles.loadingImage, { transform: [{ scale: scaleAnim }] }]} resizeMode="contain" />
+              <Animated.Image
+                source={loadingLogo}
+                style={[styles.loadingImage, { transform: [{ rotate: spin }] }]}
+                resizeMode="contain"
+              />
             </View>
             <Text style={[styles.loadingText, { color: textColor }]}>{t.loading}</Text>
           </View>
@@ -2024,22 +2198,34 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   mapContainer: { flex: 1, position: 'relative' },
   map: { flex: 1 },
-  loadingOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center' },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   loadingBadge: {
-    width: 150,
-    height: 150,
-    borderRadius: 75,
+    width: Math.min(SCREEN_WIDTH * 0.52, 220),
+    height: Math.min(SCREEN_WIDTH * 0.52, 220),
+    borderRadius: Math.min(SCREEN_WIDTH * 0.26, 110),
     backgroundColor: '#fff',
     justifyContent: 'center',
     alignItems: 'center',
     shadowColor: '#000',
     shadowOpacity: 0.08,
-    shadowRadius: 10,
+    shadowRadius: 12,
     shadowOffset: { width: 0, height: 4 },
     elevation: 4,
   },
-  loadingImage: { width: 110, height: 110 },
-  loadingText: { marginTop: 22, fontSize: 16 },
+  loadingImage: {
+    width: Math.min(SCREEN_WIDTH * 0.4, 170),
+    height: Math.min(SCREEN_WIDTH * 0.4, 170),
+  },
+  loadingText: {
+    marginTop: 28,
+    fontSize: 17,
+    fontWeight: '600',
+    letterSpacing: 0.2,
+  },
 
   touchOutsideOverlay: {
     position: 'absolute',

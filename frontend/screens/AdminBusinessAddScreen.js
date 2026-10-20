@@ -74,6 +74,16 @@ const translations = {
     estimatedProfit: 'Estimated Profit',
     riskLevel: 'Risk Level',
     timeToLaunch: 'Time to Launch',
+    description: 'Short Description',
+    fullDescription: 'Full Description',
+    targetAudience: 'Target Audience',
+    requiredSkills: 'Required Skills (one per line)',
+    equipment: 'Equipment or Materials (one per line)',
+    potentialCustomers: 'Potential Customers (one per line)',
+    marketingStrategy: 'Marketing Strategy',
+    challenges: 'Expected Challenges (one per line)',
+    location: 'Location or Market',
+    additionalInfo: 'Additional Information',
     stepsLabel: 'Steps / Notes (one per line)',
     typeJob: 'Job',
     typeSkill: 'Skill',
@@ -130,6 +140,16 @@ const translations = {
     estimatedProfit: 'Inyungu yitezwe',
     riskLevel: 'Ingorane',
     timeToLaunch: 'Igihe cyo gutangira',
+    description: 'Ibisobanuro bigufi',
+    fullDescription: 'Ibisobanuro birambuye',
+    targetAudience: 'Abagenewe',
+    requiredSkills: 'Ubumenyi busabwa (umurongo umwe kuri buri bumwe)',
+    equipment: 'Ibikoresho (umurongo umwe kuri buri kimwe)',
+    potentialCustomers: 'Abakiriya bashoboka (umurongo umwe kuri buri wese)',
+    marketingStrategy: 'Uburyo bwo kwamamaza',
+    challenges: 'Ingorane zishoboka (umurongo umwe kuri buri imwe)',
+    location: 'Aho bikorwa cyangwa isoko',
+    additionalInfo: 'Andi makuru',
     stepsLabel: 'Intambwe (umurongo umwe kuri buri ntambwe)',
     typeJob: 'Akazi',
     typeSkill: 'Ubumenyi',
@@ -171,7 +191,7 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
       let readUrl = `${BASE_URL}`;
       if (activeTab === 'jobs') readUrl += '/api/business-ideas/job-openings';
       else if (activeTab === 'skills') readUrl += '/api/business-ideas/skill-courses';
-      else readUrl += '/api/business-ideas'; // business ideas
+      else readUrl += '/api/business-ideas/business-ideas';
 
       const response = await axios.get(readUrl);
 
@@ -238,9 +258,20 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
       });
     } else {
       setForm({
-        name: item.name || '', category: item.category || '',
+        name: item.name || '',
+        category: item.businessCategory || (item.category !== 'business' ? item.category : ''),
         startupCost: item.cost || '', estimatedProfit: item.profit || '',
         riskLevel: item.risk || '', timeToLaunch: item.time || '',
+        description: item.description || '',
+        fullDescription: item.fullDescription || '',
+        targetAudience: item.targetAudience || '',
+        requiredSkills: (item.requiredSkills || []).join('\n'),
+        equipment: (item.equipment || []).join('\n'),
+        potentialCustomers: (item.potentialCustomers || []).join('\n'),
+        marketingStrategy: item.marketingStrategy || '',
+        challenges: (item.challenges || []).join('\n'),
+        location: item.location || '',
+        additionalInfo: item.additionalInfo || '',
         steps: (item.steps || []).join('\n'),
       });
     }
@@ -251,7 +282,7 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
   const closeForm = () => { setShowForm(false); resetForm(); };
   const handleFormChange = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
 
-  const totalSteps = () => (activeTab === 'jobs' || activeTab === 'skills' || activeTab === 'business') ? 3 : 3;
+  const totalSteps = () => activeTab === 'business' ? 4 : 3;
 
   const canGoNext = () => {
     if (activeTab === 'jobs') {
@@ -311,8 +342,16 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
       } else {
         const stepsArray = (form.steps || '').split('\n').map(line => line.trim()).filter(Boolean);
         payload = {
-          name: form.name, category: form.category, cost: form.startupCost,
+          name: form.name, category: 'business', businessCategory: form.category, cost: form.startupCost,
           profit: form.estimatedProfit, risk: form.riskLevel, time: form.timeToLaunch,
+          description: form.description || '', fullDescription: form.fullDescription || '',
+          targetAudience: form.targetAudience || '',
+          requiredSkills: (form.requiredSkills || '').split('\n').map(line => line.trim()).filter(Boolean),
+          equipment: (form.equipment || '').split('\n').map(line => line.trim()).filter(Boolean),
+          potentialCustomers: (form.potentialCustomers || '').split('\n').map(line => line.trim()).filter(Boolean),
+          marketingStrategy: form.marketingStrategy || '',
+          challenges: (form.challenges || '').split('\n').map(line => line.trim()).filter(Boolean),
+          location: form.location || '', additionalInfo: form.additionalInfo || '',
           steps: stepsArray,
         };
       }
@@ -380,7 +419,7 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
         ? `${item.company || ''} • ${item.district || ''} • ${item.salary || ''}`
         : activeTab === 'skills'
         ? `${item.level || ''} • ${item.duration || ''} • ${item.type || ''}`
-        : `${item.category || ''} • Cost: ${item.cost || '?'} • Profit: ${item.profit || '?'}`;
+        : `${item.businessCategory || (item.category !== 'business' ? item.category : '')} • Cost: ${item.cost || '?'} • Profit: ${item.profit || '?'}`;
     return (
       <View style={[styles.itemCard, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
         <View style={{ flex: 1 }}>
@@ -491,17 +530,33 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
         </>
       );
       if (step === 3) return (
-        <View style={[styles.textAreaField, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}>
-          <Text style={[styles.fieldLabel, { color: theme.text }]}>{t.stepsLabel}</Text>
-          <TextInput
-            style={[styles.textAreaInput, { color: theme.text }]}
-            multiline numberOfLines={6} textAlignVertical="top"
-            value={form.steps}
-            onChangeText={(v) => handleFormChange('steps', v)}
-            placeholder="1. Research market\n2. Secure location\n..."
-            placeholderTextColor={theme.textSecondary}
-          />
-        </View>
+        <>
+          <FormField label={t.description} value={form.description} onChangeText={(v) => handleFormChange('description', v)} theme={theme} multiline maxLength={800} />
+          <FormField label={t.fullDescription} value={form.fullDescription} onChangeText={(v) => handleFormChange('fullDescription', v)} theme={theme} multiline />
+          <FormField label={t.targetAudience} value={form.targetAudience} onChangeText={(v) => handleFormChange('targetAudience', v)} theme={theme} />
+          <FormField label={t.requiredSkills} value={form.requiredSkills} onChangeText={(v) => handleFormChange('requiredSkills', v)} theme={theme} multiline />
+          <FormField label={t.equipment} value={form.equipment} onChangeText={(v) => handleFormChange('equipment', v)} theme={theme} multiline />
+          <FormField label={t.potentialCustomers} value={form.potentialCustomers} onChangeText={(v) => handleFormChange('potentialCustomers', v)} theme={theme} multiline />
+        </>
+      );
+      if (step === 4) return (
+        <>
+          <FormField label={t.marketingStrategy} value={form.marketingStrategy} onChangeText={(v) => handleFormChange('marketingStrategy', v)} theme={theme} multiline />
+          <FormField label={t.challenges} value={form.challenges} onChangeText={(v) => handleFormChange('challenges', v)} theme={theme} multiline />
+          <FormField label={t.location} value={form.location} onChangeText={(v) => handleFormChange('location', v)} theme={theme} />
+          <FormField label={t.additionalInfo} value={form.additionalInfo} onChangeText={(v) => handleFormChange('additionalInfo', v)} theme={theme} multiline />
+          <View style={[styles.textAreaField, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}>
+            <Text style={[styles.fieldLabel, { color: theme.text }]}>{t.stepsLabel}</Text>
+            <TextInput
+              style={[styles.textAreaInput, { color: theme.text }]}
+              multiline numberOfLines={6} textAlignVertical="top"
+              value={form.steps}
+              onChangeText={(v) => handleFormChange('steps', v)}
+              placeholder="1. Research market\n2. Secure location\n..."
+              placeholderTextColor={theme.textSecondary}
+            />
+          </View>
+        </>
       );
     }
     return null;
@@ -615,14 +670,16 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
 };
 
 // Reusable Form Field Component
-const FormField = ({ label, value, onChangeText, theme, ...props }) => (
+const FormField = ({ label, value, onChangeText, theme, multiline, style, ...props }) => (
   <View style={[styles.fieldContainer, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}>
     <Text style={[styles.fieldLabel, { color: theme.text }]}>{label}</Text>
     <TextInput
-      style={[styles.fieldInput, { color: theme.text }]}
+      style={[styles.fieldInput, { color: theme.text }, multiline && styles.multilineInput, style]}
       value={value}
       onChangeText={onChangeText}
       placeholderTextColor={theme.textSecondary}
+      multiline={multiline}
+      textAlignVertical={multiline ? 'top' : 'center'}
       {...props}
     />
   </View>
@@ -672,6 +729,7 @@ const styles = StyleSheet.create({
   fieldContainer: { borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, marginBottom: 14 },
   fieldLabel: { fontSize: 13, fontWeight: '600', marginBottom: 6 },
   fieldInput: { fontSize: 16, padding: 0, minHeight: 40 },
+  multilineInput: { minHeight: 90 },
   textAreaField: { borderWidth: 1, borderRadius: 12, padding: 12, marginBottom: 14 },
   textAreaInput: { fontSize: 16, minHeight: 120, padding: 0 },
   toggleRow: { flexDirection: 'row', gap: 12, marginBottom: 14 },

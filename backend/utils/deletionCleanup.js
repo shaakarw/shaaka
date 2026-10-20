@@ -23,7 +23,9 @@ function getPostStorageKeys(post) {
     ...(post.houseImageStorageKeys || []),
     ...collectStorageKeys(post.houseImages || []),
     post.videoStorageKey,
+    post.videoThumbnailStorageKey,
     storageService.getStorageKeyFromUrl(post.videoUrl),
+    storageService.getStorageKeyFromUrl(post.videoThumbnail),
   ].filter(storageService.isStorageKey);
 }
 
@@ -105,7 +107,7 @@ async function deletePlaceWithCleanup(placeId) {
   if (!place) return;
 
   const keys = getPlaceStorageKeys(place);
-  const relatedPosts = await Post.find({ user: place.userId }).select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey').lean();
+  const relatedPosts = await Post.find({ user: place.userId }).select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey videoThumbnail videoThumbnailStorageKey').lean();
   const postIds = relatedPosts.map(post => post._id);
   for (const post of relatedPosts) keys.push(...getPostStorageKeys(post));
 
@@ -144,7 +146,7 @@ async function deleteMallShopWithCleanup(shopId) {
     message.replyPost?.postId ? String(message.replyPost.postId) : '',
   ]).filter(id => id && mongoose.Types.ObjectId.isValid(id)))];
   const relatedPosts = await Post.find({ _id: { $in: relatedPostIds } })
-    .select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey').lean();
+    .select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey videoThumbnail videoThumbnailStorageKey').lean();
   for (const post of relatedPosts) keys.push(...getPostStorageKeys(post));
 
   for (const postId of relatedPostIds) await deleteMessagesForPost(postId);
@@ -161,7 +163,7 @@ async function deleteShopWithCleanup(shopId) {
   if (!shop) return;
 
   const keys = getPlaceStorageKeys(shop);
-  const relatedPosts = await Post.find({ user: shop.userId }).select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey').lean();
+  const relatedPosts = await Post.find({ user: shop.userId }).select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey videoThumbnail videoThumbnailStorageKey').lean();
   const postIds = relatedPosts.map(post => post._id);
   for (const post of relatedPosts) keys.push(...getPostStorageKeys(post));
 

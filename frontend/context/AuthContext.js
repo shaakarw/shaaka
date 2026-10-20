@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { getApiUrl } from '../config';
 import { Alert } from 'react-native';
+import { isReelsActive } from '../services/reelActivity';
 
 const AuthContext = createContext();
 
@@ -15,21 +16,25 @@ export const AuthProvider = ({ children }) => {
 
   // ----- Load stored session on app start -----
   useEffect(() => {
+    const restoreStartedAt = Date.now();
     const loadStorageData = async () => {
       try {
-        const token = await AsyncStorage.getItem('userToken');
-        const userData = await AsyncStorage.getItem('user');
+        const storedValues = await AsyncStorage.multiGet(['userToken', 'user']);
+        const token = storedValues[0]?.[1];
+        const userData = storedValues[1]?.[1];
         if (token && userData) {
           setToken(token);
           setIsAuthenticated(true);
           setUser(JSON.parse(userData));
-          // Optionally sync favorites after loading session
-          await syncFavorites(token);
+          syncFavorites(token);
         }
       } catch (error) {
         console.error('Failed to load auth data', error);
       } finally {
         setLoading(false);
+        if (typeof __DEV__ === 'undefined' || __DEV__) {
+          console.info(`[Perf] auth-session-restored ${Date.now() - restoreStartedAt}ms`);
+        }
       }
     };
     loadStorageData();
@@ -37,6 +42,7 @@ export const AuthProvider = ({ children }) => {
 
   // ----- Socket & polling for force-logout (unchanged) -----
   useEffect(() => {
+    if (!isAuthenticated) return undefined;
     let socket;
     let pollId;
     const initSocket = async () => {
@@ -69,6 +75,7 @@ export const AuthProvider = ({ children }) => {
       const token = await AsyncStorage.getItem('userToken');
       if (!token) return;
       pollId = setInterval(async () => {
+        if (isReelsActive()) return;
         try {
           const resp = await axios.get(`${getApiUrl()}/api/auth/session`, { headers: { Authorization: `Bearer ${token}` } });
           const serverSessionId = resp.data?.session?.sessionId;

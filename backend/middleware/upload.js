@@ -20,6 +20,11 @@ const fileFilter = (req, file, cb) => {
     return cb(new Error('Only supported video files are allowed'), false);
   }
 
+  if (file.fieldname === 'thumbnail') {
+    if (imageTypes.test(mimeType) && extension) return cb(null, true);
+    return cb(new Error('Only supported thumbnail images are allowed'), false);
+  }
+
   cb(new Error('Unsupported file field'), false);
 };
 

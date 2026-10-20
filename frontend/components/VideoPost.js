@@ -37,6 +37,10 @@ const VideoPost = ({
   centerControlSize = 48,
   contentFit = 'cover',
   showPlaybackControls = true,
+  showTopMute,
+  showBottomMute,
+  controlsAlwaysVisible = false,
+  centerControlOnPauseOnly = false,
   onVideoPress,
 }) => {
   const [duration, setDuration] = useState(Number(videoDuration) || 0);
@@ -204,11 +208,12 @@ const VideoPost = ({
         ) : null}
 
         {!ready && (
-          <ActivityIndicator 
-            style={styles.loadingIndicator} 
-            color={theme.accent || '#4a865c'} 
-            size="large"
-          />
+          <View style={styles.loadingIndicator} pointerEvents="none">
+            <ActivityIndicator
+              color={theme.accent || '#4a865c'}
+              size="large"
+            />
+          </View>
         )}
         
         <VideoView 
@@ -231,6 +236,10 @@ const VideoPost = ({
           progressColor={progressColor}
           centerControlSize={centerControlSize}
           showPlaybackControls={showPlaybackControls}
+          showTopMute={showTopMute}
+          showBottomMute={showBottomMute}
+          controlsAlwaysVisible={controlsAlwaysVisible}
+          centerControlOnPauseOnly={centerControlOnPauseOnly}
           onVideoPress={onVideoPress}
         />
       </View>
@@ -274,7 +283,9 @@ const styles = StyleSheet.create({
   },
   loadingIndicator: {
     ...StyleSheet.absoluteFillObject,
-    zIndex: 1,
+    zIndex: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   video: { 
     width: '100%', 

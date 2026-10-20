@@ -26,6 +26,7 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { io } from 'socket.io-client';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import { isReelsActive } from '../services/reelActivity';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const DEFAULT_AVATAR = require('../assets/profile1.png');
@@ -102,6 +103,8 @@ const translations = {
     updates: 'Updates',
     noUpdates: 'No updates available',
     followUs: 'Follow us on social media',
+    typing: 'Typing...',
+    youPrefix: 'You: ',
   },
   Kinyarwanda: {
     messages: 'Ubutumwa',
@@ -118,6 +121,8 @@ const translations = {
     updates: 'Amakuru mashya',
     noUpdates: 'Nta makuru mashya ahari',
     followUs: 'Twandikire ku mbuga nkoranyambaga',
+    typing: 'Arikwandika...',
+    youPrefix: 'Wowe: ',
   },
 };
 
@@ -125,23 +130,20 @@ const translations = {
 const UpdateItem = React.memo(({ update, onPress, theme }) => {
   const title = update.title || update.text?.split('\n')[0] || 'Note';
   const iconName = update.link ? 'link-outline' : 'notifications-outline';
-  
-  // Check if update should show as unread
+
   const shouldShowUnread = useCallback(() => {
     if (!update.lastViewedAt) {
-      // Never viewed - show as unread
       return true;
     }
-    
+
     const lastViewedDate = new Date(update.lastViewedAt);
     const currentDate = new Date();
     const timeDiff = currentDate.getTime() - lastViewedDate.getTime();
     const hoursDiff = timeDiff / (1000 * 60 * 60);
-    
-    // Show unread badge if more than 24 hours have passed
+
     return hoursDiff >= 24;
   }, [update.lastViewedAt]);
-  
+
   const isUnread = shouldShowUnread();
   const unreadCount = isUnread ? 1 : 0;
 
@@ -196,12 +198,20 @@ const UpdatesRow = React.memo(({ updates, onUpdatePress, theme }) => {
 });
 
 // ---------- Conversation Row ----------
-const ConversationRow = ({ conversation, onPress, theme, currentUserId, isOnline, isTyping }) => {
+const ConversationRow = ({ conversation, onPress, theme, currentUserId, isOnline, isTyping, t }) => {
   const lastMsg = conversation.lastMessage;
   const isSentByMe = lastMsg?.senderId === currentUserId;
-  const displayMessage = isTyping
-    ? 'Typing...'
-    : (lastMsg?.text || 'No messages yet');
+
+  // Show the typing indicator in place of the last message preview
+  const typingLabel = t?.typing || 'Typing...';
+  const youPrefix = t?.youPrefix || 'You: ';
+
+  let displayMessage;
+  if (isTyping) {
+    displayMessage = typingLabel;
+  } else {
+    displayMessage = lastMsg?.text || 'No messages yet';
+  }
 
   return (
     <TouchableOpacity
@@ -247,11 +257,14 @@ const ConversationRow = ({ conversation, onPress, theme, currentUserId, isOnline
               {
                 color: isTyping ? theme.accent : (isSentByMe ? theme.textSecondary : theme.text),
                 fontStyle: isTyping ? 'italic' : 'normal',
+                fontWeight: isTyping ? '600' : 'normal',
               },
             ]}
             numberOfLines={1}
           >
-            {isTyping ? displayMessage : `${isSentByMe ? 'You: ' : ''}${displayMessage}`}
+            {isTyping
+              ? displayMessage
+              : `${isSentByMe ? youPrefix : ''}${displayMessage}`}
           </Text>
         </View>
       </View>
@@ -276,6 +289,9 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
   const [onlineUsers, setOnlineUsers] = useState({});
   const [typingUsers, setTypingUsers] = useState({});
   const socketRef = useRef(null);
+
+  // Auto-clear timers for typing indicators (per user)
+  const typingClearTimersRef = useRef({});
 
   const [notes, setNotes] = useState([]);
   const [showBackToTop, setShowBackToTop] = useState(false);
@@ -410,9 +426,22 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       transports: ['websocket'],
       auth: { token },
       autoConnect: true,
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
     });
 
     socketRef.current = socket;
+
+    socket.on('connect', () => {
+      console.log('[MsgScreen Socket] connected', socket.id);
+    });
+
+    socket.on('reconnect', () => {
+      console.log('[MsgScreen Socket] reconnected');
+    });
 
     socket.on('user-online', (payload) => {
       const uid = payload?.userId;
@@ -424,30 +453,79 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       if (uid) setOnlineUsers((prev) => ({ ...prev, [String(uid)]: false }));
     });
 
-    socket.on('user-typing', (payload) => {
-      const uid = payload?.senderId;
-      if (uid) {
-        setTypingUsers((prev) => ({ ...prev, [String(uid)]: true }));
-      }
-    });
+    // ---- Lenient typing handler with auto-clear ----
+    const handleTyping = (payload, eventName) => {
+      console.log('[MsgScreen Socket] typing event:', eventName, payload);
 
-    socket.on('user-stop-typing', (payload) => {
-      const uid = payload?.senderId;
-      if (uid) {
+      // Support multiple possible field names from the server
+      const uid = String(
+        payload?.senderId ?? payload?.userId ?? payload?.from ?? payload?.sender ?? ''
+      );
+      if (!uid) return;
+
+      // Never show our own typing in the list
+      if (String(currentUser?._id) === uid) return;
+
+      let isTyping;
+      if (typeof payload?.typing === 'boolean') isTyping = payload.typing;
+      else if (typeof payload?.isTyping === 'boolean') isTyping = payload.isTyping;
+      else if (eventName === 'user-stop-typing') isTyping = false;
+      else if (eventName === 'user-typing') isTyping = true;
+      else return;
+
+      // Clear any existing timer for this user
+      if (typingClearTimersRef.current[uid]) {
+        clearTimeout(typingClearTimersRef.current[uid]);
+        typingClearTimersRef.current[uid] = null;
+      }
+
+      if (isTyping) {
+        setTypingUsers((prev) => ({ ...prev, [uid]: true }));
+        // Auto-clear after 4s in case the stop event is lost (mobile networks)
+        typingClearTimersRef.current[uid] = setTimeout(() => {
+          setTypingUsers((prev) => {
+            const next = { ...prev };
+            delete next[uid];
+            return next;
+          });
+          typingClearTimersRef.current[uid] = null;
+        }, 4000);
+      } else {
         setTypingUsers((prev) => {
           const next = { ...prev };
-          delete next[String(uid)];
+          delete next[uid];
           return next;
         });
       }
+    };
+
+    socket.on('user-typing', (payload) => handleTyping(payload, 'user-typing'));
+    socket.on('user-stop-typing', (payload) => handleTyping(payload, 'user-stop-typing'));
+
+    socket.on('disconnect', (reason) => {
+      console.log('[MsgScreen Socket] disconnected:', reason);
+      // Reset typing on disconnect — the state is stale
+      setTypingUsers({});
+    });
+
+    socket.on('connect_error', (err) => {
+      console.log('[MsgScreen Socket] connect_error:', err?.message);
     });
   }, [isLoggedIn, currentUser]);
 
   useEffect(() => {
     connectPresenceSocket();
     return () => {
+      // Clear all typing auto-clear timers
+      Object.values(typingClearTimersRef.current || {}).forEach((timer) => {
+        if (timer) clearTimeout(timer);
+      });
+      typingClearTimersRef.current = {};
+
       if (socketRef.current) {
         try {
+          socketRef.current.off('user-typing');
+          socketRef.current.off('user-stop-typing');
           socketRef.current.disconnect();
         } catch (e) {}
         socketRef.current = null;
@@ -496,7 +574,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
           createdAt: note.createdAt,
           type: 'admin_note',
           isRead: note.isRead || false,
-          // Add last viewed timestamp from storage
           lastViewedAt: viewedTimestamps[note._id] || null,
         }));
         return formatted;
@@ -561,7 +638,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
 
   // ---------- Refresh all ----------
   const refreshAll = useCallback(async () => {
-    if (!isLoggedIn || !currentUser) return;
+    if (!isLoggedIn || !currentUser || isReelsActive()) return;
     await fetchConversations();
     const notesData = await fetchNotes();
     setNotes(notesData);
@@ -576,6 +653,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       }
 
       autoRefreshInterval.current = setInterval(() => {
+        if (isReelsActive()) return;
         if (!isFetchingRef.current) {
           isFetchingRef.current = true;
           refreshAll().finally(() => {
@@ -662,7 +740,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
   };
 
   // ---------- Navigate to Chat ----------
-  const openChat = (userId, userName, userAvatar, userPhone) => {
+  const openChat = (userId, userName, userAvatar, userPhone, conversation) => {
     if (!userId) {
       Alert.alert('Error', 'User information is missing.');
       return;
@@ -673,19 +751,20 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       sellerName: userName || 'User',
       sellerAvatar: userAvatar || '',
       sellerPhone: sellerPhone,
+      postId: conversation?.postId || '',
+      postTitle: conversation?.postTitle || '',
+      replyPost: conversation?.replyPost || conversation?.lastMessage?.replyPost || null,
       adminMode,
     });
   };
 
   // ---------- Mark update as read and save timestamp ----------
   const markUpdateAsRead = useCallback(async (updateId) => {
-    // Save the current timestamp as last viewed
     await saveViewedTimestamp(updateId);
-    
-    // Update local state
+
     setNotes(prev => prev.map(n =>
-      n.id === updateId || n._id === updateId 
-        ? { ...n, lastViewedAt: new Date().toISOString() } 
+      n.id === updateId || n._id === updateId
+        ? { ...n, lastViewedAt: new Date().toISOString() }
         : n
     ));
   }, [saveViewedTimestamp]);
@@ -845,7 +924,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       <View style={[styles.overlay, { backgroundColor: theme.background, opacity: 0.92 }]} />
 
       <View style={{ flex: 1, backgroundColor: 'transparent' }}>
-        {/* Animated top section – whole container animates together */}
         <Animated.View
           style={{
             height: headerHeightAnim,
@@ -904,7 +982,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
           </View>
         </Animated.View>
 
-        {/* Conversations FlatList */}
         <FlatList
           ref={flatListRef}
           data={filtered}
@@ -916,12 +993,14 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
                 item.otherUserId,
                 item.otherUserName,
                 item.otherUserAvatar,
-                item.otherUserPhone
+                item.otherUserPhone,
+                item
               )}
               theme={theme}
               currentUserId={currentUser?._id}
               isOnline={onlineUsers[String(item.otherUserId)] || false}
               isTyping={!!typingUsers[String(item.otherUserId)]}
+              t={t}
             />
           )}
           contentContainerStyle={styles.list}
@@ -955,7 +1034,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
           </TouchableOpacity>
         )}
 
-        {/* Detail Sheet */}
         {detailSheetVisible && (
           <TouchableWithoutFeedback onPress={closeDetailSheet}>
             <View style={styles.sheetOverlay} />
@@ -1093,7 +1171,6 @@ const styles = StyleSheet.create({
   },
   updateLabel: { fontSize: 11, textAlign: 'center' },
 
-  // UPDATED: orange badge with custom position
   updateUnreadBadgeNumber: {
     position: 'absolute',
     top: 4,

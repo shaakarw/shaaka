@@ -7,7 +7,9 @@ const DB_NAME = 'shaaka-offline.db';
 const FALLBACK_PREFIX = '@shaaka/offline-db/';
 const LIMIT_BYTES = 300 * 1024 * 1024;
 const FALLBACK_LEDGER_KEY = `${FALLBACK_PREFIX}ledger`;
+export const OFFLINE_STORAGE_ENABLED_KEY = '@shaaka/offline-storage-enabled';
 let databasePromise;
+let offlineStorageEnabled;
 const usageListeners = new Set();
 
 const timestamp = () => Date.now();
@@ -18,6 +20,22 @@ const sizeOf = value => {
 };
 const priorityValue = priority => ({ low: 0, medium: 1, high: 2 }[priority] ?? 1);
 const fallbackKey = key => `${FALLBACK_PREFIX}${key}`;
+const isPendingMessage = (collection, value) => collection === 'messages' && value?.syncStatus === 'pending';
+
+export const isOfflineStorageEnabled = async () => {
+  if (offlineStorageEnabled !== undefined) return offlineStorageEnabled;
+  try {
+    offlineStorageEnabled = (await AsyncStorage.getItem(OFFLINE_STORAGE_ENABLED_KEY)) !== 'false';
+  } catch (error) {
+    offlineStorageEnabled = true;
+  }
+  return offlineStorageEnabled;
+};
+
+export const setOfflineStorageEnabled = async enabled => {
+  await AsyncStorage.setItem(OFFLINE_STORAGE_ENABLED_KEY, String(enabled));
+  offlineStorageEnabled = enabled;
+};
 
 const getDatabase = async () => {
   if (!SQLite) return null;
@@ -70,7 +88,9 @@ export const offlineDatabase = {
   },
 
   async putRecord(collection, key, value, options = {}) {
+    if (!(await isOfflineStorageEnabled()) && !isPendingMessage(collection, value)) return false;
     const db = await getDatabase();
+    if (!(await isOfflineStorageEnabled()) && !isPendingMessage(collection, value)) return false;
     const recordKey = `${collection}:${key}`;
     if (!db) {
       const ledger = await fallbackLedger();
@@ -79,6 +99,7 @@ export const offlineDatabase = {
         key: recordKey, collection, bytes, priority: priorityValue(options.priority),
         protected: !!options.protected, updatedAt: timestamp(), accessedAt: timestamp(),
       };
+      if (!(await isOfflineStorageEnabled()) && !isPendingMessage(collection, value)) return false;
       await AsyncStorage.setItem(fallbackKey(recordKey), JSON.stringify(value));
       const usage = Object.values(ledger.entries).reduce((total, entry) => total + entry.bytes, 0);
       let nextUsage = usage;
@@ -112,6 +133,7 @@ export const offlineDatabase = {
       const afterEviction = await this.getUsage();
       if (afterEviction.usedBytes - Number(existing?.bytes || 0) + bytes > LIMIT_BYTES) return false;
     }
+    if (!(await isOfflineStorageEnabled()) && !isPendingMessage(collection, value)) return false;
     const time = timestamp();
     await db.runAsync(
       `INSERT INTO records(key, collection, value, bytes, priority, protected, updated_at, accessed_at)
@@ -156,11 +178,63 @@ export const offlineDatabase = {
       const records = await Promise.all(Object.values(ledger.entries)
         .filter(entry => entry.collection === collection)
         .sort((first, second) => second.accessedAt - first.accessedAt)
-        .map(async entry => ({ key: entry.key.slice(collection.length + 1), value: await fallbackRead(entry.key) })));
+        .map(async entry => ({
+          key: entry.key.slice(collection.length + 1),
+          value: await fallbackRead(entry.key),
+          protected: !!entry.protected,
+        })));
       return records.filter(record => record.value != null);
     }
-    const rows = await db.getAllAsync('SELECT key, value FROM records WHERE collection = ? ORDER BY accessed_at DESC', collection);
-    return rows.map(row => ({ key: row.key.slice(collection.length + 1), value: JSON.parse(row.value) }));
+    const rows = await db.getAllAsync('SELECT key, value, protected FROM records WHERE collection = ? ORDER BY accessed_at DESC', collection);
+    return rows.map(row => ({
+      key: row.key.slice(collection.length + 1),
+      value: JSON.parse(row.value),
+      protected: !!row.protected,
+    }));
+  },
+
+  async clearCachedData() {
+    const db = await getDatabase();
+    if (db) {
+      const records = await db.getAllAsync('SELECT key, collection, value, protected FROM records');
+      for (const record of records) {
+        let isPendingMessage = false;
+        if (record.collection === 'messages') {
+          try {
+            isPendingMessage = JSON.parse(record.value)?.syncStatus === 'pending';
+          } catch (error) {
+            isPendingMessage = false;
+          }
+        }
+        if (!isPendingMessage && !record.protected) {
+          await db.runAsync('DELETE FROM records WHERE key = ?', record.key);
+        }
+      }
+      const usage = await this.getUsage();
+      usageListeners.forEach(listener => listener(usage));
+      return;
+    }
+
+    const ledger = await fallbackLedger();
+    const entries = Object.values(ledger.entries);
+    const pendingMessages = await Promise.all(entries.map(async entry => {
+      if (entry.collection !== 'messages') return false;
+      try {
+        return (await fallbackRead(entry.key))?.syncStatus === 'pending';
+      } catch {
+        return false;
+      }
+    }));
+    const retainedEntries = entries.filter((entry, index) => pendingMessages[index] || entry.protected);
+    const keysToRemove = entries
+      .filter((entry, index) => !pendingMessages[index] && !entry.protected)
+      .map(entry => fallbackKey(entry.key));
+    if (keysToRemove.length) await AsyncStorage.multiRemove(keysToRemove);
+    ledger.entries = Object.fromEntries(retainedEntries.map(entry => [entry.key, entry]));
+    await saveFallbackLedger(ledger);
+    const usedBytes = retainedEntries.reduce((total, entry) => total + Number(entry.bytes || 0), 0);
+    const usage = { usedBytes: Math.min(usedBytes, LIMIT_BYTES), limitBytes: LIMIT_BYTES };
+    usageListeners.forEach(listener => listener(usage));
   },
 
   async enqueue(action) {

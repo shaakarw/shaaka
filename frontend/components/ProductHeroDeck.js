@@ -39,6 +39,7 @@ const ProductDeckCard = ({
   onPressUserProfile,
 }) => {
   const positionValue = useRef(new Animated.Value(position)).current;
+  const imageLoadStartedAt = useRef(null);
 
   useEffect(() => {
     Animated.spring(positionValue, {
@@ -49,7 +50,7 @@ const ProductDeckCard = ({
     }).start();
   }, [position, positionValue]);
 
-  const cardWidth = Math.min(deckWidth * 0.75, 360);
+  const cardWidth = Math.min(deckWidth * 0.68, 360);
   const cardHeight = Math.min(cardWidth * 1.3, 420);
 
   const transforms = [
@@ -78,16 +79,10 @@ const ProductDeckCard = ({
     outputRange: [0.55, 0, 0.55],
   });
 
-  const playOpacity = positionValue.interpolate({
-    inputRange: [-1, 0, 1],
-    outputRange: [0, 1, 0],
-  });
-
   const brandGreen = colors.login || colors.brand || BRAND_GREEN;
   const cardBackground =
     colors.cardBackground || colors.action || colors.background || '#222222';
   const overlayColor = colors.overlay || '#000000';
-  const playIconColor = colors.playIcon || colors.title || '#ffffff';
 
   const locationText = product.location || '';
 
@@ -97,6 +92,7 @@ const ProductDeckCard = ({
     ? getVideoCover(product.videoUrl, product.videoThumbnail)
     : null;
   const cardImageUri =
+    product._homeImageUri ||
     videoCover ||
     (Array.isArray(product.houseImages) && product.houseImages.find(Boolean)) ||
     null;
@@ -125,6 +121,18 @@ const ProductDeckCard = ({
           style={styles.cardImage}
           imageStyle={styles.cardImageStyle}
           resizeMode="cover"
+          onLoadStart={() => {
+            imageLoadStartedAt.current = Date.now();
+          }}
+          onLoad={() => {
+            if (imageLoadStartedAt.current == null) return;
+            if (typeof __DEV__ === 'undefined' || __DEV__) {
+              console.info(
+                `[Perf] home-product-image ${Date.now() - imageLoadStartedAt.current}ms`
+              );
+            }
+            imageLoadStartedAt.current = null;
+          }}
         >
           <Animated.View
             pointerEvents="none"
@@ -155,12 +163,6 @@ const ProductDeckCard = ({
               <Ionicons name="videocam" size={12} color="#fff" />
             </View>
           )}
-
-          {/* Center play button */}
-          <Animated.View
-          >
-           
-          </Animated.View>
 
           {/* BOTTOM: user (left) + amount (right) */}
           <View style={styles.bottomOverlay} pointerEvents="box-none">
@@ -203,64 +205,35 @@ const ProductHeroDeck = ({
   const colors = colorsProp || themeContext?.theme || {};
 
   const [deckWidth, setDeckWidth] = useState(0);
-  const [progressWidth, setProgressWidth] = useState(0);
   const [activeIndex, setActiveIndex] = useState(0);
   const [restartKey, setRestartKey] = useState(0);
-  const progress = useRef(new Animated.Value(0)).current;
-  const progressAnimation = useRef(null);
 
   const brandGreen = colors.login || colors.brand || BRAND_GREEN;
   const glowColor = colors.glow || 'rgba(71, 174, 134, 0)';
   const glowShadowColor = colors.glowShadow || brandGreen;
-  const trackColor = colors.border || '#88888803';
 
   useEffect(() => {
     setActiveIndex(index => (products.length ? index % products.length : 0));
   }, [products.length]);
 
   const currentIndex = products.length ? activeIndex % products.length : 0;
-  const segmentWidth = products.length
-    ? Math.max(0, (progressWidth - (products.length - 1) * 5) / products.length)
-    : 0;
-  const progressFillWidth = progress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, segmentWidth],
-    extrapolate: 'clamp',
-  });
 
   // ─────────────────────────────────────────────────────────────
-  // AUTO-SLIDE: every SLIDE_DURATION ms this fires, animates the
-  // progress bar from 0 → 1, then advances `activeIndex` by one.
-  // Because `currentIndex` is in the deps, the effect restarts and
-  // the next product auto-slides in. Runs forever until unmount.
+  // AUTO-SLIDE: every SLIDE_DURATION ms the active card advances.
+  // We use a plain setTimeout because the visual progress bar
+  // (which previously drove this) has been removed.
+  // `restartKey` lets `selectProduct` re-arm the timer even when
+  // the user taps the currently active card.
   // ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!products.length || !deckWidth || !segmentWidth) return undefined;
+    if (!products.length || products.length < 2 || !deckWidth) return undefined;
 
-    progress.setValue(0);
-    const animation = Animated.timing(progress, {
-      toValue: 1,
-      duration: SLIDE_DURATION,
-      useNativeDriver: false,
-    });
-    progressAnimation.current = animation;
-    animation.start(({ finished }) => {
-      if (finished && products.length > 1) {
-        setActiveIndex(index => (index + 1) % products.length);
-      }
-    });
+    const timer = setTimeout(() => {
+      setActiveIndex(index => (index + 1) % products.length);
+    }, SLIDE_DURATION);
 
-    return () => {
-      animation.stop();
-    };
-  }, [
-    currentIndex,
-    deckWidth,
-    progress,
-    products.length,
-    restartKey,
-    segmentWidth,
-  ]);
+    return () => clearTimeout(timer);
+  }, [currentIndex, deckWidth, products.length, restartKey]);
 
   if (!products.length) return null;
 
@@ -280,7 +253,6 @@ const ProductHeroDeck = ({
   const cardHeight = Math.min(cardWidth * 1.1, 420);
 
   const selectProduct = index => {
-    progressAnimation.current?.stop();
     setActiveIndex(index);
     setRestartKey(key => key + 1);
   };
@@ -321,39 +293,6 @@ const ProductHeroDeck = ({
           ))}
         </View>
       )}
-
-      <View
-        style={styles.progressRow}
-        onLayout={event => setProgressWidth(event.nativeEvent.layout.width)}
-      >
-        {products.map((product, index) => (
-          <TouchableOpacity
-            key={product._id || index}
-            accessibilityRole="button"
-            accessibilityLabel={`Show product ${index + 1}`}
-            activeOpacity={0.8}
-            onPress={() => selectProduct(index)}
-            style={[styles.progressTrack, { backgroundColor: trackColor }]}
-          >
-            {index < currentIndex ? (
-              <View
-                style={[
-                  styles.progressFill,
-                  styles.completedProgress,
-                  { backgroundColor: brandGreen },
-                ]}
-              />
-            ) : index === currentIndex ? (
-              <Animated.View
-                style={[
-                  styles.progressFill,
-                  { backgroundColor: brandGreen, width: progressFillWidth },
-                ]}
-              />
-            ) : null}
-          </TouchableOpacity>
-        ))}
-      </View>
     </View>
   );
 };
@@ -361,7 +300,6 @@ const ProductHeroDeck = ({
 const styles = StyleSheet.create({
   container: {
     width: '100%',
-    
     alignItems: 'center',
   },
   deck: {
@@ -372,7 +310,7 @@ const styles = StyleSheet.create({
   },
   glow: {
     position: 'absolute',
-    
+
     borderRadius: 999,
     shadowOpacity: 0.85,
     shadowRadius: 38,
@@ -418,7 +356,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 10,
     left: 12,
-    right: 42,          // 👈 leaves space for the video badge on the right
+    right: 42, // 👈 leaves space for the video badge on the right
     zIndex: 5,
   },
   productName: {
@@ -497,25 +435,6 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.85)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
-  },
-  progressRow: {
-    width: '100%',
-    flexDirection: 'row',
-    gap: 5,
-    marginTop: 10,
-  },
-  progressTrack: {
-    flex: 1,
-    height: 5,
-    top:155 ,
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-  },
-  completedProgress: {
-    width: '100%',
   },
 });
 

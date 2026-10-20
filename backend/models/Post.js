@@ -28,6 +28,7 @@ const postSchema = new mongoose.Schema({
   videoStorageKey: { type: String, default: '' },
   videoDuration: { type: Number, default: 0 },
   videoThumbnail: { type: String, default: '' },
+  videoThumbnailStorageKey: { type: String, default: '' },
   videoLink: { type: String, default: '' },
   amount: { type: String },
   ownerPhone: { type: String },
@@ -36,6 +37,10 @@ const postSchema = new mongoose.Schema({
   status: { type: String, enum: ['active', 'stopped'], default: 'active' },
   isReported: { type: Boolean, default: false },
 }, { timestamps: true });
+
+postSchema.index({ trending: -1, featured: -1, createdAt: -1 });
+postSchema.index({ status: 1, createdAt: -1, _id: -1 });
+postSchema.index({ createdAt: -1, _id: -1 });
 
 postSchema.pre('save', async function() {
   this.amount = `RWF ${this.price.toLocaleString()}`;

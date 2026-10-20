@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { isOfflineStorageEnabled } from './offlineDatabase';
 
 export const OFFLINE_CACHE_LIMIT_BYTES = 300 * 1024 * 1024;
 const LEDGER_KEY = '@shaaka/offline-cache-ledger-v1';
@@ -52,6 +53,7 @@ export const offlineStorage = {
   },
 
   async set(key, value, options = {}) {
+    if (!(await isOfflineStorageEnabled())) return false;
     const serialized = JSON.stringify(value);
     const bytes = new Blob([serialized]).size;
     if (bytes > OFFLINE_CACHE_LIMIT_BYTES && !options.protected) {
@@ -68,6 +70,7 @@ export const offlineStorage = {
       return false;
     }
 
+    if (!(await isOfflineStorageEnabled())) return false;
     await AsyncStorage.setItem(`${DATA_PREFIX}${key}`, serialized);
     ledger.entries[key] = {
       key,
@@ -106,6 +109,13 @@ export const offlineStorage = {
     const ledger = await readLedger();
     await evictUntilFits(ledger, 0);
     await writeLedger(ledger);
+  },
+
+  async clear() {
+    const keys = await AsyncStorage.getAllKeys();
+    const cacheKeys = keys.filter(key => key.startsWith(DATA_PREFIX));
+    if (cacheKeys.length) await AsyncStorage.multiRemove(cacheKeys);
+    await AsyncStorage.setItem(LEDGER_KEY, JSON.stringify({ entries: {}, totalBytes: 0 }));
   },
 };
 

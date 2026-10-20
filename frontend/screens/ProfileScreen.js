@@ -19,6 +19,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useIsFocused } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -27,6 +28,9 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
+import { networkStatus } from '../services/networkStatus';
+import { offlineDatabase } from '../services/offlineDatabase';
+import { mediaCache } from '../services/mediaCache';
 import SharedBottomNav from '../components/SharedBottomNav';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import PostCoverImage from '../components/PostCoverImage';
@@ -48,8 +52,7 @@ const translations = {
     saved: 'Saved',
     noPosts: 'No posts yet',
     noVideos: 'No videos yet',
-    noSavedPosts: 'No saved posts yet',
-    savePostsHint: 'Save posts you like to see them here',
+    noSavedPosts: 'No saved posts yet',     
     createFirstVideo: 'Create your first video',
     addFirstPost: 'Add your first post/product here',
     saveFirstPost: 'Save your first post/product',
@@ -86,7 +89,6 @@ const translations = {
     noPosts: 'Nta gicuruzwa',
     noVideos: 'Nta videwo',
     noSavedPosts: 'Nta gicuruzwa cyabitswe',
-    savePostsHint: 'Bika ibicuruzwa ukunda kugira ngo ubibone hano',
     createFirstVideo: 'Kora videwo yawe ya mbere',
     addFirstPost: 'Ongeraho igicuruzwa cyawe cya mbere hano',
     saveFirstPost: 'Bika igicuruzwa cyawe cya mbere',
@@ -160,6 +162,44 @@ const getPostImageSource = (img) => {
   if (typeof img === 'object' && img.uri) return img;
   return DEFAULT_AVATAR;
 };
+
+const cacheProfileUserImages = async (user) => {
+  if (!user) return user;
+  const cachedUser = { ...user };
+  for (const key of ['avatar', 'coverImage', 'coverPhoto', 'bannerImage']) {
+    if (typeof cachedUser[key] === 'string') {
+      cachedUser[key] = await mediaCache.cacheImage(cachedUser[key]);
+    }
+  }
+  return cachedUser;
+};
+
+const cacheProfilePostImages = async (posts) => Promise.all(posts.map(async (post) => {
+  const isVideo = isVideoPostItem(post);
+  const imageUri = isVideo
+    ? resolvePostVideoCover(post) || resolvePostImageUri(post)
+    : resolvePostImageUri(post);
+  if (typeof imageUri !== 'string') return post;
+
+  const localUri = await mediaCache.cacheImage(imageUri);
+  if (localUri === imageUri) return post;
+  if (isVideo) return { ...post, videoThumbnail: localUri };
+
+  for (const key of ['imageUrl', 'image', 'thumbnail', 'thumbnailUrl', 'coverImage', 'coverPhoto', 'bannerImage', 'mediaUrl']) {
+    if (post[key]) return { ...post, [key]: localUri };
+  }
+  for (const key of ['houseImages', 'images', 'imageUrls']) {
+    if (Array.isArray(post[key])) {
+      const firstImageIndex = post[key].findIndex(Boolean);
+      if (firstImageIndex !== -1) {
+        const images = [...post[key]];
+        images[firstImageIndex] = localUri;
+        return { ...post, [key]: images };
+      }
+    }
+  }
+  return { ...post, imageUrl: localUri };
+}));
 
 // Normalise any "user id" shape (string, {_id}, {id}, {userId}, nested objects, etc.) into a string.
 const normaliseUserId = (raw) => {
@@ -251,6 +291,7 @@ const PostCoverTile = ({ post, style, onPress, children }) => {
 };
 
 const ProfileScreen = ({ navigation, route, language }) => {
+  const isFocused = useIsFocused();
   const { theme, isDarkMode } = useTheme();
   const { logout, updateUser: updateAuthUser, syncStoredUser } = useAuth();
   const t = translations[language] || translations.English;
@@ -272,6 +313,8 @@ const ProfileScreen = ({ navigation, route, language }) => {
   const [savedPostIds, setSavedPostIds] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const postsRequestInFlight = useRef(false);
+  const lastPostsSnapshot = useRef(null);
 
   // Edit Profile Bottom Sheet
   const [editSheetVisible, setEditSheetVisible] = useState(false);
@@ -290,6 +333,27 @@ const ProfileScreen = ({ navigation, route, language }) => {
   // Sidebar
   const [sidebarVisible, setSidebarVisible] = useState(false);
   const sidebarSlideAnim = useRef(new Animated.Value(SIDEBAR_WIDTH)).current;
+
+  const sidebarPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, gestureState) =>
+        gestureState.dx > 10 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+      onPanResponderMove: (_, gestureState) => {
+        sidebarSlideAnim.setValue(Math.max(0, gestureState.dx));
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        if (gestureState.dx > 50 || gestureState.vx > 0.5) {
+          closeSidebar();
+        } else {
+          Animated.spring(sidebarSlideAnim, { toValue: 0, useNativeDriver: true, speed: 12 }).start();
+        }
+      },
+      onPanResponderTerminate: () => {
+        Animated.spring(sidebarSlideAnim, { toValue: 0, useNativeDriver: true, speed: 12 }).start();
+      },
+    })
+  ).current;
 
   // PanResponder for edit bottom sheet
   const panResponder = useRef(
@@ -324,6 +388,43 @@ const ProfileScreen = ({ navigation, route, language }) => {
   useEffect(() => {
     loadData();
   }, [paramUserId]);
+
+  useEffect(() => {
+    if (!isFocused || loading) return undefined;
+
+    const refreshPosts = async () => {
+      if (postsRequestInFlight.current || !networkStatus.get().isOnline) return;
+
+      const targetUserId = normaliseUserId(paramUserId)
+        || normaliseUserId(viewedUser?._id || currentUser?._id || currentUser?.id);
+      if (!targetUserId) return;
+
+      postsRequestInFlight.current = true;
+      try {
+        const token = await getToken();
+        if (!token) return;
+
+        const response = await axios.get(
+          `${BASE_URL}/api/posts/user/${encodeURIComponent(targetUserId)}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const posts = response.data.posts || [];
+        const snapshot = JSON.stringify(posts);
+        if (snapshot === lastPostsSnapshot.current) return;
+
+        lastPostsSnapshot.current = snapshot;
+        await offlineDatabase.putRecord('profile-posts', targetUserId, posts, { priority: 'medium' });
+        setUserPosts(await cacheProfilePostImages(posts));
+      } catch {
+        // Keep the current profile visible when a background refresh fails.
+      } finally {
+        postsRequestInFlight.current = false;
+      }
+    };
+
+    const intervalId = setInterval(refreshPosts, 1000);
+    return () => clearInterval(intervalId);
+  }, [isFocused, loading, paramUserId, viewedUser, currentUser]);
 
   // Never allow the 'saved' tab on other people's profiles
   useEffect(() => {
@@ -385,19 +486,24 @@ const ProfileScreen = ({ navigation, route, language }) => {
       return;
     }
 
+    await networkStatus.start();
+    const isOnline = networkStatus.get().isOnline;
+
     // 1. Get current user (required)
     let me = null;
-    try {
-      const meResponse = await axios.get(`${BASE_URL}/api/auth/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (meResponse.data.success) {
-        me = meResponse.data.user;
-        setCurrentUser(me);
-        await AsyncStorage.setItem('user', JSON.stringify(me));
+    if (isOnline) {
+      try {
+        const meResponse = await axios.get(`${BASE_URL}/api/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (meResponse.data.success) {
+          me = meResponse.data.user;
+          setCurrentUser(me);
+          await AsyncStorage.setItem('user', JSON.stringify(me));
+        }
+      } catch (e) {
+        console.warn('loadData -> /auth/me failed:', e.message);
       }
-    } catch (e) {
-      console.warn('loadData -> /auth/me failed:', e.message);
     }
 
     // Fallback to cached user
@@ -428,24 +534,36 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
 
     if (isOwn) {
-      setAvatarUri(me.avatar || null);
-      setUsername(me.username || me.phone || '');
-      setName(me.name || me.username || '');
-      setViewedUser(me);
-      setSocialLinks(Array.isArray(me.socialLinks) ? me.socialLinks.filter(l => typeof l === 'string') : []);
+      const ownUser = await cacheProfileUserImages(me);
+      setAvatarUri(ownUser.avatar || null);
+      setUsername(ownUser.username || ownUser.phone || '');
+      setName(ownUser.name || ownUser.username || '');
+      setViewedUser(ownUser);
+      setSocialLinks(Array.isArray(ownUser.socialLinks) ? ownUser.socialLinks.filter(l => typeof l === 'string') : []);
     } else {
-      // 3. Fetch the other user (non-fatal)
-      let otherUser = { _id: targetUserId, username: paramUsername || 'User' };
+      let cachedOtherUser = null;
       try {
-        const userResponse = await axios.get(
-          `${BASE_URL}/api/user/${encodeURIComponent(targetUserId)}`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-        if (userResponse.data.success) {
-          otherUser = userResponse.data.user;
+        cachedOtherUser = await offlineDatabase.getRecord('profiles', targetUserId);
+      } catch {}
+
+      let otherUser = { _id: targetUserId, username: paramUsername || 'User' };
+      if (cachedOtherUser) {
+        otherUser = await cacheProfileUserImages(cachedOtherUser);
+      }
+      if (isOnline) {
+        try {
+          const userResponse = await axios.get(
+            `${BASE_URL}/api/user/${encodeURIComponent(targetUserId)}`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (userResponse.data.success) {
+            const fetchedUser = userResponse.data.user;
+            await offlineDatabase.putRecord('profiles', targetUserId, fetchedUser, { priority: 'medium' });
+            otherUser = await cacheProfileUserImages(fetchedUser);
+          }
+        } catch (e) {
+          console.warn('loadData -> /api/user/:id failed:', e.message);
         }
-      } catch (e) {
-        console.warn('loadData -> /api/user/:id failed:', e.message);
       }
       setViewedUser(otherUser);
       setAvatarUri(otherUser.avatar || null);
@@ -457,14 +575,29 @@ const ProfileScreen = ({ navigation, route, language }) => {
     setIsOwnProfile(isOwn);
 
     // 4. Posts (non-fatal)
+    let cachedPosts = null;
     try {
-      const postsResponse = await axios.get(
-        `${BASE_URL}/api/posts/user/${encodeURIComponent(targetUserId)}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      setUserPosts(postsResponse.data.posts || []);
-    } catch (e) {
-      console.warn('loadData -> /api/posts/user/:id failed:', e.message);
+      cachedPosts = await offlineDatabase.getRecord('profile-posts', targetUserId);
+      if (Array.isArray(cachedPosts)) {
+        setUserPosts(await cacheProfilePostImages(cachedPosts));
+      }
+    } catch {}
+
+    if (isOnline) {
+      try {
+        const postsResponse = await axios.get(
+          `${BASE_URL}/api/posts/user/${encodeURIComponent(targetUserId)}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const posts = postsResponse.data.posts || [];
+        lastPostsSnapshot.current = JSON.stringify(posts);
+        await offlineDatabase.putRecord('profile-posts', targetUserId, posts, { priority: 'medium' });
+        setUserPosts(await cacheProfilePostImages(posts));
+      } catch (e) {
+        console.warn('loadData -> /api/posts/user/:id failed:', e.message);
+        if (!Array.isArray(cachedPosts)) setUserPosts([]);
+      }
+    } else if (!Array.isArray(cachedPosts)) {
       setUserPosts([]);
     }
 
@@ -996,9 +1129,9 @@ const ProfileScreen = ({ navigation, route, language }) => {
   const handleAddFirstPost = () => {
     if (!isOwnProfile) return;
     try {
-      navigation.navigate('AddPost');
+      navigation.navigate('Main', { screen: 'AddShop' });
     } catch (e) {
-      Alert.alert('Error', 'AddPost screen not found.');
+      Alert.alert('Error', 'AddShop screen not found.');
     }
   };
 
@@ -1048,17 +1181,14 @@ const ProfileScreen = ({ navigation, route, language }) => {
     if (activeTab === 'saved') {
       return (
         <View style={styles.emptyState}>
-          <Ionicons name="bookmark-outline" size={64} color={theme.textSecondary} />
+          {isOwnProfile ? (
+            <TouchableOpacity onPress={handleSaveFirstPost} accessibilityRole="button" accessibilityLabel={t.explorePosts}>
+              <Ionicons name="bookmark-outline" size={64} color={theme.textSecondary} />
+            </TouchableOpacity>
+          ) : (
+            <Ionicons name="bookmark-outline" size={64} color={theme.textSecondary} />
+          )}
           <Text style={[styles.emptyStateText, { color: theme.textSecondary }]}>{t.noSavedPosts}</Text>
-          <Text style={[styles.emptyStateSubtext, { color: theme.textSecondary }]}>{t.savePostsHint}</Text>
-          <TouchableOpacity
-            style={[styles.emptyPrimaryButton, { backgroundColor: theme.accent }]}
-            onPress={handleSaveFirstPost}
-            activeOpacity={0.85}
-          >
-            <Ionicons name="bookmark-outline" size={20} color="#fff" />
-            <Text style={styles.emptyPrimaryButtonText}>{t.saveFirstPost}</Text>
-          </TouchableOpacity>
         </View>
       );
     }
@@ -1089,18 +1219,14 @@ const ProfileScreen = ({ navigation, route, language }) => {
     // POSTS
     return (
       <View style={styles.emptyState}>
-        <Ionicons name="images-outline" size={64} color={theme.textSecondary} />
-        <Text style={[styles.emptyStateText, { color: theme.textSecondary }]}>{t.noPosts}</Text>
-        {isOwnProfile && (
-          <TouchableOpacity
-            style={[styles.emptyPrimaryButton, { backgroundColor: theme.accent }]}
-            onPress={handleAddFirstPost}
-            activeOpacity={0.85}
-          >
-            <Ionicons name="add-circle-outline" size={20} color="#fff" />
-            <Text style={styles.emptyPrimaryButtonText}>{t.addFirstPost}</Text>
+        {isOwnProfile ? (
+          <TouchableOpacity onPress={handleAddFirstPost} accessibilityRole="button" accessibilityLabel={t.addFirstPost}>
+            <Ionicons name="images-outline" size={64} color={theme.textSecondary} />
           </TouchableOpacity>
+        ) : (
+          <Ionicons name="images-outline" size={64} color={theme.textSecondary} />
         )}
+        <Text style={[styles.emptyStateText, { color: theme.textSecondary }]}>{t.noPosts}</Text>
       </View>
     );
   };
@@ -1156,6 +1282,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
               transform: [{ translateX: sidebarSlideAnim }],
             },
           ]}
+          {...sidebarPanResponder.panHandlers}
         >
           <View style={styles.sidebarContent}>
             <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('addPost')}>
@@ -1463,7 +1590,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     width: SIDEBAR_WIDTH,
     zIndex: 25,
-    borderLeftWidth: 0,
+    borderLeftWidth: 1,
     shadowColor: '#000',
     shadowOffset: { width: -2, height: 0 },
     shadowOpacity: 0.15,

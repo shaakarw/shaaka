@@ -58,7 +58,7 @@ const mapPost = (post) => ({
   description: post.description || 'No description provided.',
   productName: post.productName || 'Product',
   houseImages: post.houseImages || [],
-  videoUrl: post.videoUrl || post.video?.url || '',
+  videoUrl: post.videoUrl || post.videoHlsUrl || post.video?.url || '',
   videoThumbnail: post.videoThumbnail || post.video?.thumbnail || '',
   videoLink: post.videoLink || '',
   videoDuration: post.videoDuration || post.video?.duration || 0,
@@ -111,7 +111,7 @@ const HeroDeckSection = ({ posts, theme, isDarkMode, onPressPost, onPressUser })
     border: theme.border || (isDarkMode ? '#2C2C2E' : '#D7DDD8'),
     text: theme.text,
     textSecondary: theme.textSecondary,
-    login: theme.login || '#47ae87',
+    login: theme.background || '#47ae87',
     brand: theme.login || '#47ae87',
     title: theme.text,
     overlay: '#000000',
@@ -498,7 +498,7 @@ const SearchScreen = ({ navigation, route, language }) => {
   }, [authUser?._id]);
 
   // ---------------------------------------------------------------
-  // 3-per-row trending grid → seed on feed load
+  // Trending grid → seed on feed load
   // ---------------------------------------------------------------
   useEffect(() => {
     const source = trendingPosts.length ? trendingPosts : allPosts;
@@ -667,42 +667,56 @@ const SearchScreen = ({ navigation, route, language }) => {
     </TouchableOpacity>
   );
 
-  // ---------- 3-per-row grid tile ----------
-  const renderGridItem = ({ item, index }) => (
-    <TouchableOpacity
-      style={styles.gridItem}
-      activeOpacity={0.85}
-      onPress={() => handlePostPress(item)}
-    >
-      <View style={styles.gridImageWrap}>
-        {item.videoUrl ? (
-          <View style={styles.gridVideoBadge}>
-            <Ionicons name="videocam" size={12} color="#fff" />
-          </View>
-        ) : null}
-        <Image
-          source={{
-            uri:
-              getVideoCover(item.videoUrl, item.videoThumbnail) ||
-              item.houseImages?.[0] ||
-              'https://via.placeholder.com/150',
-          }}
-          style={styles.gridImage}
-        />
-      </View>
-      <Text style={[styles.gridTitle, { color: txtColor }]} numberOfLines={1}>
-        {item.productName}
-      </Text>
-      {!!item.amount && (
-        <Text
-          style={[styles.gridAmount, { color: theme.login || '#47ae87' }]}
-          numberOfLines={1}
-        >
-          {item.amount}
-        </Text>
-      )}
-    </TouchableOpacity>
-  );
+  // ---------- 2-per-row grid tile with overlays ----------
+  const renderGridItem = ({ item, index }) => {
+    const amountText =
+      item.amount ||
+      (item.price != null ? `RWF ${item.price.toLocaleString()}` : '');
+
+    return (
+      <TouchableOpacity
+        style={styles.gridItem}
+        activeOpacity={0.85}
+        onPress={() => handlePostPress(item)}
+      >
+        <View style={styles.gridImageWrap}>
+          <Image
+            source={{
+              uri:
+                getVideoCover(item.videoUrl, item.videoThumbnail) ||
+                item.houseImages?.[0] ||
+                'https://via.placeholder.com/150',
+            }}
+            style={styles.gridImage}
+          />
+
+          {/* Shade overlay for readability */}
+          <View style={styles.gridImageShade} />
+
+          {/* Top-left: product name */}
+          {!!item.productName && (
+            <Text style={styles.gridOverlayTitle} numberOfLines={2}>
+              {item.productName}
+            </Text>
+          )}
+
+          {/* Top-right: video indicator */}
+          {item.videoUrl && (
+            <View style={styles.gridVideoBadge}>
+              <Ionicons name="videocam" size={12} color="#fff" />
+            </View>
+          )}
+
+          {/* Bottom-right: amount / price */}
+          {!!amountText && (
+            <Text style={styles.gridOverlayAmount} numberOfLines={1}>
+              {amountText}
+            </Text>
+          )}
+        </View>
+      </TouchableOpacity>
+    );
+  };
 
   const renderBrowseView = () => {
     if (sectionGroups.length === 0) {
@@ -756,7 +770,7 @@ const SearchScreen = ({ navigation, route, language }) => {
                   {
                     backgroundColor:
                       i === activeSectionIndex
-                        ? theme.login || '#47ae87'
+                        ? theme.text || '#47ae87'
                         : subTextColor + '55',
                     width: i === activeSectionIndex ? 18 : 6,
                   },
@@ -784,7 +798,7 @@ const SearchScreen = ({ navigation, route, language }) => {
         data={gridPosts}
         keyExtractor={(item, index) => `grid-${item._id}-${index}`}
         renderItem={renderGridItem}
-        numColumns={3}
+        numColumns={2}
         columnWrapperStyle={styles.gridRow}
         ListHeaderComponent={ListHeader}
         contentContainerStyle={styles.gridContent}
@@ -901,7 +915,7 @@ const SearchScreen = ({ navigation, route, language }) => {
       <View
         style={[
           styles.searchContainer,
-          { backgroundColor: inputBgColor, borderColor: softBorder },
+          { backgroundColor:  bgColor, borderColor: softBorder },
         ]}
       >
         <Ionicons name="search" size={20} color={subTextColor} style={styles.searchIcon} />
@@ -1019,7 +1033,7 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
 
-  /* ---------- 3-per-row product grid ---------- */
+  /* ---------- 2-per-row product grid ---------- */
   gridContent: {
     paddingBottom: 60,
   },
@@ -1029,7 +1043,7 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   gridItem: {
-    width: (width - 32 - 16) / 3, // 16 px padding each side + two 8 px gaps
+    width: (width - 40) / 2, // 16 px padding each side + one 8 px gap
   },
   gridImageWrap: {
     width: '100%',
@@ -1044,27 +1058,52 @@ const styles = StyleSheet.create({
     height: '100%',
     resizeMode: 'cover',
   },
+  gridImageShade: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.22)',
+  },
+
+  /* Overlay: product name (top-left) */
+  gridOverlayTitle: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    right: 34,
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '800',
+    textShadowColor: 'rgba(0,0,0,0.85)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+
+  /* Overlay: video indicator (top-right) */
   gridVideoBadge: {
     position: 'absolute',
-    top: 4,
-    right: 4,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+    top: 6,
+    right: 6,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
     backgroundColor: 'rgba(0,0,0,0.6)',
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 5,
   },
-  gridTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    marginTop: 6,
-  },
-  gridAmount: {
-    fontSize: 11,
+
+  /* Overlay: amount (bottom-right) */
+  gridOverlayAmount: {
+    position: 'absolute',
+    right: 8,
+    bottom: 8,
+    maxWidth: '75%',
+    color: '#fff',
+    fontSize: 13,
     fontWeight: '800',
-    marginTop: 2,
+    textAlign: 'right',
+    textShadowColor: 'rgba(0,0,0,0.85)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
 
   /* ---------- Search result rows ---------- */
@@ -1160,4 +1199,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default SearchScreen;  
+export default SearchScreen;

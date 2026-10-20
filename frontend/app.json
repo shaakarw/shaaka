@@ -6,10 +6,6 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "splash": {
-      "image": "./assets/icon.png",
-      "backgroundColor": "#ffffff"
-    },
     "ios": {
       "supportsTablet": true
     },
@@ -18,12 +14,10 @@
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true,
       "package": "com.anonymous.shaaka",
       "permissions": [
         "INTERNET"
-      ],
-      "allowCleartextTraffic": true
+      ]
     },
     "web": {
       "favicon": "./assets/icon.png"
@@ -50,9 +44,19 @@
           ]
         }
       ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ],
       "expo-video",
       "expo-sqlite",
-      "expo-status-bar"
+      "expo-status-bar",
+      "expo-font"
     ],
     "extra": {
       "eas": {

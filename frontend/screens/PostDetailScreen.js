@@ -13,7 +13,6 @@ import {
   Linking,
   ActivityIndicator,
   FlatList,
-  Animated,
   Modal,
   StatusBar,
   useWindowDimensions,
@@ -571,27 +570,6 @@ const PostDetailScreen = ({ route, navigation }) => {
   const [postNotFound, setPostNotFound] = useState(false);
   const [activeTab, setActiveTab] = useState('Contact');
 
-  const scaleAnim = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    if (loading) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(scaleAnim, {
-            toValue: 1.2,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-          Animated.timing(scaleAnim, {
-            toValue: 1,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-        ])
-      ).start();
-    }
-  }, [loading]);
-
   useEffect(() => {
     if (authUser) {
       setCurrentUser(authUser);
@@ -608,82 +586,77 @@ const PostDetailScreen = ({ route, navigation }) => {
 
   const checkLoginStatus = async () => {
     try {
-      const loggedIn = await AsyncStorage.getItem('isLoggedIn');
-      setIsLoggedIn(loggedIn === 'true');
-      if (loggedIn === 'true') {
-        await loadPostAndUser();
-      } else if (paramPostId) {
-        await loadPostById(paramPostId);
-      } else if (initialHouse) {
-        setHouse(initialHouse);
+      const storedValues = await AsyncStorage.multiGet(['isLoggedIn', 'userToken']);
+      const isAuthenticated = storedValues[0]?.[1] === 'true' && Boolean(storedValues[1]?.[1]);
+      const token = storedValues[1]?.[1];
+      setIsLoggedIn(isAuthenticated);
+      if (!isAuthenticated) {
         setLoading(false);
-      } else {
-        setPostNotFound(true);
+        return;
+      }
+
+      const postId = paramPostId || initialHouse?._id;
+      const matchesInitialHouse = initialHouse && (!paramPostId || String(initialHouse._id) === String(paramPostId));
+      let visiblePost = matchesInitialHouse ? normalizePost(initialHouse) : null;
+      if (!visiblePost && postId) {
+        const [cachedPost, cachedFeed] = await Promise.all([
+          offlineDatabase.getRecord('posts', postId),
+          offlineDatabase.getRecord('feed', 'page-1'),
+        ]);
+        const feedPost = cachedFeed?.find(post => String(post._id) === String(postId));
+        visiblePost = cachedPost || (feedPost ? normalizePost(feedPost) : null);
+      }
+      if (visiblePost) {
+        setHouse(visiblePost);
         setLoading(false);
       }
+      await loadPostAndUser(token, visiblePost);
     } catch (error) {
       console.error('checkLoginStatus error:', error);
       setLoading(false);
     }
   };
 
-  const loadPostAndUser = async () => {
-    try {
-      const token = await AsyncStorage.getItem('userToken');
-      let postData = null;
-      if (paramPostId) {
-        postData = await fetchPostById(paramPostId, token);
-      } else if (initialHouse) {
-        if (initialHouse._id) postData = await fetchPostById(initialHouse._id, token);
-        else postData = { ...initialHouse };
-      }
-
-      if (
-        !postData &&
-        initialHouse &&
-        (!paramPostId || String(initialHouse._id) === String(paramPostId))
-      ) {
-        postData = initialHouse;
-      }
-      if (!postData) {
-        setPostNotFound(true);
-        return;
-      }
-
-      setHouse(postData);
-      try {
-        await offlineDatabase.putRecord('posts', postData._id, postData, { priority: 'medium' });
-      } catch (error) {
-        console.warn('Could not cache post details:', error.message);
-      }
-
-      if (!token) return;
-
-      try {
-        const userResponse = await axios.get(`${BASE_URL}/api/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (userResponse.data.success) setCurrentUser(userResponse.data.user);
-      } catch (error) {
+  const loadPostAndUser = async (token, visiblePost) => {
+    const postId = paramPostId || visiblePost?._id || initialHouse?._id;
+    const headers = { Authorization: `Bearer ${token}` };
+    const postRequest = postId ? fetchPostById(postId, token) : Promise.resolve(visiblePost);
+    const userRequest = axios.get(`${BASE_URL}/api/auth/me`, { headers })
+      .then(response => response.data.success ? response.data.user : null)
+      .catch(error => {
         console.warn('Could not refresh user while loading post:', error.message);
-      }
-
-      try {
-        const savedResponse = await axios.get(`${BASE_URL}/api/posts/saved`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const savedIds = (savedResponse.data.posts || []).map(post => post._id);
-        setIsSaved(savedIds.includes(postData._id));
-      } catch (error) {
+        return null;
+      });
+    const savedRequest = axios.get(`${BASE_URL}/api/posts/saved`, { headers })
+      .then(response => (response.data.posts || []).map(post => post._id))
+      .catch(error => {
         console.warn('Could not refresh saved posts:', error.message);
+        return null;
+      });
+
+    try {
+      const postData = await postRequest || visiblePost;
+      if (postData) {
+        const normalizedPost = normalizePost(postData);
+        setHouse(normalizedPost);
+        setLoading(false);
+        if (normalizedPost._id) {
+          offlineDatabase.putRecord('posts', normalizedPost._id, normalizedPost, { priority: 'medium' })
+            .catch(error => console.warn('Could not cache post details:', error.message));
+        }
+      } else if (!visiblePost) {
+        setPostNotFound(true);
+        setLoading(false);
       }
     } catch (error) {
-      console.error('Error loading post and user:', error);
-      if (initialHouse) setHouse(initialHouse);
-      else setPostNotFound(true);
-    } finally {
+      console.error('Error loading post details:', error);
+      if (!visiblePost) setPostNotFound(true);
       setLoading(false);
     }
+
+    const [user, savedIds] = await Promise.all([userRequest, savedRequest]);
+    if (user) setCurrentUser(user);
+    if (savedIds && postId) setIsSaved(savedIds.includes(postId));
   };
 
   const fetchPostById = async (postId, token = null) => {
@@ -692,11 +665,8 @@ const PostDetailScreen = ({ route, navigation }) => {
       const response = await axios.get(`${BASE_URL}/api/posts/${postId}`, { headers });
       if (response.data.success && response.data.post) {
         const normalizedPost = normalizePost(response.data.post);
-        try {
-          await offlineDatabase.putRecord('posts', postId, normalizedPost, { priority: 'medium' });
-        } catch (error) {
-          console.warn('Could not cache fetched post:', error.message);
-        }
+        offlineDatabase.putRecord('posts', postId, normalizedPost, { priority: 'medium' })
+          .catch(error => console.warn('Could not cache fetched post:', error.message));
         return normalizedPost;
       }
     } catch (error) {
@@ -714,17 +684,6 @@ const PostDetailScreen = ({ route, navigation }) => {
       console.error('Could not load cached post:', error);
       return null;
     }
-  };
-
-  const loadPostById = async (postId) => {
-    const post = await fetchPostById(postId) || (
-      initialHouse && String(initialHouse._id) === String(postId)
-        ? normalizePost(initialHouse)
-        : null
-    );
-    if (post) setHouse(post);
-    else setPostNotFound(true);
-    setLoading(false);
   };
 
   const toggleSave = async () => {
@@ -881,13 +840,10 @@ const PostDetailScreen = ({ route, navigation }) => {
             <View style={styles.titleContainer}>
               <Text style={[styles.subProductName, { color: theme.textSecondary }]}>{productName}</Text>
               <View style={styles.tagsRow}>
-                <Text style={[styles.tagText, { color: theme.textSecondary }]}>Sold by {sellerName}</Text>
-                <Text style={[styles.bullet, { color: theme.textSecondary }]}>•</Text>
-                <Ionicons name="location-outline" size={14} color={theme.textSecondary} />
-                <Text style={[styles.tagText, { color: theme.textSecondary }]}>{location}</Text>
+               <Text style={[styles.tagText, { color: theme.textSecondary }]}>{location}</Text>
               </View>
               <View style={styles.ratingRow}>
-                <Text style={[styles.ratingText, { color: theme.textSecondary }]}>{t.shakarole}</Text>
+                <Text style={[styles.ratingText, { color: theme.login}]}>{t.shakarole}</Text>
               </View>
             </View>
             <View style={styles.priceContainer}>
@@ -1285,7 +1241,7 @@ const styles = StyleSheet.create({
   tagText: { fontSize: 13 },
   bullet: { marginHorizontal: 4 },
   ratingRow: { flexDirection: 'row', alignItems: 'center', gap: 2 },
-  ratingText: { fontSize: 13, marginLeft: 6 },
+  ratingText: { fontSize: 12, marginLeft: 1, fontWeight:500,},
   priceContainer: { alignItems: 'flex-end', justifyContent: 'flex-start', paddingTop: 2 },
   price: { fontSize: 20, fontWeight: '700' },
   negotiable: { fontSize: 12, marginTop: 2 },

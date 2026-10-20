@@ -1,25 +1,28 @@
-import React, { useState, useEffect, useRef } from 'react';
+/* ========================================================================== */
+/*  components/VideoPlayerControls.js                                         */
+/* ========================================================================== */
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  View,
-  TouchableOpacity,
-  Text,
-  StyleSheet,
   Animated,
-  PanResponder,
   Dimensions,
+  PanResponder,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
   TouchableWithoutFeedback,
+  View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
-/* ------------------------------------------------------------------ *
- *  Safe player helpers
- * ------------------------------------------------------------------ */
+const ACCENT_FALLBACK = '#47ae87';
+const CHROME_HIDE_DELAY = 3000;
+const DOUBLE_TAP_DELAY = 240;
+const DOUBLE_TAP_SEEK_SECONDS = 10;
 
 const safePlayerAction = (player, methodName, ...args) => {
   if (!player || typeof player[methodName] !== 'function') return false;
-
   try {
     return player[methodName](...args);
   } catch (error) {
@@ -32,13 +35,8 @@ const safePlayerAction = (player, methodName, ...args) => {
   }
 };
 
-/**
- * Safely set a *property* (not a method) on the native player object,
- * e.g. `player.currentTime = 12` or `player.playbackRate = 1.5`.
- */
 const safePlayerSet = (player, propertyName, value) => {
   if (!player) return false;
-
   try {
     player[propertyName] = value;
     return true;
@@ -52,455 +50,589 @@ const safePlayerSet = (player, propertyName, value) => {
   }
 };
 
-/* ------------------------------------------------------------------ *
- *  Horizontal swipe configuration
- * ------------------------------------------------------------------ */
-
-/** Minimum horizontal travel (px) before a swipe is recognised. */
 const SWIPE_ACTIVATION_DISTANCE = 14;
-
-/** |dx| has to beat |dy| by this factor for the gesture to be "horizontal". */
 const HORIZONTAL_DOMINANCE = 1.4;
-
-/** Swipe LEFT → faster playback (checked from largest distance down). */
 const SPEED_STEPS = [
   { distance: 150, speed: 2 },
   { distance: 95, speed: 1.5 },
   { distance: 45, speed: 1.25 },
 ];
+const PIXELS_PER_REWIND_SECOND = 10;
+const MAX_REWIND_SECONDS = 45;
 
-const getSpeedForDistance = (distance) => {
+const getSpeedForDistance = distance => {
   for (let i = 0; i < SPEED_STEPS.length; i += 1) {
     if (distance >= SPEED_STEPS[i].distance) return SPEED_STEPS[i].speed;
   }
   return 1;
 };
 
-const isHorizontalSwipe = (gestureState) => {
+const isHorizontalSwipe = gestureState => {
   const { dx, dy } = gestureState;
   if (Math.abs(dx) < SWIPE_ACTIVATION_DISTANCE) return false;
   return Math.abs(dx) > Math.abs(dy) * HORIZONTAL_DOMINANCE;
 };
 
-/** Swipe RIGHT → rewind. */
-const PIXELS_PER_REWIND_SECOND = 10;
-const MAX_REWIND_SECONDS = 45;
-
-const getRewindSeconds = (distance) => {
+const getRewindSeconds = distance => {
   const seconds = Math.round(distance / PIXELS_PER_REWIND_SECOND);
   return Math.max(0, Math.min(MAX_REWIND_SECONDS, seconds));
 };
 
-const formatSpeed = (speed) => `${speed}x`;
-
-/* ------------------------------------------------------------------ *
- *  Component
- * ------------------------------------------------------------------ */
+const formatTime = seconds => {
+  const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  const mins = Math.floor(safe / 60);
+  const secs = Math.floor(safe % 60);
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+};
 
 const VideoPlayerControls = ({
   player,
   duration,
   theme,
-  playbackNotice,
+  playbackNotice, // kept for compatibility (unused)
   onManualPlayback,
   muted,
   onMuteChange,
-  progressColor = '#fff',
-  centerControlSize = 48,
+  progressColor,
+  centerControlSize = 64,
   showPlaybackControls = true,
+  showTopMute: showTopMuteProp,
+  showBottomMute = true,
+  controlsAlwaysVisible = false,
+  centerControlOnPauseOnly = false,
   onVideoPress,
+  controlsHidden = false,
+  bottomInset = 0,
+  enableDoubleTapSeek = true,
 }) => {
-  const [isPlaying, setIsPlaying] = useState(true); // Default to playing
-  const [isMuted, setIsMuted] = useState(muted);
+  const [isPlaying, setIsPlaying] = useState(Boolean(player?.playing));
+  const [isMuted, setIsMuted] = useState(Boolean(muted));
   const [currentTime, setCurrentTime] = useState(0);
-  const [showIndicator, setShowIndicator] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekTime, setSeekTime] = useState(0);
-
-  /* --- new state for the swipe gestures --------------------------- */
+  const [isGesturing, setIsGesturing] = useState(false);
+  const [chromeVisible, setChromeVisible] = useState(true);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [gestureIndicator, setGestureIndicator] = useState(null);
 
-  const indicatorOpacity = useRef(new Animated.Value(0)).current;
+  const chromeOpacity = useRef(new Animated.Value(1)).current;
+  const centerScale = useRef(new Animated.Value(1)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
   const progressBarWidth = useRef(SCREEN_WIDTH * 0.7);
   const wasPlayingBeforeSeek = useRef(false);
   const seekTimeRef = useRef(0);
+  const hideChromeTimeout = useRef(null);
+  const gestureIndicatorTimeout = useRef(null);
+  const mounted = useRef(true);
 
-  /* -----------------------------------------------------------------
-   * Latest-value ref.
-   * The PanResponder is created exactly once (useRef below), so it can
-   * only read props/state through refs.
-   * ----------------------------------------------------------------- */
+  // ---- Double-tap tracking ----
+  const lastTapRef = useRef(0);
+  const singleTapTimeout = useRef(null);
+
   const latestRef = useRef({
     player,
     duration,
     currentTime,
     isPlaying,
     playbackSpeed,
+    controlsHidden,
   });
 
   useEffect(() => {
-    latestRef.current = { player, duration, currentTime, isPlaying, playbackSpeed };
+    latestRef.current = {
+      player,
+      duration,
+      currentTime,
+      isPlaying,
+      playbackSpeed,
+      controlsHidden,
+    };
   });
 
-  /* Mutable bookkeeping for the currently active swipe gesture. */
   const gestureRef = useRef({
-    mode: null, // 'speed' | 'seek' | null
-    baseTime: 0, // playback position when the gesture started
-    targetTime: 0, // position we will jump to for a rewind
-    baseSpeed: 1, // speed when the gesture started
-    appliedSpeed: 1, // last speed pushed to the player
-    lastRewindSeconds: -1, // last value rendered in the badge
+    mode: null,
+    baseTime: 0,
+    targetTime: 0,
+    baseSpeed: 1,
+    appliedSpeed: 1,
+    lastRewindSeconds: -1,
+    lastShownSpeed: null,
   }).current;
 
-  const hideIndicatorTimeout = useRef(null);
+  const clearHideChromeTimeout = () => {
+    if (hideChromeTimeout.current) {
+      clearTimeout(hideChromeTimeout.current);
+      hideChromeTimeout.current = null;
+    }
+  };
 
-  /* Clean the pending timeout on unmount. */
-  useEffect(
-    () => () => {
-      if (hideIndicatorTimeout.current) clearTimeout(hideIndicatorTimeout.current);
-    },
-    []
-  );
+  const animateChrome = toValue => {
+    Animated.timing(chromeOpacity, {
+      toValue,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  };
 
-  /* -----------------------------------------------------------------
-   * Gesture badge helpers
-   * ----------------------------------------------------------------- */
+  const scheduleChromeHide = () => {
+    clearHideChromeTimeout();
+    if (
+      controlsHidden ||
+      controlsAlwaysVisible ||
+      !latestRef.current.isPlaying ||
+      isSeeking ||
+      isGesturing
+    )
+      return;
+    hideChromeTimeout.current = setTimeout(() => {
+      hideChromeTimeout.current = null;
+      if (
+        !mounted.current ||
+        controlsHidden ||
+        controlsAlwaysVisible ||
+        isSeeking ||
+        isGesturing ||
+        !latestRef.current.isPlaying
+      )
+        return;
+      setChromeVisible(false);
+      animateChrome(0);
+    }, CHROME_HIDE_DELAY);
+  };
+
+  const revealChrome = () => {
+    clearHideChromeTimeout();
+    if (controlsHidden) return;
+    setChromeVisible(true);
+    animateChrome(1);
+    if (
+      !controlsAlwaysVisible &&
+      latestRef.current.isPlaying &&
+      !isSeeking &&
+      !isGesturing
+    )
+      scheduleChromeHide();
+  };
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      clearHideChromeTimeout();
+      if (gestureIndicatorTimeout.current)
+        clearTimeout(gestureIndicatorTimeout.current);
+      if (singleTapTimeout.current) {
+        clearTimeout(singleTapTimeout.current);
+        singleTapTimeout.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    clearHideChromeTimeout();
+    if (controlsAlwaysVisible) {
+      setChromeVisible(true);
+      animateChrome(1);
+      return clearHideChromeTimeout;
+    }
+    if (controlsHidden) {
+      setChromeVisible(false);
+      animateChrome(0);
+      return undefined;
+    }
+    if (!isPlaying || isSeeking || isGesturing) {
+      setChromeVisible(true);
+      animateChrome(1);
+      return undefined;
+    }
+    scheduleChromeHide();
+    return clearHideChromeTimeout;
+  }, [controlsAlwaysVisible, controlsHidden, isPlaying, isSeeking, isGesturing]);
+
   const clearGestureIndicatorTimeout = () => {
-    if (hideIndicatorTimeout.current) {
-      clearTimeout(hideIndicatorTimeout.current);
-      hideIndicatorTimeout.current = null;
+    if (gestureIndicatorTimeout.current) {
+      clearTimeout(gestureIndicatorTimeout.current);
+      gestureIndicatorTimeout.current = null;
     }
   };
 
   const hideGestureIndicatorSoon = (delay = 650) => {
     clearGestureIndicatorTimeout();
-    hideIndicatorTimeout.current = setTimeout(() => {
-      hideIndicatorTimeout.current = null;
-      setGestureIndicator(null);
+    gestureIndicatorTimeout.current = setTimeout(() => {
+      gestureIndicatorTimeout.current = null;
+      if (mounted.current) setGestureIndicator(null);
     }, delay);
   };
 
-  /**
-   * Applies whatever the active swipe gesture produced.
-   * Runs on both `release` and `terminate` so a cancelled gesture never
-   * leaves the player in a weird state.
-   */
   const finishSwipeGesture = () => {
     const mode = gestureRef.mode;
     gestureRef.mode = null;
-
+    setIsGesturing(false);
     if (!mode) return;
-
     const { player: activePlayer, duration: totalDuration } = latestRef.current;
-
     if (mode === 'seek' && activePlayer && totalDuration > 0) {
-      const target = Math.max(0, Math.min(totalDuration, gestureRef.targetTime));
+      const target = Math.max(
+        0,
+        Math.min(totalDuration, gestureRef.targetTime)
+      );
       safePlayerSet(activePlayer, 'currentTime', target);
       setCurrentTime(target);
       progressAnim.setValue(target / totalDuration);
     }
-
-    // Keep the badge visible for a beat so the user can read the value.
+    revealChrome();
     hideGestureIndicatorSoon(mode === 'seek' ? 500 : 800);
   };
 
-  /* -----------------------------------------------------------------
-   * Horizontal swipe responder (swipe left = speed, swipe right = rewind)
-   * ----------------------------------------------------------------- */
   const swipePanResponder = useRef(
     PanResponder.create({
-      /* Never claim the touch on press → taps keep working. */
       onStartShouldSetPanResponder: () => false,
       onStartShouldSetPanResponderCapture: () => false,
-
-      /* Only claim once the movement is clearly horizontal. */
-      onMoveShouldSetPanResponder: (evt, gestureState) => isHorizontalSwipe(gestureState),
-      onMoveShouldSetPanResponderCapture: (evt, gestureState) => isHorizontalSwipe(gestureState),
-
-      onPanResponderGrant: (evt, gestureState) => {
+      onMoveShouldSetPanResponder: (e, gs) => isHorizontalSwipe(gs),
+      onMoveShouldSetPanResponderCapture: (e, gs) => isHorizontalSwipe(gs),
+      onPanResponderGrant: () => {
         clearGestureIndicatorTimeout();
-
-        const { currentTime: timeAtStart, playbackSpeed: speedAtStart } = latestRef.current;
-
-        gestureRef.mode = gestureState.dx < 0 ? 'speed' : 'seek';
+        clearHideChromeTimeout();
+        revealChrome();
+        setIsGesturing(true);
+        const { currentTime: timeAtStart, playbackSpeed: speedAtStart } =
+          latestRef.current;
+        gestureRef.mode = null;
         gestureRef.baseTime = Number.isFinite(timeAtStart) ? timeAtStart : 0;
         gestureRef.targetTime = gestureRef.baseTime;
         gestureRef.baseSpeed = speedAtStart || 1;
         gestureRef.appliedSpeed = speedAtStart || 1;
         gestureRef.lastRewindSeconds = -1;
+        gestureRef.lastShownSpeed = null;
       },
-
-      onPanResponderMove: (evt, gestureState) => {
-        const mode = gestureRef.mode;
-        if (!mode) return;
-
-        const distance = Math.abs(gestureState.dx);
-
-        /* ---------------- swipe LEFT → playback speed ---------------- */
+      onPanResponderMove: (e, gs) => {
+        const mode = gs.dx < 0 ? 'speed' : 'seek';
+        gestureRef.mode = mode;
+        const distance = Math.abs(gs.dx);
         if (mode === 'speed') {
           const nextSpeed = getSpeedForDistance(distance);
-          if (nextSpeed === gestureRef.appliedSpeed) return;
-
-          gestureRef.appliedSpeed = nextSpeed;
-          latestRef.current.playbackSpeed = nextSpeed;
-
-          setPlaybackSpeed(nextSpeed);
-          safePlayerSet(latestRef.current.player, 'playbackRate', nextSpeed);
-          setGestureIndicator({ type: 'speed', speed: nextSpeed });
+          if (nextSpeed !== gestureRef.appliedSpeed) {
+            gestureRef.appliedSpeed = nextSpeed;
+            latestRef.current.playbackSpeed = nextSpeed;
+            setPlaybackSpeed(nextSpeed);
+            safePlayerSet(latestRef.current.player, 'playbackRate', nextSpeed);
+          }
+          if (nextSpeed !== gestureRef.lastShownSpeed) {
+            gestureRef.lastShownSpeed = nextSpeed;
+            setGestureIndicator({ type: 'speed', speed: nextSpeed });
+          }
           return;
         }
-
-        /* ---------------- swipe RIGHT → rewind ----------------------- */
         const totalDuration = latestRef.current.duration || 0;
         const rewindSeconds = getRewindSeconds(distance);
         if (rewindSeconds === gestureRef.lastRewindSeconds) return;
-
         gestureRef.lastRewindSeconds = rewindSeconds;
-
-        const target = Math.max(0, Math.min(totalDuration, gestureRef.baseTime - rewindSeconds));
+        const target = Math.max(
+          0,
+          Math.min(totalDuration, gestureRef.baseTime - rewindSeconds)
+        );
         gestureRef.targetTime = target;
-
         setGestureIndicator({
           type: 'seek',
+          direction: 'back',
           seconds: Math.max(0, Math.round(gestureRef.baseTime - target)),
           targetTime: target,
         });
       },
-
-      onPanResponderRelease: () => {
-        finishSwipeGesture();
-      },
-
-      onPanResponderTerminate: () => {
-        finishSwipeGesture();
-      },
+      onPanResponderRelease: finishSwipeGesture,
+      onPanResponderTerminate: finishSwipeGesture,
     })
   ).current;
 
-  /* -----------------------------------------------------------------
-   * Existing behaviour (unchanged)
-   * ----------------------------------------------------------------- */
-
-  // Sync isPlaying with player state
   useEffect(() => {
-    if (!player) return;
-    const subscription = player.addListener('playingChange', ({ isPlaying }) => {
-      setIsPlaying(isPlaying);
+    if (!player) return undefined;
+    const sub = player.addListener('playingChange', ({ isPlaying: next }) => {
+      setIsPlaying(next);
     });
-    return () => subscription.remove();
+    return () => sub.remove();
   }, [player]);
 
-  // Listen to time updates
   useEffect(() => {
-    if (!player) return;
-    const timeSubscription = player.addListener(
+    if (!player) return undefined;
+    const sub = player.addListener(
       'timeUpdate',
-      ({ currentTime: time, duration: currentDuration }) => {
+      ({ currentTime: t, duration: d }) => {
         if (!isSeeking) {
-          setCurrentTime(time);
-
-          // Update progress bar
-          if (currentDuration > 0) {
-            const progress = time / currentDuration;
-            progressAnim.setValue(progress);
-          }
+          setCurrentTime(t);
+          const total = d || duration;
+          if (total > 0) progressAnim.setValue(t / total);
         }
       }
     );
-    return () => timeSubscription.remove();
-  }, [player, progressAnim, isSeeking]);
+    return () => sub.remove();
+  }, [player, duration, isSeeking, progressAnim]);
 
-  // Sync muted state with prop
   useEffect(() => {
-    setIsMuted(muted);
+    setIsMuted(Boolean(muted));
   }, [muted]);
 
-  // Reset playback speed whenever a new player (new post/video) arrives.
   useEffect(() => {
     setPlaybackSpeed(1);
     gestureRef.appliedSpeed = 1;
     safePlayerSet(player, 'playbackRate', 1);
-  }, [player]);
-
-  // Show playback indicator when playbackNotice changes
-  useEffect(() => {
-    if (playbackNotice > 0) {
-      setShowIndicator(true);
-      indicatorOpacity.setValue(1);
-      Animated.timing(indicatorOpacity, {
-        toValue: 0,
-        duration: 800,
-        useNativeDriver: true,
-        delay: 400,
-      }).start(() => setShowIndicator(false));
-    }
-  }, [playbackNotice, indicatorOpacity]);
+    setCurrentTime(0);
+    progressAnim.setValue(0);
+  }, [player, progressAnim]);
 
   const togglePlayPause = () => {
     if (!player) return;
-
     const willPlay = !isPlaying;
-    if (willPlay) {
-      safePlayerAction(player, 'play');
-    } else {
-      safePlayerAction(player, 'pause');
-    }
+    if (willPlay) safePlayerAction(player, 'play');
+    else safePlayerAction(player, 'pause');
     setIsPlaying(willPlay);
-    onManualPlayback(willPlay);
+    onManualPlayback?.(willPlay);
+    revealChrome();
+    Animated.sequence([
+      Animated.spring(centerScale, {
+        toValue: 0.92,
+        speed: 26,
+        bounciness: 4,
+        useNativeDriver: true,
+      }),
+      Animated.spring(centerScale, {
+        toValue: 1,
+        speed: 20,
+        bounciness: 5,
+        useNativeDriver: true,
+      }),
+    ]).start();
   };
 
   const toggleMute = () => {
-    const newMuted = !isMuted;
-    setIsMuted(newMuted);
-    onMuteChange(newMuted);
+    const next = !isMuted;
+    safePlayerSet(player, 'muted', next);
+    setIsMuted(next);
+    onMuteChange?.(next);
+    revealChrome();
   };
 
-  const formatTime = (seconds) => {
-    if (!seconds || isNaN(seconds)) return '0:00';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins < 10 ? '0' : ''}${mins}:${secs < 10 ? '0' : ''}${secs}`;
+  const handleVideoPress = () => {
+    revealChrome();
+    if (onVideoPress) onVideoPress();
+    else togglePlayPause();
   };
 
-  const remainingTime =
-    duration > 0 ? Math.max(0, duration - (isSeeking ? seekTime : currentTime)) : 0;
+  // ---- Double-tap seek (left = -10s, right = +10s) ----
+  const handleDoubleTapSeek = tapX => {
+    const activePlayer = latestRef.current.player;
+    const totalDuration = latestRef.current.duration || 0;
+    if (!activePlayer || totalDuration <= 0) {
+      handleVideoPress();
+      return;
+    }
+    const isLeft = tapX < SCREEN_WIDTH / 2;
+    const delta = isLeft ? -DOUBLE_TAP_SEEK_SECONDS : DOUBLE_TAP_SEEK_SECONDS;
+    const current = Number.isFinite(latestRef.current.currentTime)
+      ? latestRef.current.currentTime
+      : 0;
+    const target = Math.max(0, Math.min(totalDuration, current + delta));
+    safePlayerSet(activePlayer, 'currentTime', target);
+    setCurrentTime(target);
+    progressAnim.setValue(target / totalDuration);
+    revealChrome();
+    setGestureIndicator({
+      type: 'seek',
+      direction: isLeft ? 'back' : 'forward',
+      seconds: Math.abs(delta),
+      targetTime: target,
+    });
+    hideGestureIndicatorSoon(600);
+  };
 
-  // Progress bar width interpolation
+  // ---- Tap dispatcher (single = play/pause + reveal chrome, double = seek) ----
+  const handleGestureTap = event => {
+    if (!enableDoubleTapSeek) {
+      handleVideoPress();
+      return;
+    }
+    const now = Date.now();
+    const delta = now - lastTapRef.current;
+    lastTapRef.current = now;
+    const nativeEvent = event?.nativeEvent || {};
+    const tapX =
+      nativeEvent.locationX ?? nativeEvent.pageX ?? SCREEN_WIDTH / 2;
+
+    if (delta < DOUBLE_TAP_DELAY) {
+      if (singleTapTimeout.current) {
+        clearTimeout(singleTapTimeout.current);
+        singleTapTimeout.current = null;
+      }
+      handleDoubleTapSeek(tapX);
+      return;
+    }
+
+    if (singleTapTimeout.current) clearTimeout(singleTapTimeout.current);
+    singleTapTimeout.current = setTimeout(() => {
+      singleTapTimeout.current = null;
+      if (!mounted.current) return;
+      handleVideoPress();
+    }, DOUBLE_TAP_DELAY);
+  };
+
   const progressWidth = progressAnim.interpolate({
     inputRange: [0, 1],
     outputRange: ['0%', '100%'],
   });
+  const currentProgress =
+    duration > 0 ? (isSeeking ? seekTime : currentTime) / duration : 0;
+  const displayedTime = isSeeking ? seekTime : currentTime;
+  const accent = theme?.primary || theme?.accent || theme?.tint || ACCENT_FALLBACK;
+  const seekFill = progressColor || accent;
 
-  // Pan responder for seeking (progress bar) — unchanged
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (evt) => {
-        // Remember if video was playing before seeking
+      onPanResponderGrant: e => {
+        revealChrome();
         wasPlayingBeforeSeek.current = isPlaying;
-        // Pause video while seeking
-        if (isPlaying && player) {
-          safePlayerAction(player, 'pause');
-        }
+        if (isPlaying && player) safePlayerAction(player, 'pause');
         setIsSeeking(true);
-        const touchX = evt.nativeEvent.locationX;
-        const newTime = (touchX / progressBarWidth.current) * duration;
-        const nextTime = Math.max(0, Math.min(duration, newTime));
+        const touchX = e.nativeEvent.locationX;
+        const nextTime = Math.max(
+          0,
+          Math.min(duration, (touchX / progressBarWidth.current) * duration)
+        );
         seekTimeRef.current = nextTime;
         setSeekTime(nextTime);
       },
-      onPanResponderMove: (evt) => {
-        if (isSeeking) {
-          const touchX = evt.nativeEvent.locationX;
-          const newTime = (touchX / progressBarWidth.current) * duration;
-          const nextTime = Math.max(0, Math.min(duration, newTime));
-          seekTimeRef.current = nextTime;
-          setSeekTime(nextTime);
-        }
+      onPanResponderMove: e => {
+        const touchX = e.nativeEvent.locationX;
+        const nextTime = Math.max(
+          0,
+          Math.min(duration, (touchX / progressBarWidth.current) * duration)
+        );
+        seekTimeRef.current = nextTime;
+        setSeekTime(nextTime);
       },
       onPanResponderRelease: () => {
-        if (player && duration > 0) {
-          // Set video to seeked position
-          const nextTime = seekTimeRef.current;
-          try {
-            player.currentTime = nextTime;
-          } catch (error) {
-            // Native player may already be released during teardown.
-          }
+      if (player && duration > 0) {
+        const nextTime = seekTimeRef.current;
+        safePlayerSet(player, 'currentTime', nextTime);
           setCurrentTime(nextTime);
           progressAnim.setValue(nextTime / duration);
-
-          // Resume playback if it was playing before
-          if (wasPlayingBeforeSeek.current) {
-            safePlayerAction(player, 'play');
-          }
+          if (wasPlayingBeforeSeek.current) safePlayerAction(player, 'play');
         }
         setIsSeeking(false);
+        revealChrome();
       },
       onPanResponderTerminate: () => {
         if (player && duration > 0) {
-          // Set video to seeked position
           const nextTime = seekTimeRef.current;
-          try {
-            player.currentTime = nextTime;
-          } catch (error) {
-            // Native player may already be released during teardown.
-          }
+          safePlayerSet(player, 'currentTime', nextTime);
           setCurrentTime(nextTime);
           progressAnim.setValue(nextTime / duration);
-
-          // Resume playback if it was playing before
-          if (wasPlayingBeforeSeek.current) {
-            safePlayerAction(player, 'play');
-          }
+          if (wasPlayingBeforeSeek.current) safePlayerAction(player, 'play');
         }
         setIsSeeking(false);
+        revealChrome();
       },
     })
   ).current;
 
-  // Calculate current progress (0-1)
-  const currentProgress =
-    duration > 0 ? (isSeeking ? seekTime : currentTime) / duration : 0;
-
-  const muteControl = (
-    <View style={styles.topRightContainer} pointerEvents="box-none">
-      <TouchableOpacity
-        onPress={toggleMute}
-        style={styles.muteButton}
-        activeOpacity={0.7}
-        hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-        accessibilityRole="button"
-        accessibilityLabel={isMuted ? 'Unmute video' : 'Mute video'}
+  const centerControl =
+    !isSeeking &&
+    (!centerControlOnPauseOnly || !isPlaying) && (
+      <Animated.View
+        style={[
+          styles.centerControlPosition,
+          {
+            width: centerControlSize,
+            height: centerControlSize,
+            borderRadius: centerControlSize / 2,
+            marginLeft: -centerControlSize / 2,
+            marginTop: -centerControlSize / 2,
+            transform: [{ scale: centerScale }],
+          },
+        ]}
+        pointerEvents={chromeVisible && !controlsHidden ? 'auto' : 'none'}
       >
-        <Ionicons name={isMuted ? 'volume-mute' : 'volume-high'} size={20} color="#fff" />
-      </TouchableOpacity>
-    </View>
+        <TouchableOpacity
+          style={styles.centerControlButton}
+          onPress={togglePlayPause}
+          onPressIn={() =>
+            Animated.spring(centerScale, {
+              toValue: 0.92,
+              speed: 26,
+              bounciness: 4,
+              useNativeDriver: true,
+            }).start()
+          }
+          onPressOut={() =>
+            Animated.spring(centerScale, {
+              toValue: 1,
+              speed: 20,
+              bounciness: 5,
+              useNativeDriver: true,
+            }).start()
+          }
+          accessibilityRole="button"
+          accessibilityLabel={isPlaying ? 'Pause video' : 'Play video'}
+          activeOpacity={0.85}
+        >
+          <Ionicons
+            name={isPlaying ? 'pause' : 'play'}
+            size={centerControlSize * 0.42}
+            color="#ffffff"
+            style={isPlaying ? undefined : { marginLeft: 3 }}
+          />
+        </TouchableOpacity>
+      </Animated.View>
+    );
+
+  const muteButton = (style, iconSize = 18) => (
+    <TouchableOpacity
+      onPress={toggleMute}
+      style={[styles.muteButton, style]}
+      activeOpacity={0.85}
+      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+      accessibilityRole="button"
+      accessibilityLabel={isMuted ? 'Unmute video' : 'Mute video'}
+    >
+      <Ionicons
+        name={isMuted ? 'volume-mute' : 'volume-high'}
+        size={iconSize}
+        color="#ffffff"
+      />
+    </TouchableOpacity>
   );
 
-  if (!showPlaybackControls) {
-    return (
-      <View style={styles.container} pointerEvents="box-none">
-        <TouchableWithoutFeedback onPress={onVideoPress}>
-          <View style={styles.tapArea} />
-        </TouchableWithoutFeedback>
-        {muteControl}
-      </View>
-    );
-  }
+  const showTopMute = showTopMuteProp ?? !showPlaybackControls;
 
   return (
     <View style={styles.container} pointerEvents="box-none">
-      {/*
-        Swipe layer.
-        Wrapping the tap area in its own View keeps the PanResponder
-        handlers separate from the TouchableWithoutFeedback handlers
-        (TouchableWithoutFeedback clones its child and would otherwise
-        overwrite the pan handlers).
-      */}
-      <View style={styles.gestureLayer} {...swipePanResponder.panHandlers}>
-        {/* Full screen tap area for play/pause */}
-        <TouchableWithoutFeedback onPress={onVideoPress || togglePlayPause}>
+      <View
+        style={styles.gestureLayer}
+        pointerEvents={controlsHidden ? 'none' : 'auto'}
+        {...swipePanResponder.panHandlers}
+      >
+        <TouchableWithoutFeedback onPress={handleGestureTap}>
           <View style={styles.tapArea} />
         </TouchableWithoutFeedback>
       </View>
 
-      {/* ---------------- Swipe gesture badge (centre) ---------------- */}
       {gestureIndicator && (
         <View style={styles.gestureIndicatorContainer} pointerEvents="none">
           <View style={styles.gestureIndicatorBubble}>
             <Ionicons
-              name={gestureIndicator.type === 'speed' ? 'play-forward' : 'play-back'}
+              name={
+                gestureIndicator.type === 'speed'
+                  ? 'play-forward'
+                  : gestureIndicator.direction === 'forward'
+                    ? 'play-forward'
+                    : 'play-back'
+              }
               size={20}
-              color="#fff"
+              color="#ffffff"
             />
             <Text style={styles.gestureIndicatorText}>
               {gestureIndicator.type === 'speed'
-                ? formatSpeed(gestureIndicator.speed)
-                : `-${gestureIndicator.seconds}s`}
+                ? `${gestureIndicator.speed}x`
+                : `${gestureIndicator.direction === 'forward' ? '+' : '-'}${gestureIndicator.seconds}s`}
             </Text>
           </View>
           {gestureIndicator.type === 'seek' && (
@@ -511,265 +643,223 @@ const VideoPlayerControls = ({
         </View>
       )}
 
-      {/* ---------------- Mute / Unmute — top right ---------------- */}
-      {muteControl}
+      <Animated.View
+        pointerEvents={chromeVisible ? 'box-none' : 'none'}
+        style={[styles.chromeLayer, { opacity: chromeOpacity }]}
+      >
+        {showTopMute && (
+          <View style={styles.topMuteContainer}>{muteButton()}</View>
+        )}
 
-      {/* Playback Indicator Overlay */}
-      {showIndicator && (
-        <Animated.View
-          style={[styles.indicatorOverlay, { opacity: indicatorOpacity }]}
-          pointerEvents="none"
-        >
-          <Ionicons name={isPlaying ? 'play' : 'pause'} size={48} color="#fff" />
-        </Animated.View>
-      )}
+        {centerControl}
 
-      {/* Center Play Button when paused */}
-      {!isSeeking && (
-        <TouchableOpacity
-          style={[
-            styles.centerControlButton,
-            {
-              width: centerControlSize,
-              height: centerControlSize,
-              borderRadius: centerControlSize / 2,
-              marginLeft: -centerControlSize / 2,
-              marginTop: -centerControlSize / 2,
-            },
-          ]}
-          onPress={togglePlayPause}
-          accessibilityRole="button"
-          accessibilityLabel={isPlaying ? 'Pause video' : 'Play video'}
-        >
-          <Ionicons name={isPlaying ? 'pause' : 'play'} size={centerControlSize * 0.48} color="#fff" />
-        </TouchableOpacity>
-      )}
-
-      {/* Seek time indicator */}
-      {isSeeking && (
-        <View style={styles.seekTimeContainer} pointerEvents="none">
-          <Text style={styles.seekTimeText}>
-            {formatTime(seekTime)} / {formatTime(duration)}
-          </Text>
-        </View>
-      )}
-
-      {/* Bottom Controls Container - No background */}
-      <View style={styles.bottomContainer} pointerEvents="box-none">
-        {/* Bottom Row: Progress Bar - Time */}
-        <View style={styles.controlsRow} pointerEvents="box-none">
-          {/* Spacer keeps the progress bar exactly where it was before
-              the mute button moved to the top-right corner. */}
-          <View style={styles.muteButtonSpacer} pointerEvents="none" />
-
-          {/* Progress Bar (70% width) */}
+        {showPlaybackControls && (
           <View
-            style={styles.progressBarWrapper}
-            onLayout={(event) => {
-              const { width } = event.nativeEvent.layout;
-              progressBarWidth.current = width;
-            }}
+            style={[
+              styles.bottomBarPosition,
+              { bottom: 12 + (bottomInset || 0) },
+            ]}
+            pointerEvents="box-none"
           >
-            <View style={styles.progressBarBackground} {...panResponder.panHandlers}>
-              {/* Progress bar track */}
-              <View style={styles.progressTrack}>
-                <Animated.View
-                  style={[
-                    styles.progressBarFill,
-                    {
-                      width: isSeeking
-                        ? `${(seekTime / duration) * 100}%`
-                        : progressWidth,
-                      backgroundColor: progressColor,
-                    },
-                  ]}
-                />
-              </View>
-
-              {/* Slider thumb - White color */}
+            <View style={styles.bottomPill}>
+              {showBottomMute && muteButton(styles.bottomMuteButton, 17)}
               <View
-                style={[
-                  styles.sliderThumb,
-                  {
-                    left: isSeeking
-                      ? `${(seekTime / duration) * 100}%`
-                      : `${currentProgress * 100}%`,
-                  },
-                ]}
-              />
+                style={styles.progressBarWrapper}
+                onLayout={e => {
+                  progressBarWidth.current = e.nativeEvent.layout.width;
+                }}
+                {...panResponder.panHandlers}
+              >
+                <View style={styles.progressBarBackground}>
+                  <View style={styles.progressTrack}>
+                    <Animated.View
+                      style={[
+                        styles.progressBarFill,
+                        {
+                          width: isSeeking
+                            ? `${
+                                duration > 0
+                                  ? (seekTime / duration) * 100
+                                  : 0
+                              }%`
+                            : progressWidth,
+                          backgroundColor: seekFill,
+                        },
+                      ]}
+                    />
+                  </View>
+                  <View
+                    style={[
+                      styles.sliderThumb,
+                      {
+                        left: `${Math.max(
+                          0,
+                          Math.min(1, currentProgress)
+                        ) * 100}%`,
+                      },
+                    ]}
+                  />
+                </View>
+              </View>
+              <Text
+                style={styles.timeText}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+              >
+                {formatTime(displayedTime)} / {formatTime(duration)}
+              </Text>
             </View>
           </View>
-
-          {/* Remaining Time */}
-          <Text style={styles.remainingTimeText}>-{formatTime(remainingTime)}</Text>
-        </View>
-      </View>
+        )}
+      </Animated.View>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'flex-end',
-    zIndex: 12,
-    elevation: 12,
-  },
-  gestureLayer: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  tapArea: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'transparent',
-  },
+  container: { ...StyleSheet.absoluteFillObject, zIndex: 12, elevation: 12 },
+  gestureLayer: { ...StyleSheet.absoluteFillObject },
+  tapArea: { ...StyleSheet.absoluteFillObject, backgroundColor: 'transparent' },
+  chromeLayer: { ...StyleSheet.absoluteFillObject, zIndex: 14, elevation: 14 },
 
-  /* ---------------- top-right mute button ---------------- */
-  topRightContainer: {
-    position: 'absolute',
-    top: 12,
-    right: 12,
-    zIndex: 20,
-    elevation: 20,
-  },
+  topMuteContainer: { position: 'absolute', top: 12, right: 14 },
+
   muteButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.35)',
+    backgroundColor: 'rgba(18, 12, 14, 0.62)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.24,
+    shadowRadius: 6,
+    elevation: 4,
   },
 
-  /* ---------------- swipe gesture badge ---------------- */
-  gestureIndicatorContainer: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 18,
-    elevation: 18,
-  },
-  gestureIndicatorBubble: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.55)',
-    borderRadius: 22,
-    paddingHorizontal: 16,
-    paddingVertical: 9,
-  },
-  gestureIndicatorText: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '700',
-    marginLeft: 8,
-  },
-  gestureIndicatorSubText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '600',
-    marginTop: 6,
-    opacity: 0.9,
-  },
-
-  /* ---------------- existing overlays ---------------- */
-  indicatorOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0)',
-  },
-  centerControlButton: {
+  centerControlPosition: {
     position: 'absolute',
     top: '50%',
     left: '50%',
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-    justifyContent: 'center',
+    zIndex: 18,
+  },
+  centerControlButton: {
+    flex: 1,
+    borderRadius: 999,
     alignItems: 'center',
-    zIndex: 20,
+    justifyContent: 'center',
+    backgroundColor: 'rgba(12,14,18,0.55)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.85)',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 6,
   },
-  bottomContainer: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: 'transparent',
-    zIndex: 14,
-    elevation: 14,
-  },
-  controlsRow: {
+
+  bottomBarPosition: { position: 'absolute', left: 12, right: 12 },
+  bottomPill: {
+    minHeight: 56,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingBottom: 10,
-    paddingTop: 8,
+    gap: 5,
+    marginBottom: 30,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    borderRadius: 28,
+    backgroundColor: 'rgba(12, 14, 18, 0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.26,
+    shadowRadius: 10,
+    elevation: 6,
+  },
+  bottomMuteButton: {
+    width: 40,
+    height: 40,
+    borderWidth: 0,
     backgroundColor: 'transparent',
+    shadowOpacity: 0,
+    elevation: 0,
+    flexShrink: 0,
   },
-  muteButtonSpacer: {
-    width: 34,
-    height: 34,
-    marginRight: 8,
-  },
-  progressBarWrapper: {
-    flex: 1,
-    maxWidth: '80%',
-    marginHorizontal: -35,
-  },
+  progressBarWrapper: { flex: 1, minWidth: 50, height: 32, justifyContent: 'center' },
   progressBarBackground: {
-    height: 3, // Larger touch area
+    height: 28,
     justifyContent: 'center',
     position: 'relative',
+    paddingVertical: 12,
   },
   progressTrack: {
-    height: 4,
-    backgroundColor: 'rgb(255, 255, 255)', // Semi-transparent white track
-    borderRadius: 2,
+    height: 3,
     width: '100%',
-    overflow: 'hidden',
-  },
-  progressBarFill: {
-    height: '100%',
     borderRadius: 2,
-    // backgroundColor set inline to #fff (white)
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.34)',
   },
+  progressBarFill: { height: '100%', borderRadius: 2 },
   sliderThumb: {
     position: 'absolute',
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: '#fff', // White thumb
-    marginLeft: -7,
-    shadowColor: '#000',
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginLeft: -6,
+    top: '100%',
+    marginTop: 4,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
     shadowRadius: 3,
     elevation: 3,
-    top: '50%',
-    marginTop: -7,
   },
-  seekTimeContainer: {
-    position: 'absolute',
-    bottom: 60,
-    alignSelf: 'center',
-    backgroundColor: 'transparent',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+  timeText: {
+    minWidth: 92,
+    color: '#ffffff',
+    fontSize: 11,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    letterSpacing: 0.3,
+    textAlign: 'right',
+    flexShrink: 0,
+  },
+
+  gestureIndicatorContainer: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
     zIndex: 20,
+    elevation: 20,
   },
-  seekTimeText: {
-    color: '#fff',
-    fontSize: 14,
+  gestureIndicatorBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(12,14,18,0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+    borderRadius: 24,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  gestureIndicatorText: {
+    color: '#ffffff',
+    fontSize: 17,
+    fontWeight: '700',
+    marginLeft: 8,
+    letterSpacing: 0.3,
+  },
+  gestureIndicatorSubText: {
+    color: '#ffffff',
+    fontSize: 13,
     fontWeight: '600',
-  },
-  remainingTimeText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '500',
-    marginLeft: 90,
-    minWidth: 50,
-    
+    marginTop: 6,
+    opacity: 0.9,
   },
 });
 

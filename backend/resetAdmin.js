@@ -13,19 +13,24 @@ const resetAdmin = async () => {
     await mongoose.connect(MONGO_URI);
     console.log('🔌 Connected to MongoDB');
 
-    const user = await User.findOne({ phone: '0799882580' });
+    const phone = process.env.ADMIN_PHONE;
+    const password = process.env.ADMIN_PASSWORD;
+    if (!phone || !password) {
+      throw new Error('ADMIN_PHONE and ADMIN_PASSWORD must be configured');
+    }
+
+    const user = await User.findOneAndUpdate(
+      { phone },
+      { password: await bcrypt.hash(password, 10), role: 'admin' },
+      { new: true, runValidators: false }
+    );
     if (!user) {
       console.log('❌ Admin user not found');
       process.exit(0);
     }
 
-    user.password = await bcrypt.hash('1234', 10);
-    user.role = 'admin';
-    await user.save();
-
-    console.log('✅ Password reset to "1234" and role set to admin');
-    console.log('   Phone: 0799882580');
-    console.log('   Password: 1234');
+    console.log('✅ Admin password reset and role set to admin');
+    console.log('   Phone:', user.phone);
 
     await mongoose.disconnect();
     process.exit(0);

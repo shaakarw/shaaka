@@ -25,6 +25,9 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import * as ImagePicker from 'expo-image-picker';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import { networkStatus } from '../services/networkStatus';
+import { offlineDatabase } from '../services/offlineDatabase';
+import { mediaCache } from '../services/mediaCache';
 
 const { height, width } = Dimensions.get('window');
 const MODAL_HEIGHT_80 = height * 0.7;   // same as ViewPlaceScreen
@@ -237,27 +240,58 @@ export default function ViewShopScreen({ route, navigation }) {
 
   // Fetch current user
   const fetchCurrentUser = useCallback(async () => {
+    await networkStatus.start();
+    let cachedUser = null;
+    try {
+      const cached = await AsyncStorage.getItem('user');
+      if (cached) cachedUser = JSON.parse(cached);
+    } catch {}
+    if (!networkStatus.get().isOnline) {
+      setCurrentUser(cachedUser);
+      return;
+    }
     try {
       const token = await getToken();
-      if (!token) return;
+      if (!token) {
+        setCurrentUser(cachedUser);
+        return;
+      }
       const response = await axios.get(`${BASE_URL}/api/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (response.data.success) setCurrentUser(response.data.user);
+      if (response.data.success) {
+        setCurrentUser(response.data.user);
+        await AsyncStorage.setItem('user', JSON.stringify(response.data.user));
+      }
     } catch (error) {
       console.error('Failed to fetch current user:', error);
+      setCurrentUser(cachedUser);
     }
   }, []);
 
   // Fetch shop
   const fetchShop = useCallback(async () => {
     setLoading(true);
+    let cachedShop = null;
     try {
+      cachedShop = await offlineDatabase.getRecord('mall-shop-details', String(shopId));
+      if (cachedShop) {
+        const hydratedShop = await mediaCache.hydrate(cachedShop);
+        setShop(hydratedShop);
+        const cachedOwner = cachedShop.owner || (typeof cachedShop.ownerId === 'object' ? cachedShop.ownerId : null);
+        if (cachedOwner) setOwner(await mediaCache.hydrate(cachedOwner));
+      }
+
+      await networkStatus.start();
+      if (!networkStatus.get().isOnline) {
+        if (!cachedShop) setShop(null);
+        return;
+      }
       const token = await getToken();
       const response = await axios.get(`${BASE_URL}/api/mall-shops/${shopId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const shopData = response.data.shop;
+      const shopData = await mediaCache.hydrate(response.data.shop);
       setShop(shopData);
 
       // Determine owner
@@ -299,11 +333,18 @@ export default function ViewShopScreen({ route, navigation }) {
       }
       if (!ownerInfo) ownerInfo = { _id: null, name: 'Shop Owner' };
       if (!ownerInfo.name) ownerInfo.name = ownerInfo.username || 'Shop Owner';
-      setOwner(ownerInfo);
+      const hydratedOwner = await mediaCache.hydrate(ownerInfo);
+      setOwner(hydratedOwner);
+      await offlineDatabase.putRecord('mall-shop-details', String(shopId), {
+        ...shopData,
+        owner: hydratedOwner,
+      }, { priority: 'high' });
     } catch (error) {
       console.error('Fetch shop error:', error);
-      showStatusModal({ title: 'Error', message: 'Could not load shop details.', type: 'error' });
-      navigation.goBack();
+      if (!cachedShop) {
+        showStatusModal({ title: 'Error', message: 'Could not load shop details.', type: 'error' });
+        navigation.goBack();
+      }
     } finally {
       setLoading(false);
     }
@@ -351,9 +392,15 @@ export default function ViewShopScreen({ route, navigation }) {
   useEffect(() => {
     const loadShareLink = async () => {
       try {
+        await networkStatus.start();
+        if (!networkStatus.get().isOnline) {
+          setAppShareLink((await AsyncStorage.getItem('appShareLink')) || '');
+          return;
+        }
         const response = await axios.get(`${BASE_URL}/api/settings/share-link`);
         if (response.data.success) {
           setAppShareLink(response.data.shareLink || '');
+          await AsyncStorage.setItem('appShareLink', response.data.shareLink || '');
         }
       } catch (error) {
         console.error('Load share link error:', error.message);
@@ -386,6 +433,10 @@ export default function ViewShopScreen({ route, navigation }) {
       postId: contextId,
       contextType: 'shop',
       contextId,
+      shopId: String(shop._id || shopId),
+      mallId: String(shop.mallId || shop.mall?._id || ''),
+      lat: shop.lat ?? shop.mall?.lat ?? null,
+      lon: shop.lon ?? shop.mall?.lon ?? null,
       title: shop.name || 'Shop',
       description: shop.description || '',
       image: shop.logo || shop.coverImage || shop.image || '',
@@ -463,7 +514,7 @@ export default function ViewShopScreen({ route, navigation }) {
     openAddProductSheet();
   };
 
-  // ---- Pick product images (multiple) ----
+  // ---- Pick one product image ----
   const pickProductImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
@@ -472,18 +523,19 @@ export default function ViewShopScreen({ route, navigation }) {
     }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsMultipleSelection: true,   // ← allow multiple
+      allowsMultipleSelection: false,
       quality: 0.8,
     });
-    if (!result.canceled && result.assets.length > 0) {
-      const newImages = result.assets.map(asset => ({
+    if (!result.canceled && result.assets?.length > 0) {
+      const asset = result.assets[0];
+      const newImages = [{
         uri: asset.uri,
-        type: 'image/jpeg',
+        type: asset.mimeType || 'image/jpeg',
         name: `product_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.jpg`,
-      }));
+      }];
       setNewProduct(prev => ({
         ...prev,
-        images: [...prev.images, ...newImages],   // append all selected
+        images: newImages,
       }));
     }
   };
@@ -495,10 +547,20 @@ export default function ViewShopScreen({ route, navigation }) {
     }));
   };
 
+  const handleProductPriceChange = (text) => {
+    const digits = text.replace(/\D/g, '');
+    const formattedPrice = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    setNewProduct(prev => ({ ...prev, price: formattedPrice }));
+  };
+
   // ---- Add product using PUT (upload all images) ----
   const submitProduct = async () => {
     if (!newProduct.name.trim() || !newProduct.price) {
       showStatusModal({ title: 'Missing', message: 'Please provide product name and price.', type: 'error' });
+      return;
+    }
+    if (newProduct.name.trim().length > 10) {
+      showStatusModal({ title: 'Invalid Name', message: 'Product name must be 10 characters or fewer.', type: 'error' });
       return;
     }
     if (newProduct.images.length === 0) {
@@ -538,7 +600,7 @@ export default function ViewShopScreen({ route, navigation }) {
 
       const newProductObj = {
         name: newProduct.name.trim(),
-        price: parseFloat(newProduct.price) || 0,
+        price: Number(newProduct.price.replace(/,/g, '')) || 0,
         images: imageUrls,   // array of URLs
       };
 
@@ -550,11 +612,12 @@ export default function ViewShopScreen({ route, navigation }) {
       });
 
       if (response.data.success) {
-        if (response.data.shop) {
-          setShop(response.data.shop);
-        } else {
-          setShop(prev => (prev ? { ...prev, products: updatedProducts } : prev));
-        }
+        const updatedShop = response.data.shop || { ...shop, products: updatedProducts };
+        setShop(updatedShop);
+        await offlineDatabase.putRecord('mall-shop-details', String(shopId), {
+          ...await mediaCache.hydrate(updatedShop),
+          owner: await mediaCache.hydrate(owner || updatedShop.owner || {}),
+        }, { priority: 'high' });
         closeAddProductSheet();
         showStatusModal({ title: 'Success', message: 'Product added successfully!', type: 'success' });
         setNewProduct({ name: '', price: '', images: [] });
@@ -587,11 +650,12 @@ export default function ViewShopScreen({ route, navigation }) {
           });
 
           if (response.data.success) {
-            if (response.data.shop) {
-              setShop(response.data.shop);
-            } else {
-              setShop(prev => (prev ? { ...prev, products: updatedProducts } : prev));
-            }
+            const updatedShop = response.data.shop || { ...shop, products: updatedProducts };
+            setShop(updatedShop);
+            await offlineDatabase.putRecord('mall-shop-details', String(shopId), {
+              ...await mediaCache.hydrate(updatedShop),
+              owner: await mediaCache.hydrate(owner || updatedShop.owner || {}),
+            }, { priority: 'high' });
             showStatusModal({ title: 'Deleted', message: 'Product has been removed.', type: 'success' });
           } else {
             throw new Error(response.data.message || 'Failed to delete');
@@ -661,6 +725,14 @@ export default function ViewShopScreen({ route, navigation }) {
   const renderStickyHeader = () => (
     <View style={[styles.stickyHeader, { backgroundColor: theme.background }]}>
       <View style={styles.stickyHeaderRow}>
+        <TouchableOpacity
+          style={styles.stickyBackBtn}
+          onPress={() => navigation.goBack()}
+          accessibilityRole="button"
+          accessibilityLabel="Back to mall"
+        >
+          <Ionicons name="chevron-back" size={24} color={theme.text} />
+        </TouchableOpacity>
         <View style={styles.stickyHeaderInfo}>
           <Text style={[styles.stickyShopName, { color: theme.text }]} numberOfLines={1}>
             {shop?.name || 'Shop'}
@@ -714,7 +786,6 @@ export default function ViewShopScreen({ route, navigation }) {
   const ownerId = displayOwner._id || shop.ownerId?._id || shop.userId || null;
   const ownerName = displayOwner.name || displayOwner.username || 'Shop Owner';
   const ownerAvatar = displayOwner.avatar || null;
-  const ownerPhone = displayOwner.phone || 'N/A';
 
   const frontImage = shop.images?.frontImage || shop.images?.front || null;
   const hasProducts = shop.products && shop.products.length > 0;
@@ -895,7 +966,6 @@ export default function ViewShopScreen({ route, navigation }) {
                     )}
                     <View style={styles.ownerInfo}>
                       <Text style={[styles.ownerName, { color: theme.text }]}>{ownerName}</Text>
-                      <Text style={[styles.ownerPhone, { color: theme.textSecondary }]}>{ownerPhone}</Text>
                     </View>
                     {ownerId && <Ionicons name="arrow-forward-circle" size={20} color={theme.textSecondary} />}
                   </TouchableOpacity>
@@ -939,7 +1009,7 @@ export default function ViewShopScreen({ route, navigation }) {
                       <Ionicons name="navigate" size={22} color="#fff" />
                       <Text style={styles.actionBtnText}>Directions</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#2bb673' }]} onPress={handleMessageOwner}>
+                    <TouchableOpacity style={[styles.actionBtn, { backgroundColor: theme.accent }]} onPress={handleMessageOwner}>
                       <Ionicons name="chatbubble-ellipses-outline" size={22} color="#fff" />
                       <Text style={styles.actionBtnText}>Message</Text>
                     </TouchableOpacity>
@@ -1063,6 +1133,7 @@ export default function ViewShopScreen({ route, navigation }) {
                 placeholder="Product Name"
                 placeholderTextColor={theme.textSecondary}
                 value={newProduct.name}
+                maxLength={10}
                 onChangeText={text => setNewProduct(prev => ({ ...prev, name: text }))}
               />
               <TextInput
@@ -1071,13 +1142,13 @@ export default function ViewShopScreen({ route, navigation }) {
                 placeholderTextColor={theme.textSecondary}
                 keyboardType="numeric"
                 value={newProduct.price}
-                onChangeText={text => setNewProduct(prev => ({ ...prev, price: text }))}
+                onChangeText={handleProductPriceChange}
               />
               <View style={styles.modalImagePicker}>
-                <Text style={[styles.modalImageLabel, { color: theme.text }]}>Images:</Text>
+                <Text style={[styles.modalImageLabel, { color: theme.text }]}>Image:</Text>
                 <TouchableOpacity style={[styles.modalAddImageBtn, { borderColor: theme.border }]} onPress={pickProductImage}>
                   <Ionicons name="add" size={24} color={theme.accent} />
-                  <Text style={{ color: theme.accent, marginLeft: 8 }}>Add Images</Text>
+                  <Text style={{ color: theme.accent, marginLeft: 8 }}>Choose Image</Text>
                 </TouchableOpacity>
               </View>
               {newProduct.images.length > 0 && (
@@ -1185,6 +1256,13 @@ const styles = StyleSheet.create({
   stickyHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  stickyBackBtn: {
+    width: 36,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
   },
   stickyHeaderInfo: {
     flex: 1,
@@ -1651,4 +1729,3 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 });
-

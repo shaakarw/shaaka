@@ -1,5 +1,6 @@
 // screens/BusinessIdeasScreen.js
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useIsFocused } from '@react-navigation/native';
 import {
   View,
   Text,
@@ -38,7 +39,9 @@ const translations = {
     startBusiness: 'Start a Business',
     learnSkill: 'Learn a Skill',
     aiLoading: 'Loading AI recommendations…',
-    aiOffline: 'Using offline demo data. Backend unavailable.',
+    aiOffline: 'Business ideas could not be loaded. Check your connection and retry.',
+    noBusinessIdeas: 'No business ideas are available right now.',
+    retry: 'Retry',
     latestJobs: 'Latest Job Openings',
     businessIdeas: 'Business Ideas & Profits',
     availableCourses: 'Available Courses',
@@ -96,7 +99,9 @@ const translations = {
     startBusiness: 'Tangira Ubucuruzi',
     learnSkill: 'Kwige Ubumenyi',
     aiLoading: 'Itegurwa ry\'ibyifuzo bya AI…',
-    aiOffline: 'Dukoresha amakuru adafite umurongo. Seriveri ntabwo iboneka.',
+    aiOffline: 'Amakuru y\'ubucuruzi ntiyabonetse. Reba umurongo wongere ugerageze.',
+    noBusinessIdeas: 'Nta bitekerezo by\'ubucuruzi bihari ubu.',
+    retry: 'Ongera ugerageze',
     latestJobs: 'Imirimo iheruka',
     businessIdeas: 'Ibitekerezo by\'ubucuruzi n\'inyungu',
     availableCourses: 'Amasomo aboneka',
@@ -153,6 +158,7 @@ const SHAKA_QUESTIONS = [
 // ---------- Main Component ----------
 const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage }) => {
   const { theme, isDarkMode } = useTheme();
+  const isFocused = useIsFocused();
   const t = translations[language] || translations.English;
 
   const userBubbleColor = isDarkMode ? '#FFFFFF' : '#111111';
@@ -212,28 +218,17 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
 
     // Fetch all three datasets in parallel from the backend
     const [jobsRes, businessRes, skillsRes] = await Promise.all([
-      axios.get(`${BASE_URL}/job-openings`, { headers }),
-      axios.get(`${BASE_URL}/business-ideas`, { headers }),
-      axios.get(`${BASE_URL}/skill-courses`, { headers }),
+      axios.get(`${BASE_URL}/api/business-ideas/job-openings`, { headers }),
+      axios.get(`${BASE_URL}/api/business-ideas/business-ideas`, {
+        headers,
+        metadata: { disableOfflineFallback: true },
+      }),
+      axios.get(`${BASE_URL}/api/business-ideas/skill-courses`, { headers }),
     ]);
 
-    // Helper to extract array from response
-    const extractData = (response) => {
-      if (response?.data?.success && Array.isArray(response.data.data)) {
-        return response.data.data;
-      }
-      if (Array.isArray(response.data)) {
-        return response.data;
-      }
-      if (response?.data?.data && Array.isArray(response.data.data)) {
-        return response.data.data;
-      }
-      return [];
-    };
-
-    const jobs = extractData(jobsRes);
-    const businessIdeas = extractData(businessRes);
-    const skills = extractData(skillsRes);
+    const jobs = Array.isArray(jobsRes.data?.jobs) ? jobsRes.data.jobs : [];
+    const businessIdeas = Array.isArray(businessRes.data?.businessIdeas) ? businessRes.data.businessIdeas : [];
+    const skills = Array.isArray(skillsRes.data?.skills) ? skillsRes.data.skills : [];
 
     setJobOpenings(jobs);
     setBusinessIdeas(businessIdeas);
@@ -241,11 +236,17 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
   } catch (error) {
     console.warn('BusinessIdeas fetch error:', error?.response?.data || error?.message || error);
     setErrorMessage(t.aiOffline);
-    // Keep previous data if any; do NOT clear the arrays
+    setBusinessIdeas([]);
   } finally {
     setIsLoading(false);
   }
 }, [t]);
+
+  useEffect(() => {
+    if (!isFocused) return undefined;
+    const timeout = setTimeout(() => fetchBusinessIdeaData(), 0);
+    return () => clearTimeout(timeout);
+  }, [fetchBusinessIdeaData, isFocused]);
 
   const handleOptionSelect = async (optionText) => {
     setUserChoice(optionText);
@@ -365,6 +366,8 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
     return (
       <View style={styles.modalContent}>
         <Text style={[styles.modalTitle, { color: theme.text }]}>{name}</Text>
+        {!!selectedItem.businessCategory && <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>{selectedItem.businessCategory}</Text>}
+        {!!selectedItem.fullDescription && <Text style={[styles.modalText, { color: theme.text }]}>{selectedItem.fullDescription}</Text>}
         <View style={[styles.modalSeparator, { backgroundColor: theme.border }]} />
         <View style={styles.modalInfoRow}>
           <Text style={[styles.modalTextBold, { color: theme.accent }]}>{t.startup} {cost}</Text>
@@ -373,12 +376,27 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
         <Text style={[styles.modalText, { color: theme.text }]}>{t.risk} {risk} • {t.time} {time}</Text>
         <View style={[styles.modalSeparator, { backgroundColor: theme.border }]} />
         <Text style={[styles.modalSectionHeader, { color: theme.accent }]}>{t.stepsToStart}</Text>
-        {steps.map((step, index) => (
+        {(Array.isArray(steps) ? steps : []).map((step, index) => (
           <View key={index} style={styles.stepItem}>
             <View style={[styles.stepNumberContainer, { backgroundColor: theme.accent }]}>
               <Text style={styles.stepNumber}>{index + 1}</Text>
             </View>
             <Text style={[styles.stepText, { color: theme.text }]}>{step}</Text>
+          </View>
+        ))}
+        {[
+          ['Target audience', selectedItem.targetAudience],
+          ['Required skills', Array.isArray(selectedItem.requiredSkills) ? selectedItem.requiredSkills.join(', ') : ''],
+          ['Equipment or materials', Array.isArray(selectedItem.equipment) ? selectedItem.equipment.join(', ') : ''],
+          ['Potential customers', Array.isArray(selectedItem.potentialCustomers) ? selectedItem.potentialCustomers.join(', ') : ''],
+          ['Marketing strategy', selectedItem.marketingStrategy],
+          ['Expected challenges', Array.isArray(selectedItem.challenges) ? selectedItem.challenges.join(', ') : ''],
+          ['Location or market', selectedItem.location],
+          ['Additional information', selectedItem.additionalInfo],
+        ].filter(([, value]) => value).map(([label, value]) => (
+          <View key={label} style={{ marginTop: 12 }}>
+            <Text style={[styles.modalSectionHeader, { color: theme.accent }]}>{label}</Text>
+            <Text style={[styles.modalText, { color: theme.text }]}>{value}</Text>
           </View>
         ))}
       </View>
@@ -493,8 +511,11 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
           </View>
         )}
         {errorMessage ? (
-          <View style={styles.errorBanner}>
-            <Text style={styles.errorText}>{errorMessage}</Text>
+          <View style={[styles.errorBanner, { backgroundColor: theme.action, borderColor: theme.border }]}>
+            <Text style={[styles.errorText, { color: theme.text }]}>{errorMessage}</Text>
+            <TouchableOpacity onPress={fetchBusinessIdeaData} style={[styles.retryButton, { backgroundColor: theme.accent }]}>
+              <Text style={{ color: '#fff', fontWeight: '600' }}>{t.retry}</Text>
+            </TouchableOpacity>
           </View>
         ) : null}
 
@@ -502,7 +523,7 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
           <>
             <Text style={[styles.subHeaderTitle, { color: theme.text }]}>{t.latestJobs}</Text>
             {jobOpenings.map((job) => (
-              <View key={job.id} style={[styles.infoItem, { backgroundColor: theme.action, borderColor: theme.border }]}>
+              <View key={job._id || job.id} style={[styles.infoItem, { backgroundColor: theme.action, borderColor: theme.border }]}>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.infoTitle, { color: theme.text }]}>{job.title}</Text>
                   <Text style={[styles.infoSub, { color: theme.textSecondary }]}>{job.company} • {job.district}</Text>
@@ -524,10 +545,17 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
         {userChoice === t.startBusiness && (
           <>
             <Text style={[styles.subHeaderTitle, { color: theme.text }]}>{t.businessIdeas}</Text>
+            {!isLoading && !errorMessage && businessIdeas.length === 0 ? (
+              <View style={[styles.emptyBusinessIdeas, { borderColor: theme.border }]}>
+                <Ionicons name="bulb-outline" size={28} color={theme.textSecondary} />
+                <Text style={[styles.infoSub, { color: theme.textSecondary }]}>{t.noBusinessIdeas}</Text>
+              </View>
+            ) : null}
             {businessIdeas.map((biz) => (
-              <View key={biz.id} style={[styles.infoItem, { backgroundColor: theme.action, borderColor: theme.border }]}>
+              <View key={biz._id || biz.id} style={[styles.infoItem, { backgroundColor: theme.action, borderColor: theme.border }]}>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.infoTitle, { color: theme.text }]}>{biz.name}</Text>
+                  {!!biz.description && <Text style={[styles.infoSub, { color: theme.textSecondary }]} numberOfLines={2}>{biz.description}</Text>}
                   <Text style={[styles.infoDetails, { color: theme.textSecondary }]}>{t.riskShort} {biz.risk} | {t.timeShort} {biz.time}</Text>
                   <View style={styles.moneyRow}>
                     <View style={styles.moneyLabel}>
@@ -553,7 +581,7 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
           <>
             <Text style={[styles.subHeaderTitle, { color: theme.text }]}>{t.availableCourses}</Text>
             {skillCourses.map((skill) => (
-              <View key={skill.id} style={[styles.infoItem, { backgroundColor: theme.action, borderColor: theme.border }]}>
+              <View key={skill._id || skill.id} style={[styles.infoItem, { backgroundColor: theme.action, borderColor: theme.border }]}>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.infoTitle, { color: theme.text }]}>{skill.name}</Text>
                   <Text style={[styles.infoDetails, { color: theme.textSecondary }]}>{t.level} {skill.level} | {skill.duration}</Text>
@@ -854,12 +882,14 @@ const styles = StyleSheet.create({
   loadingText: { marginLeft: 8 },
   errorBanner: {
     paddingVertical: 12,
-    backgroundColor: '#FFEBEE',
     borderRadius: 8,
     marginBottom: 12,
     paddingHorizontal: 12,
+    borderWidth: 1,
   },
-  errorText: { color: '#D32F2F', fontSize: 13 },
+  errorText: { fontSize: 13, textAlign: 'center' },
+  retryButton: { alignSelf: 'center', marginTop: 9, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 9 },
+  emptyBusinessIdeas: { alignItems: 'center', borderWidth: 1, borderRadius: 12, padding: 20, gap: 8 },
 });
 
 export default BusinessIdeasScreen;

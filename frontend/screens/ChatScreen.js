@@ -5,7 +5,6 @@ import {
   Text,
   Image,
   ImageBackground,
-  Alert,
   Modal,
   ActivityIndicator,
   PanResponder,
@@ -22,6 +21,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../context/ThemeContext';
+import { useBottomSheet } from '../context/BottomSheetContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from '../utils/expoAvCompat';
@@ -119,6 +119,7 @@ const translations = {
     replied: 'replied',
     edited: 'Edited',
     noMessagesYet: 'No messages yet',
+    startConversation: 'Start a conversation from a listing',
     you: 'You',
     success: 'Success',
     ok: 'OK',
@@ -187,6 +188,7 @@ const translations = {
     replied: 'yasubije',
     edited: 'Byahinduwe',
     noMessagesYet: 'Nta butumwa',
+    startConversation: 'Tangira ikiganiro uhereye ku gicuruzwa',
     you: 'Wowe',
     success: 'Byakunze',
     ok: 'Sawa',
@@ -604,13 +606,14 @@ const removeCachedMessage = async messageId => {
 
 // ---------- ReplyPostCard Component ----------
 const ReplyPostCard = ({ post, theme, onPress }) => {
-  const imageUri = post.image || post.houseImages?.[0];
-  const title = post.title || post.productName || 'Product';
+  if (!post) return null;
+  const imageUri = post.image || post.houseImages?.[0] || post.postImage || null;
+  const title = post.title || post.productName || post.postTitle || 'Product';
   const priceText = post.amount || (post.price != null ? `${post.price} RWF` : '');
 
   return (
     <TouchableOpacity
-      style={[styles.replyPostCard, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}
+      style={[styles.replyPostCard, { borderColor: theme.border, backgroundColor: theme.accent }]}
       onPress={onPress}
       activeOpacity={0.7}
     >
@@ -618,20 +621,20 @@ const ReplyPostCard = ({ post, theme, onPress }) => {
         <ChatImage uri={imageUri} style={styles.replyPostThumb} />
       ) : (
         <View style={[styles.replyPostThumb, styles.replyPostThumbFallback]}>
-          <Ionicons name="image-outline" size={20} color={theme.textSecondary} />
+          <Ionicons name="image-outline" size={20} color="#fff" />
         </View>
       )}
       <View style={styles.replyPostInfo}>
-        <Text style={[styles.replyPostTitle, { color: theme.text }]} numberOfLines={1}>
+        <Text style={[styles.replyPostTitle, { color: '#fff' }]} numberOfLines={1}>
           {title}
         </Text>
         {priceText ? (
-          <Text style={[styles.replyPostPrice, { color: theme.accent }]} numberOfLines={1}>
+          <Text style={[styles.replyPostPrice, { color: '#fff' }]} numberOfLines={1}>
             {priceText}
           </Text>
         ) : null}
       </View>
-      <Ionicons name="chevron-forward" size={16} color={theme.textSecondary} />
+      <Ionicons name="chevron-forward" size={16} color="#fff" />
     </TouchableOpacity>
   );
 };
@@ -658,12 +661,14 @@ const MessageItem = memo(({
 }) => {
   const isMe = isOwnMessage(item);
   const isReplied = item.repliedTo;
-  const hasReplyPost = item.replyPost;
+  const replyPostContext = item.replyPost || item.replyPostContext;
+  const hasReplyPost = !!replyPostContext;
   const url = extractFirstURL(item.text);
 
   // Resolve images for this message
   const messageImages = useMemo(() => resolveMessageImages(item), [item]);
   const hasMultipleImages = messageImages.length > 1;
+  const hasImageContent = messageImages.length > 0;
 
   const bubbleBackground = 'transparent';
   const borderBottomColor = isMe ? '#47ae87' : '#a9a9a9';
@@ -768,7 +773,9 @@ const MessageItem = memo(({
                 styles.replyPreviewOutside,
                 {
                   alignSelf: isMe ? 'flex-end' : 'flex-start',
-                  backgroundColor: '#353535',
+                  backgroundColor: isDarkColor(theme.background) ? '#434343af' : '#ffffff95',
+                  borderBottomLeftRadius: isMe ? 18 : 0,
+                  borderBottomRightRadius: isMe ? 0 : 18,
                 },
               ]}
             >
@@ -796,9 +803,9 @@ const MessageItem = memo(({
 
           {hasReplyPost && (
             <ReplyPostCard
-              post={item.replyPost}
+              post={replyPostContext}
               theme={theme}
-              onPress={() => onReplyPostPress && onReplyPostPress(item.replyPost.postId)}
+              onPress={() => onReplyPostPress && onReplyPostPress(replyPostContext)}
             />
           )}
 
@@ -810,8 +817,16 @@ const MessageItem = memo(({
               styles.messageBubble,
               {
                 backgroundColor: bubbleBackground,
-                borderBottomWidth: 2,
+                borderBottomWidth: 1,
+                borderLeftWidth: hasImageContent ? 0 : 0.5,
+                borderRightWidth: hasImageContent ? 0 : 0.5,
+                borderRightColor: borderBottomColor,
+                borderLeftColor: borderBottomColor,
                 borderBottomColor: borderBottomColor,
+                borderBottomLeftRadius: 18,
+                borderBottomRightRadius: 18,
+                borderTopLeftRadius: isReplied && !isMe ? 0 : 18,
+                borderTopRightRadius: isReplied && isMe ? 0 : 18,
               },
             ]}
           >
@@ -980,7 +995,17 @@ const ChatScreen = ({ route, navigation, language }) => {
   const effectivePostId = String(routePostId ?? route.params?.post ?? route.params?.listingId ?? '').trim();
   const postId = effectivePostId;
   const { theme } = useTheme();
+  const { showBottomSheet } = useBottomSheet();
   const t = translations[language] || translations.English;
+  const showChatNotice = useCallback((type, title, message) => {
+    showBottomSheet({
+      type,
+      title,
+      message,
+      icon: type === 'success' ? 'checkmark-circle-outline' : type === 'error' ? 'alert-circle-outline' : 'information-circle-outline',
+      buttonText: t.ok,
+    });
+  }, [showBottomSheet, t.ok]);
 
   // ---------- State ----------
   const [messages, setMessages] = useState([]);
@@ -1013,15 +1038,6 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
-  const [statusModalVisible, setStatusModalVisible] = useState(false);
-  const [statusModalTitle, setStatusModalTitle] = useState('');
-  const [statusModalMessage, setStatusModalMessage] = useState('');
-
-  const [confirmModalVisible, setConfirmModalVisible] = useState(false);
-  const [confirmTitle, setConfirmTitle] = useState('');
-  const [confirmMessage, setConfirmMessage] = useState('');
-  const [confirmOnYes, setConfirmOnYes] = useState(null);
-
   const [isNearBottom, setIsNearBottom] = useState(true);
 
   // Daily limit state – remainingImages
@@ -1034,6 +1050,12 @@ const ChatScreen = ({ route, navigation, language }) => {
   const [typingPostId, setTypingPostId] = useState('');
   const typingPostIdRef = useRef('');
   const currentUserIdRef = useRef(null);
+
+  // Track which seller messages we've already marked as read (for polling)
+  const markedAsReadRef = useRef(new Set());
+
+  // Auto-clear the "typing…" indicator if the stop event is lost
+  const typingClearTimerRef = useRef(null);
 
   // ---------- useEffect hooks ----------
   useEffect(() => {
@@ -1102,6 +1124,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     loadCurrentUser();
     return () => {
       if (soundRef.current) soundRef.current.unloadAsync();
+      if (typingClearTimerRef.current) clearTimeout(typingClearTimerRef.current);
       if (socketRef.current) {
         try {
           socketRef.current.off('user-typing');
@@ -1209,9 +1232,29 @@ const ChatScreen = ({ route, navigation, language }) => {
         transports: ['websocket'],
         auth: { token },
         autoConnect: true,
+        // Helps on Android emulators / flaky networks
+        reconnection: true,
+        reconnectionAttempts: Infinity,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        timeout: 20000,
       });
 
       socketRef.current = socket;
+
+      // ---- IMPORTANT: join the room every time the socket connects ----
+      socket.on('connect', () => {
+        console.log('[Socket] connected', socket.id);
+        if (sellerId && !isDemoChat) {
+          socket.emit('join-chat', { sellerId });
+        }
+      });
+
+      socket.on('reconnect', () => {
+        if (sellerId && !isDemoChat) {
+          socket.emit('join-chat', { sellerId });
+        }
+      });
 
       socket.on('user-online', (payload) => {
         const uid = payload?.userId;
@@ -1270,27 +1313,73 @@ const ChatScreen = ({ route, navigation, language }) => {
         }
       });
 
-      const handleTyping = (payload) => {
-        if (
-          isDemoChat ||
-          String(payload?.chatId || '') !== String(typingPostIdRef.current || '') ||
-          String(payload?.senderId || '') === String(currentUserIdRef.current || '')
-        ) return;
-        setOtherTyping(payload?.typing === true);
+      // ---- Typing: lenient, self-echo-safe, and auto-clearing ----
+      const handleTyping = (payload, eventName) => {
+        console.log('[Socket] typing event:', eventName, payload);
+        if (isDemoChat) return;
+
+        // Support several possible field names from the server
+        const senderId = String(
+          payload?.senderId ?? payload?.userId ?? payload?.from ?? payload?.sender ?? ''
+        );
+        const me = String(currentUserIdRef.current || '');
+        const other = String(sellerId || '');
+
+        // Ignore our own typing echoes
+        if (senderId && me && senderId === me) return;
+
+        // If we know the other party's id and the payload's senderId doesn't match,
+        // and the chatId doesn't match either, drop the event.
+        if (senderId && other && senderId !== other) {
+          const payloadChatId = String(payload?.chatId ?? payload?.chat_id ?? '');
+          const ourChatId = String(typingPostIdRef.current || '');
+          if (!payloadChatId || !ourChatId || payloadChatId !== ourChatId) {
+            return;
+          }
+        }
+
+        // Determine the typing value from various shapes
+        let isTyping;
+        if (typeof payload?.typing === 'boolean') isTyping = payload.typing;
+        else if (typeof payload?.isTyping === 'boolean') isTyping = payload.isTyping;
+        else if (eventName === 'user-stop-typing') isTyping = false;
+        else if (eventName === 'user-typing') isTyping = true;
+        else return;
+
+        setOtherTyping(isTyping);
+
+        // Auto-clear after 4s in case the stop event never arrives (mobile networks)
+        if (typingClearTimerRef.current) {
+          clearTimeout(typingClearTimerRef.current);
+          typingClearTimerRef.current = null;
+        }
+        if (isTyping) {
+          typingClearTimerRef.current = setTimeout(() => {
+            setOtherTyping(false);
+            typingClearTimerRef.current = null;
+          }, 4000);
+        }
       };
 
-      socket.on('user-typing', handleTyping);
-      socket.on('user-stop-typing', handleTyping);
+      socket.on('user-typing', (payload) => handleTyping(payload, 'user-typing'));
+      socket.on('user-stop-typing', (payload) => handleTyping(payload, 'user-stop-typing'));
 
-      socket.on('disconnect', () => {});
-      socket.on('connect_error', () => {});
-    } catch (e) {}
+      socket.on('disconnect', (reason) => {
+        console.log('[Socket] disconnected:', reason);
+      });
+      socket.on('connect_error', (err) => {
+        console.log('[Socket] connect_error:', err?.message);
+      });
+    } catch (e) {
+      console.warn('[Socket] setup failed:', e?.message);
+    }
   }, [currentUser?._id, sellerId, isDemoChat, typingPostId, isNearBottom]);
 
   useEffect(() => {
     connectPresenceSocket();
   }, [connectPresenceSocket]);
 
+  // Emit join-chat as a fallback for late consumers
   useEffect(() => {
     if (socketRef.current && sellerId && currentUser?._id && !isDemoChat) {
       socketRef.current.emit('join-chat', { sellerId });
@@ -1387,6 +1476,8 @@ const ChatScreen = ({ route, navigation, language }) => {
         _id: m._id || m.id,
         createdAt: m.createdAt || m.timestamp || m.createdAt,
         senderId: m.senderId || m.senderPhone || m.senderId,
+        // Preserve replyPost context from server
+        replyPost: m.replyPost || m.replyPostContext || null,
       }));
 
       const localMessages = await loadLocalMessages();
@@ -1481,6 +1572,7 @@ const ChatScreen = ({ route, navigation, language }) => {
           audioUrl: msg.audioUrl,
           audioDuration: msg.audioDuration,
           repliedTo: msg.repliedTo,
+          replyPost: msg.replyPost,
           createdAt: msg.timestamp,
           read: msg.read,
         }))
@@ -1504,6 +1596,85 @@ const ChatScreen = ({ route, navigation, language }) => {
       console.error('Error marking as read:', error.response?.status, error.response?.data || error.message);
     }
   };
+
+  // ---------- Live polling: fetch new messages every 1 second ----------
+  const pollNewMessages = useCallback(async () => {
+    if (isDemoChat) return;
+    if (!currentUser?._id || !sellerId) return;
+    if (!networkStatus.get().isOnline) return;
+    if (messagesFetchRef.current) return; // avoid overlapping requests
+
+    messagesFetchRef.current = true;
+    try {
+      const token = await getChatAuthToken(adminModeRef.current);
+      if (!token) return;
+
+      const currentUserId = currentUser._id || currentUser.phone || '';
+      const effectivePostId = postId || '';
+      const query = effectivePostId
+        ? `?postId=${encodeURIComponent(effectivePostId)}`
+        : '';
+      const url = `${BASE_URL}/api/messages/thread/${encodeURIComponent(
+        currentUserId
+      )}/${encodeURIComponent(sellerId)}${query}`;
+
+      const response = await axios.get(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      let messagesFromApi = response.data.messages || [];
+      messagesFromApi = messagesFromApi.map((m) => ({
+        ...m,
+        _id: m._id || m.id,
+        createdAt: m.createdAt || m.timestamp,
+        senderId: m.senderId || m.senderPhone,
+        replyPost: m.replyPost || m.replyPostContext || null,
+      }));
+
+      const enhanced = enhanceReplies(messagesFromApi);
+
+      // mergeMessages returns the SAME reference when nothing changed,
+      // so React bails out of re-rendering on idle polls.
+      setMessages((previous) => mergeMessages(previous, enhanced));
+
+      // Mark seller messages as read (once per message id)
+      messagesFromApi.forEach((msg) => {
+        const id = String(msg._id);
+        if (
+          String(msg.senderId) === String(sellerId) &&
+          !msg.read &&
+          !markedAsReadRef.current.has(id)
+        ) {
+          markedAsReadRef.current.add(id);
+          markAsRead(msg._id);
+        }
+      });
+    } catch (error) {
+      // Silent fail — the next tick will retry.
+    } finally {
+      messagesFetchRef.current = false;
+    }
+  }, [
+    currentUser?._id,
+    currentUser?.phone,
+    isDemoChat,
+    sellerId,
+    postId,
+  ]);
+
+  // ---------- Poll every 1 second while the screen is focused ----------
+  useFocusEffect(
+    useCallback(() => {
+      if (isDemoChat) return undefined;
+      if (!currentUser?._id || !sellerId) return undefined;
+
+      const intervalId = setInterval(() => {
+        pollNewMessages();
+      }, 1000);
+
+      return () => clearInterval(intervalId);
+    }, [pollNewMessages, isDemoChat, currentUser?._id, sellerId])
+  );
 
   const typingTimeoutRef = useRef(null);
   const lastTypingSentRef = useRef({ isTyping: false, ts: 0 });
@@ -1571,7 +1742,7 @@ const ChatScreen = ({ route, navigation, language }) => {
         const caption = inputText.trim();
         const uploadedImages = selectedImages.filter((img) => img.status === 'done' && img.uploadedUrl);
         if (uploadedImages.length > MAX_IMAGES_PER_MESSAGE) {
-          Alert.alert(t.imageLimit, t.imageLimitMessage.replace('{count}', String(MAX_IMAGES_PER_MESSAGE)));
+          showChatNotice('error', t.imageLimit, t.imageLimitMessage.replace('{count}', String(MAX_IMAGES_PER_MESSAGE)));
           return;
         }
 
@@ -1599,7 +1770,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     const cleanText = text?.trim() || '';
     if (!cleanText && !imageUrl && (!imageUrls || imageUrls.length === 0)) return;
     if (!currentUser) {
-      Alert.alert(t.error, t.userNotLoaded);
+      showChatNotice('error', t.error, t.userNotLoaded);
       return;
     }
 
@@ -1620,9 +1791,12 @@ const ChatScreen = ({ route, navigation, language }) => {
 
     const currentUserId = currentUser._id;
     if (!currentUserId || !sellerId) {
-      Alert.alert(t.error, t.missingInfo);
+      showChatNotice('error', t.error, t.missingInfo);
       return;
     }
+
+    // Snapshot the current replyPost so it survives after state clears
+    const currentReplyPost = replyPost || null;
 
     const messageData = {
       postId,
@@ -1650,7 +1824,7 @@ const ChatScreen = ({ route, navigation, language }) => {
             senderName: repliedTo.senderName,
           }
         : null,
-      replyPost: replyPost,
+      replyPost: currentReplyPost,
     };
 
     const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -1697,7 +1871,15 @@ const ChatScreen = ({ route, navigation, language }) => {
         messageData,
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      const serverMessage = response.data.message;
+      // Preserve replyPost from the request if the server didn't return it
+      const serverMessage = {
+        ...response.data.message,
+        replyPost:
+          response.data.message?.replyPost ||
+          response.data.message?.replyPostContext ||
+          currentReplyPost ||
+          null,
+      };
       await offlineDatabase.putRecord('messages', serverMessage._id, serverMessage, { priority: 'high', protected: true });
       setMessages(prev => mergeMessages(
         prev.filter(msg => String(msg._id || msg.id) !== tempId),
@@ -1719,15 +1901,14 @@ const ChatScreen = ({ route, navigation, language }) => {
       setSelectedImages([]);
       setReplyTo(null);
       setReplyPost(null);
-      setStatusModalTitle(t.error);
-      setStatusModalMessage(primaryImage ? t.imageSendFailed : t.couldNotSend);
-      setStatusModalVisible(true);
+      showChatNotice('error', t.error, primaryImage ? t.imageSendFailed : t.couldNotSend);
     }
   };
 
   const sendDemoMessage = async (text, imageUrl = null, repliedTo = null, imageUrls = null) => {
     try {
       const currentUserId = currentUser._id || currentUser.phone;
+      const currentReplyPost = replyPost || null;
       const message = {
         id: `demo_sent_${Date.now()}`,
         postId,
@@ -1753,7 +1934,7 @@ const ChatScreen = ({ route, navigation, language }) => {
               senderName: repliedTo.senderName,
             }
           : null,
-        replyPost: replyPost,
+        replyPost: currentReplyPost,
         timestamp: new Date().toISOString(),
         read: true,
       };
@@ -1769,7 +1950,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       }
     } catch (error) {
       console.error('Error sending demo message:', error);
-      Alert.alert(t.error, t.couldNotSend);
+      showChatNotice('error', t.error, t.couldNotSend);
     }
   };
 
@@ -1791,7 +1972,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       setMessages(prev =>
         mergeMessages(prev.map(msg =>
           String(msg._id || msg.id) === String(messageId)
-            ? { ...updatedMessage, repliedTo: msg.repliedTo }
+            ? { ...updatedMessage, repliedTo: msg.repliedTo, replyPost: msg.replyPost }
             : msg
         ), [])
       );
@@ -1829,22 +2010,21 @@ const ChatScreen = ({ route, navigation, language }) => {
         await AsyncStorage.setItem(MESSAGES_KEY, JSON.stringify(updated));
       }
 
-      setStatusModalTitle(t.updated);
-      setStatusModalMessage(t.messageEdited);
-      setStatusModalVisible(true);
+      showChatNotice('success', t.updated, t.messageEdited);
     } catch (error) {
       console.error('Error editing message:', error);
-      setStatusModalTitle(t.error);
-      setStatusModalMessage(t.editFailed);
-      setStatusModalVisible(true);
+      showChatNotice('error', t.error, t.editFailed);
     }
   };
 
-  const unsendMessage = async (messageId) => {
-    setConfirmTitle(t.unsendTitle);
-    setConfirmMessage(t.unsendMessage);
-    setConfirmOnYes(() => async () => {
-      setConfirmModalVisible(false);
+  const unsendMessage = messageId => {
+    showBottomSheet({
+      type: 'error',
+      title: t.unsendTitle,
+      message: t.unsendMessage,
+      icon: 'alert-circle-outline',
+      buttonText: t.yes,
+      buttonAction: async () => {
       try {
         const token = await getChatAuthToken(adminModeRef.current);
         await axios.delete(
@@ -1861,12 +2041,11 @@ const ChatScreen = ({ route, navigation, language }) => {
         if (error.response?.status === 400) {
           message = t.unsendTooOld;
         }
-        setStatusModalTitle(t.error);
-        setStatusModalMessage(message);
-        setStatusModalVisible(true);
+        showChatNotice('error', t.error, message);
       }
+      },
+      secondaryButtonText: t.no,
     });
-    setConfirmModalVisible(true);
   };
 
   // ---------- Image picker ----------
@@ -1882,7 +2061,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       if (lastSend) {
         const elapsed = (now - parseInt(lastSend)) / 6;
         if (elapsed < 5) {
-          Alert.alert(t.imageCooldown, t.imageCooldownMessage);
+          showChatNotice('info', t.imageCooldown, t.imageCooldownMessage);
           return;
         }
       }
@@ -1891,14 +2070,14 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
 
     if (assets.length > MAX_IMAGES_PER_MESSAGE) {
-      Alert.alert(t.imageLimit, t.imageLimitMessage.replace('{count}', String(MAX_IMAGES_PER_MESSAGE)));
+      showChatNotice('error', t.imageLimit, t.imageLimitMessage.replace('{count}', String(MAX_IMAGES_PER_MESSAGE)));
       return;
     }
 
     try {
       const token = await getChatAuthToken(adminModeRef.current);
       if (!token) {
-        Alert.alert(t.authRequired, t.pleaseLogin);
+        showChatNotice('error', t.authRequired, t.pleaseLogin);
         return;
       }
 
@@ -1974,7 +2153,11 @@ const ChatScreen = ({ route, navigation, language }) => {
       await AsyncStorage.setItem(lastImageSendKey, String(Date.now()));
 
     } catch (error) {
-      console.error('Image upload error:', error);
+      console.error(
+        'Image upload error:',
+        error.response?.status,
+        error.response?.data || error.message
+      );
 
       let errorMessage = t.unableToUpload;
       if (error.response) {
@@ -1984,8 +2167,10 @@ const ChatScreen = ({ route, navigation, language }) => {
           errorMessage = 'Internal server error. Please try again later.';
         } else if (status === 400) {
           errorMessage = serverMsg || 'Invalid request. Please check your image.';
-        } else if (status === 403 || status === 401) {
-          errorMessage = 'Authentication error. Please log in again.';
+        } else if (status === 403) {
+          errorMessage = serverMsg || 'Image uploads are not allowed for this account.';
+        } else if (status === 401) {
+          errorMessage = serverMsg || 'Authentication error. Please log in again.';
         } else if (status === 413) {
           errorMessage = 'Image too large. Please choose a smaller image.';
         } else {
@@ -1995,10 +2180,7 @@ const ChatScreen = ({ route, navigation, language }) => {
         errorMessage = 'No response from server. Check your network.';
       }
 
-      setStatusModalTitle(t.error);
-      setStatusModalMessage(t.imageUploadFailed);
-      setStatusModalVisible(true);
-      Alert.alert(t.uploadFailed, errorMessage);
+      showChatNotice('error', t.error, errorMessage);
       setImageUploadStatus('failed');
     }
   };
@@ -2007,7 +2189,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert(t.permissionNeeded, t.photoAccessNeeded);
+        showChatNotice('info', t.permissionNeeded, t.photoAccessNeeded);
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -2022,7 +2204,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       }
     } catch (error) {
       console.error('Error picking image:', error);
-      Alert.alert(t.error, t.failedToChooseImage);
+      showChatNotice('error', t.error, t.failedToChooseImage);
     }
   };
 
@@ -2030,7 +2212,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     try {
       const { status } = await ImagePicker.requestCameraPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert(t.permissionNeeded, t.cameraAccessNeeded);
+        showChatNotice('info', t.permissionNeeded, t.cameraAccessNeeded);
         return;
       }
       const result = await ImagePicker.launchCameraAsync({
@@ -2043,7 +2225,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       }
     } catch (error) {
       console.error('Error taking photo:', error);
-      Alert.alert(t.error, t.failedToCapturePhoto);
+      showChatNotice('error', t.error, t.failedToCapturePhoto);
     }
   };
 
@@ -2098,7 +2280,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     audioUrl: msg.audioUrl,
     audioDuration: msg.audioDuration,
     repliedTo: msg.repliedTo,
-    replyPost: msg.replyPost,
+    replyPost: msg.replyPost || msg.replyPostContext || null,
     createdAt: msg.timestamp || msg.createdAt,
     read: msg.read,
   });
@@ -2132,9 +2314,7 @@ const ChatScreen = ({ route, navigation, language }) => {
         break;
       case 'copy':
         Clipboard.setString(msg.text || '');
-        setStatusModalTitle(t.copied);
-        setStatusModalMessage(t.copied);
-        setStatusModalVisible(true);
+        showChatNotice('success', t.copied, t.copied);
         setActionModalVisible(false);
         break;
       case 'edit':
@@ -2150,7 +2330,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       default:
         break;
     }
-  }, [actionMessage, t]);
+  }, [actionMessage, showChatNotice, t]);
 
   // ---------- Image carousel (full-screen viewer navigation) ----------
   const handleImagePress = useCallback((url, index, allImages) => {
@@ -2178,43 +2358,6 @@ const ChatScreen = ({ route, navigation, language }) => {
   }, [messages, navigation]);
 
   // ---------- Modals ----------
-  const renderConfirmModal = () => {
-    return (
-      <Modal
-        transparent
-        visible={confirmModalVisible}
-        animationType="slide"
-        onRequestClose={() => setConfirmModalVisible(false)}
-      >
-        <TouchableOpacity
-          style={[styles.actionModalOverlay, { backgroundColor: theme.call }]}
-          activeOpacity={1}
-          onPress={() => setConfirmModalVisible(false)}
-        >
-          <View style={[styles.actionModalContainer, { backgroundColor: theme.background, borderColor: theme.border }]}>
-            <View style={styles.sheetHandle} />
-            <Text style={[styles.modalTitle, { color: theme.text }]}>{confirmTitle}</Text>
-            <Text style={[styles.modalText, { color: theme.textSecondary }]}>{confirmMessage}</Text>
-            <View style={styles.confirmButtonsRow}>
-              <TouchableOpacity
-                style={[styles.confirmButton, styles.cancelButton, { borderColor: theme.border }]}
-                onPress={() => setConfirmModalVisible(false)}
-              >
-                <Text style={[styles.confirmButtonText, { color: theme.textSecondary }]}>{t.no}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.confirmButton, styles.confirmYesButton, { backgroundColor: theme.accent }]}
-                onPress={confirmOnYes}
-              >
-                <Text style={[styles.confirmButtonText, { color: '#fff' }]}>{t.yes}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </TouchableOpacity>
-      </Modal>
-    );
-  };
-
   const renderActionModal = () => {
     if (!actionMessage) return null;
     const isOwn = isOwnMessage(actionMessage);
@@ -2265,35 +2408,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     );
   };
 
-  const renderStatusModal = () => {
-    return (
-      <Modal
-        transparent
-        visible={statusModalVisible}
-        animationType="slide"
-        onRequestClose={() => setStatusModalVisible(false)}
-      >
-        <TouchableOpacity
-          style={[styles.actionModalOverlay, { backgroundColor: theme.call }]}
-          activeOpacity={1}
-          onPress={() => setStatusModalVisible(false)}
-        >
-          <View style={[styles.actionModalContainer, { backgroundColor: theme.background, borderColor: theme.border }]}>
-            <View style={styles.sheetHandle} />
-            <Text style={[styles.modalTitle, { color: theme.text }]}>{statusModalTitle}</Text>
-            <Text style={[styles.modalText, { color: theme.textSecondary }]}>{statusModalMessage}</Text>
-            <TouchableOpacity
-              style={[styles.modalButton, { backgroundColor: theme.accent }]}
-              onPress={() => setStatusModalVisible(false)}
-            >
-              <Text style={styles.modalButtonText}>{t.ok}</Text>
-            </TouchableOpacity>
-          </View>
-        </TouchableOpacity>
-      </Modal>
-    );
-  };
-
   const renderUpgradeModal = () => {
     return (
       <Modal
@@ -2337,10 +2451,48 @@ const ChatScreen = ({ route, navigation, language }) => {
   };
 
   // ---------- Navigate to PostDetail ----------
-  const navigateToPostDetail = (postId) => {
-    if (!postId) return;
-    navigation.navigate('PostDetail', { postId });
-  };
+  const navigateToPostDetail = useCallback((postContext) => {
+    if (!postContext) return;
+    if (postContext.contextType === 'shop') {
+      const shopId = postContext.shopId || postContext.contextId || postContext.postId || postContext._id;
+      if (!shopId) return;
+      navigation.navigate('Main', {
+        screen: 'Locate',
+        params: {
+          focusMallShopId: String(shopId),
+          focusMallShop: postContext,
+          openMallShopDetails: true,
+        },
+      });
+      return;
+    }
+    if (postContext.contextType === 'place') {
+      const placeId = postContext.contextId || postContext.postId || postContext._id;
+      if (!placeId) return;
+      navigation.navigate('Main', {
+        screen: 'Locate',
+        params: {
+          openPlaceContext: { ...postContext, contextId: String(placeId) },
+        },
+      });
+      return;
+    }
+    const postIdToOpen = postContext.postId || postContext._id;
+    if (postIdToOpen) navigation.navigate('PostDetail', { postId: postIdToOpen });
+  }, [navigation]);
+
+  // ---------- Empty state (matches MessageScreen design) ----------
+  const renderEmptyState = () => (
+    <View style={styles.emptyContainer}>
+      <Ionicons name="chatbubble-outline" size={60} color={theme.textSecondary} />
+      <Text style={[styles.emptyText, { color: theme.textSecondary }]}>
+        {t.noMessagesYet}
+      </Text>
+      <Text style={[styles.emptySubtext, { color: theme.textSecondary }]}>
+        {t.startConversation}
+      </Text>
+    </View>
+  );
 
   // ---------- RenderItem ----------
   const renderItem = useCallback(({ item, index }) => {
@@ -2456,7 +2608,7 @@ const ChatScreen = ({ route, navigation, language }) => {
               >
                 <Text style={[styles.headerTitle, { color: theme.text }]}>{sellerName}</Text>
                 <Text style={[styles.headerSubtitle, { color: theme.textSecondary }]}>
-                  {isOnline ? t.online : t.offline}
+                  {otherTyping ? t.typing : (isOnline ? t.online : t.offline)}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -2481,7 +2633,10 @@ const ChatScreen = ({ route, navigation, language }) => {
             keyExtractor={(item) => item._id}
             renderItem={renderItem}
             style={styles.chatList}
-            contentContainerStyle={styles.chatListContent}
+            contentContainerStyle={[
+              styles.chatListContent,
+              messages.length === 0 && styles.chatListContentEmpty,
+            ]}
             onLayout={() => flatListRef.current?.scrollToEnd({ animated: false })}
             onContentSizeChange={handleContentSizeChange}
             refreshing={refreshing}
@@ -2494,11 +2649,7 @@ const ChatScreen = ({ route, navigation, language }) => {
             windowSize={21}
             updateCellsBatchingPeriod={50}
             onEndReachedThreshold={0.5}
-            ListEmptyComponent={(
-              <View style={styles.emptyMessages}>
-                <Text style={[styles.emptyMessagesText, { color: theme.textSecondary }]}>{t.noMessagesYet}</Text>
-              </View>
-            )}
+            ListEmptyComponent={renderEmptyState}
           />
         </ImageBackground>
 
@@ -2535,7 +2686,11 @@ const ChatScreen = ({ route, navigation, language }) => {
         {/* Reply to Post bar */}
         {replyPost && (
           <View style={[styles.replyBar, { backgroundColor: theme.cardBackground, borderTopColor: theme.border, borderBottomColor: theme.border }]}>
-            <ReplyPostCard post={replyPost} theme={theme} onPress={() => navigateToPostDetail(replyPost.postId)} />
+            <ReplyPostCard
+              post={replyPost}
+              theme={theme}
+              onPress={() => navigateToPostDetail(replyPost)}
+            />
             <TouchableOpacity onPress={() => setReplyPost(null)}>
               <Ionicons name="close" size={24} color={theme.textSecondary} />
             </TouchableOpacity>
@@ -2627,8 +2782,6 @@ const ChatScreen = ({ route, navigation, language }) => {
       </KeyboardAvoidingView>
 
       {renderActionModal()}
-      {renderStatusModal()}
-      {renderConfirmModal()}
       {renderUpgradeModal()}
 
     </SafeAreaView>
@@ -2658,8 +2811,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
+    paddingVertical: 5,
+    borderBottomWidth: 0,
   },
   backBtn: { marginRight: 16 },
   headerInfo: { flexDirection: 'row', alignItems: 'center', flex: 1 },
@@ -2690,7 +2843,8 @@ const styles = StyleSheet.create({
   chatBackground: { flex: 1 },
   overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   chatList: { flex: 1, backgroundColor: 'transparent' },
-  chatListContent: { padding: 16, paddingBottom: 20 },
+  chatListContent: { padding: 16, paddingBottom: 20, flexGrow: 1 },
+  chatListContentEmpty: { justifyContent: 'center' },
   timestampContainer: { alignItems: 'center', marginVertical: 16 },
   timestampText: { fontSize: 12, fontWeight: '500', opacity: 0.7 },
   messageRowWrapper: { flexDirection: 'row', marginBottom: 12 },
@@ -2700,8 +2854,10 @@ const styles = StyleSheet.create({
   avatarWrapper: { marginHorizontal: 4 },
   messageAvatar: { width: 30, height: 30, borderRadius: 15 },
   messageContentColumn: { flexDirection: 'column', maxWidth: '85%' },
-  messageBubble: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20 },
-  messageText: { fontSize: 18, lineHeight: 20 },
+  messageBubble: { paddingHorizontal: 12, paddingVertical: 8, 
+    borderBottomLeftRadius: 18, borderBottomRightRadius: 18, borderTopLeftRadius: 18, borderTopRightRadius: 18,
+   },
+  messageText: { fontSize: 13, lineHeight: 13},
   messageImage: { width: 220, height: 180, borderRadius: 14, marginBottom: 4 },
   chatImageFallback: { backgroundColor: '#292929', alignItems: 'center', justifyContent: 'center' },
   imageCaption: { marginTop: 6 },
@@ -2775,7 +2931,11 @@ const styles = StyleSheet.create({
   },
 
   editedBadge: { fontSize: 10, marginTop: 2, fontStyle: 'italic' },
-  replyPreviewOutside: { padding: 6, paddingLeft: 10, marginBottom: 4, borderRadius: 8 },
+  replyPreviewOutside: { padding: 6, paddingLeft: 10, marginBottom: 4, 
+ borderBottomLeftRadius: 0, borderBottomRightRadius: 18,
+  borderTopLeftRadius: 18, borderTopRightRadius: 18,
+
+  },
   replyPostCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2833,7 +2993,7 @@ const styles = StyleSheet.create({
   replyBarMessage: { fontSize: 14, marginTop: 2 },
   replyBarImageContainer: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
   replyBarImage: { width: 30, height: 30, borderRadius: 4 },
-  composerContainer: { paddingHorizontal: 16, paddingVertical: 8, borderTopWidth: 1 },
+  composerContainer: { flexShrink: 0, paddingHorizontal: 16, paddingVertical: 8, borderTopWidth: 1 },
   inputContainer: { flexDirection: 'row', alignItems: 'flex-end' },
   characterCounter: { alignSelf: 'flex-end', marginTop: 4, fontSize: 11 },
   selectedImageRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 },
@@ -2974,6 +3134,26 @@ const styles = StyleSheet.create({
   upgradeModalButtonText: {
     fontSize: 16,
     fontWeight: '600',
+  },
+
+  // ---------- Empty state (matches MessageScreen design) ----------
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 40,
+  },
+  emptyText: {
+    marginTop: 12,
+    fontSize: 18,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  emptySubtext: {
+    marginTop: 6,
+    fontSize: 14,
+    textAlign: 'center',
   },
 });
 

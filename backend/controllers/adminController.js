@@ -4,6 +4,7 @@ const Post = require('../models/Post');
 const Place = require('../models/Place');
 const Report = require('../models/Report');
 const BusinessIdea = require('../models/BusinessIdea');
+const mongoose = require('mongoose');
 const { computeAggregatedLimits, getActiveSubscriptions } = require('../utils/subscriptionHelpers_clean');
 const { deleteShopWithCleanup } = require('../utils/deletionCleanup');
 
@@ -235,36 +236,228 @@ exports.restoreShop = async (req, res) => {
   }
 };
 
-// -------- BUSINESS IDEAS --------
-exports.createBusinessIdea = async (req, res) => {
-  try {
-    const { name, category, description, cost, profit, risk, time, steps } = req.body;
-    if (!name || !name.trim()) {
-      return res.status(400).json({ success: false, message: 'Business idea name is required' });
+const cleanText = (value, maxLength = 5000) => (
+  typeof value === 'string' ? value.trim().slice(0, maxLength) : ''
+);
+
+const cleanStringList = (value) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item) => typeof item === 'string')
+    .map((item) => item.trim().slice(0, 500))
+    .filter(Boolean)
+    .slice(0, 30);
+};
+
+const isValidEstimatedAmount = (value) => {
+  const amount = '(?:\\d+|\\d{1,3}(?:,\\d{3})+)(?:\\.\\d{1,2})?';
+  const currency = '(?:RWF|USD|EUR|UGX|KES|[$€£])';
+  return new RegExp(`^(?:${currency}\\s*)?${amount}(?:\\s*(?:-|–|to)\\s*(?:${currency}\\s*)?${amount})?(?:\\s*${currency})?$`, 'i').test(value);
+};
+
+const normalizeManagedIdea = (body, adminId) => {
+  const input = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  const data = {
+    name: cleanText(input.name, 120),
+    category: 'business',
+    businessCategory: cleanText(input.businessCategory, 80),
+    description: cleanText(input.description, 800),
+    fullDescription: cleanText(input.fullDescription, 10000),
+    cost: cleanText(input.cost, 80),
+    profit: cleanText(input.profit, 80),
+    risk: cleanText(input.risk, 30),
+    time: cleanText(input.time, 80),
+    steps: cleanStringList(input.steps),
+    targetAudience: cleanText(input.targetAudience, 500),
+    requiredSkills: cleanStringList(input.requiredSkills),
+    equipment: cleanStringList(input.equipment),
+    potentialCustomers: cleanStringList(input.potentialCustomers),
+    marketingStrategy: cleanText(input.marketingStrategy, 2000),
+    challenges: cleanStringList(input.challenges),
+    location: cleanText(input.location, 300),
+    additionalInfo: cleanText(input.additionalInfo, 3000),
+    published: input.published === true,
+  };
+  const errors = {};
+  [
+    ['name', 'Business name is required'],
+    ['description', 'Short description is required'],
+    ['fullDescription', 'Full description is required'],
+    ['businessCategory', 'Business category is required'],
+    ['cost', 'Estimated startup cost is required'],
+    ['profit', 'Estimated monthly profit is required'],
+    ['risk', 'Risk level is required'],
+    ['time', 'Estimated launch time is required'],
+  ].forEach(([field, message]) => {
+    if (!data[field]) errors[field] = message;
+  });
+  if (data.name.length < 2) errors.name = 'Business name must contain at least 2 characters';
+  if (!['Low', 'Medium', 'High'].includes(data.risk)) {
+    errors.risk = 'Risk level must be Low, Medium, or High';
+  }
+  if (data.cost && !isValidEstimatedAmount(data.cost)) {
+    errors.cost = 'Enter a valid non-negative amount';
+  }
+  if (data.profit && !isValidEstimatedAmount(data.profit)) {
+    errors.profit = 'Enter a valid non-negative amount';
+  }
+  if (data.steps.length === 0) errors.steps = 'Add at least one starting step';
+  if (input.published !== undefined && typeof input.published !== 'boolean') {
+    errors.published = 'Publication status must be true or false';
+  }
+  return { data: { ...data, updatedBy: adminId }, errors };
+};
+
+const getBusinessIdeaFilter = (query) => {
+  const filter = { category: { $nin: ['job', 'skill'] } };
+  if (query.status === 'published') filter.published = { $ne: false };
+  if (query.status === 'draft') filter.published = false;
+  if (typeof query.category === 'string' && query.category.trim()) {
+    filter.businessCategory = query.category.trim().slice(0, 80);
+  }
+  if (typeof query.search === 'string' && query.search.trim()) {
+    const escaped = query.search.trim().slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (escaped) {
+      const expression = new RegExp(escaped, 'i');
+      filter.$or = [
+        { name: expression },
+        { description: expression },
+        { fullDescription: expression },
+        { businessCategory: expression },
+      ];
     }
+  }
+  return filter;
+};
 
-    const normalizedSteps = Array.isArray(steps)
-      ? steps.filter((step) => typeof step === 'string' && step.trim())
-      : typeof steps === 'string'
-      ? steps.split(/\r?\n|,/).map((step) => step.trim()).filter(Boolean)
-      : [];
+exports.getManagedBusinessIdeas = async (req, res) => {
+  try {
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
+    const filter = getBusinessIdeaFilter(req.query);
+    const sortField = req.query.sort === 'oldest' ? 'createdAt' : req.query.sort === 'name' ? 'name' : 'createdAt';
+    const sortDirection = req.query.sort === 'oldest' || req.query.sort === 'name' ? 1 : -1;
+    const businessFilter = { category: { $nin: ['job', 'skill'] } };
+    const recentSince = new Date(Date.now() - (7 * 24 * 60 * 60 * 1000));
+    const [businessIdeas, total, totalIdeas, publishedIdeas, draftIdeas, recentIdeas, categories] = await Promise.all([
+      BusinessIdea.find(filter).sort({ [sortField]: sortDirection }).skip((page - 1) * limit).limit(limit).lean(),
+      BusinessIdea.countDocuments(filter),
+      BusinessIdea.countDocuments(businessFilter),
+      BusinessIdea.countDocuments({ ...businessFilter, published: { $ne: false } }),
+      BusinessIdea.countDocuments({ ...businessFilter, published: false }),
+      BusinessIdea.countDocuments({ ...businessFilter, createdAt: { $gte: recentSince } }),
+      BusinessIdea.distinct('businessCategory', businessFilter),
+    ]);
+    res.json({
+      success: true,
+      businessIdeas,
+      pagination: { page, limit, total, hasMore: page * limit < total },
+      stats: { total: totalIdeas, published: publishedIdeas, drafts: draftIdeas, recent: recentIdeas },
+      categories: categories.filter(Boolean).sort(),
+    });
+  } catch (err) {
+    console.error('Get managed business ideas error:', err.message);
+    res.status(500).json({ success: false, message: 'Could not load business ideas' });
+  }
+};
 
+exports.getManagedBusinessIdea = async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.ideaId)) {
+    return res.status(400).json({ success: false, message: 'Invalid business idea ID' });
+  }
+  try {
+    const businessIdea = await BusinessIdea.findOne({
+      _id: req.params.ideaId,
+      category: { $nin: ['job', 'skill'] },
+    });
+    if (!businessIdea) return res.status(404).json({ success: false, message: 'Business idea not found' });
+    res.json({ success: true, businessIdea });
+  } catch (err) {
+    console.error('Get managed business idea error:', err.message);
+    res.status(500).json({ success: false, message: 'Could not load business idea' });
+  }
+};
+
+exports.createManagedBusinessIdea = async (req, res) => {
+  const { data, errors } = normalizeManagedIdea(req.body, req.adminUser._id);
+  if (Object.keys(errors).length) {
+    return res.status(400).json({ success: false, message: 'Please correct the highlighted fields', errors });
+  }
+  try {
     const businessIdea = await BusinessIdea.create({
-      name: name.trim(),
-      category: category ? category.trim() : '',
-      description: description ? description.trim() : '',
-      cost: cost ? cost.trim() : '',
-      profit: profit ? profit.trim() : '',
-      risk: risk ? risk.trim() : '',
-      time: time ? time.trim() : '',
-      steps: normalizedSteps,
+      ...data,
       createdBy: req.adminUser._id,
     });
-
     res.status(201).json({ success: true, message: 'Business idea created', businessIdea });
   } catch (err) {
-    console.error('Create business idea error:', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ success: false, message: 'Business idea data is invalid' });
+    }
+    console.error('Create managed business idea error:', err.message);
+    res.status(500).json({ success: false, message: 'Could not create business idea' });
+  }
+};
+
+exports.updateManagedBusinessIdea = async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.ideaId)) {
+    return res.status(400).json({ success: false, message: 'Invalid business idea ID' });
+  }
+  const { data, errors } = normalizeManagedIdea(req.body, req.adminUser._id);
+  if (Object.keys(errors).length) {
+    return res.status(400).json({ success: false, message: 'Please correct the highlighted fields', errors });
+  }
+  try {
+    const businessIdea = await BusinessIdea.findOneAndUpdate(
+      { _id: req.params.ideaId, category: { $nin: ['job', 'skill'] } },
+      data,
+      { new: true, runValidators: true }
+    );
+    if (!businessIdea) return res.status(404).json({ success: false, message: 'Business idea not found' });
+    res.json({ success: true, message: 'Business idea updated', businessIdea });
+  } catch (err) {
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ success: false, message: 'Business idea data is invalid' });
+    }
+    console.error('Update managed business idea error:', err.message);
+    res.status(500).json({ success: false, message: 'Could not update business idea' });
+  }
+};
+
+exports.updateManagedBusinessIdeaStatus = async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.ideaId)) {
+    return res.status(400).json({ success: false, message: 'Invalid business idea ID' });
+  }
+  if (typeof req.body?.published !== 'boolean') {
+    return res.status(400).json({ success: false, message: 'Publication status must be true or false' });
+  }
+  try {
+    const businessIdea = await BusinessIdea.findOneAndUpdate(
+      { _id: req.params.ideaId, category: { $nin: ['job', 'skill'] } },
+      { $set: { published: req.body.published, updatedBy: req.adminUser._id } },
+      { new: true, runValidators: true }
+    );
+    if (!businessIdea) return res.status(404).json({ success: false, message: 'Business idea not found' });
+    res.json({ success: true, message: 'Publication status updated', businessIdea });
+  } catch (err) {
+    console.error('Update business idea status error:', err.message);
+    res.status(500).json({ success: false, message: 'Could not update publication status' });
+  }
+};
+
+exports.deleteManagedBusinessIdea = async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.ideaId)) {
+    return res.status(400).json({ success: false, message: 'Invalid business idea ID' });
+  }
+  try {
+    const businessIdea = await BusinessIdea.findOneAndDelete({
+      _id: req.params.ideaId,
+      category: { $nin: ['job', 'skill'] },
+    });
+    if (!businessIdea) return res.status(404).json({ success: false, message: 'Business idea not found' });
+    res.json({ success: true, message: 'Business idea deleted' });
+  } catch (err) {
+    console.error('Delete managed business idea error:', err.message);
+    res.status(500).json({ success: false, message: 'Could not delete business idea' });
   }
 };
 

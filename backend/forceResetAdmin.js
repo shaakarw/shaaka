@@ -14,8 +14,11 @@ const forceReset = async () => {
     await mongoose.connect(MONGO_URI);
     console.log('🔌 Connected to MongoDB');
 
-    const phone = '0799882580';
-    const newPassword = '1234';
+    const phone = process.env.ADMIN_PHONE;
+    const newPassword = process.env.ADMIN_PASSWORD;
+    if (!phone || !newPassword) {
+      throw new Error('ADMIN_PHONE and ADMIN_PASSWORD must be configured');
+    }
     const hashed = await bcrypt.hash(newPassword, 10);
 
     // Option 1: Use findOneAndUpdate with model (bypasses pre-save hooks if any)
@@ -31,7 +34,7 @@ const forceReset = async () => {
         phone,
         username: 'Admin',
         idNumber: '1234567890123456',
-        password: hashed,
+        password: newPassword,
         role: 'admin',
         name: 'Admin',
         avatar: '',

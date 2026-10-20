@@ -1,5 +1,5 @@
 // screens/AddPlaceScreen.js
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -22,10 +22,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth, useUserLimits } from '../context/AuthContext';
+import { useBottomSheet } from '../context/BottomSheetContext';
 import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
+import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
@@ -101,6 +103,8 @@ const translations = {
     publishFailed: 'Failed to publish. Please try again.',
     limitReached: 'Limit Reached',
     limitMessage: 'You already have a place registered. You can only add one place per account.\n\nIf you want to change your place, please delete the existing one first.',
+    existingBusinessTitle: 'Shop Already Added',
+    existingBusinessMessage: 'You already have a shop or place on the map. Delete your existing shop first, or contact the Shaaka owner for help.',
     permissionDenied: 'Permission Denied',
     locationAccess: 'We need location access.',
     locationError: 'Could not get your location.',
@@ -181,6 +185,8 @@ const translations = {
     publishFailed: 'Kutanga byanze. Ongera ugerageze.',
     limitReached: 'Imipaka yagezweho',
     limitMessage: 'Ufite ahantu hamaze kwandikwa. Ushobora kongeramo ahantu hamwe gusa kuri konti imwe.\n\nNiba ushaka guhindura, siba aha hantu mbere.',
+    existingBusinessTitle: 'Wamaze kongeraho iduka',
+    existingBusinessMessage: 'Usanzwe ufite iduka cyangwa ahantu ku ikarita. Banza usibe iduka risanzweho cyangwa ubaze nyiri Shaaka agufashe.',
     permissionDenied: 'Uruhushya rwabaye impamvu',
     locationAccess: 'Dukeneye uruhushya rw\'ahantu.',
     locationError: 'Ntibyashobotse kubona ahantu.',
@@ -285,6 +291,7 @@ const USER_CATEGORY_IDS = [
 
 export default function AddPlaceScreen({ navigation, route, language = 'English' }) {
   const { theme, isDarkMode } = useTheme();
+  const { showBottomSheet } = useBottomSheet();
   const { refreshUser } = useAuth();
   const adminLimits = useUserLimits();
   const t = translations[language] || translations.English;
@@ -436,6 +443,48 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
     };
     fetchExisting();
   }, []);
+
+  useFocusEffect(useCallback(() => {
+    if (loadingUser || !currentUser?._id) return undefined;
+
+    let isActive = true;
+    const checkExistingBusiness = async () => {
+      try {
+        const token = await AsyncStorage.getItem('userToken');
+        if (!token) return;
+        const headers = { Authorization: `Bearer ${token}` };
+        const [placesResponse, shopsResponse] = await Promise.all([
+          axios.get(`${BASE_URL}/api/places`, { headers }),
+          axios.get(`${BASE_URL}/api/mall-shops/mine`, { headers }),
+        ]);
+        if (!isActive) return;
+
+        const hasPlace = (placesResponse.data.places || []).some(place => {
+          const owner = place.userId || place.owner || place.ownerId;
+          const ownerId = typeof owner === 'object' ? owner?._id || owner?.id : owner;
+          return String(ownerId) === String(currentUser._id);
+        });
+        const hasMallShop = (shopsResponse.data.shops || []).length > 0;
+        if (!hasPlace && !hasMallShop) return;
+
+        showBottomSheet({
+          type: 'info',
+          title: t.existingBusinessTitle,
+          message: t.existingBusinessMessage,
+          icon: 'storefront-outline',
+          buttonText: 'OK',
+        });
+        navigation.navigate('Locate');
+      } catch (error) {
+        console.error('Could not verify existing shops before adding a place:', error);
+      }
+    };
+
+    checkExistingBusiness();
+    return () => {
+      isActive = false;
+    };
+  }, [currentUser?._id, loadingUser, navigation, showBottomSheet, t.existingBusinessMessage, t.existingBusinessTitle]));
 
   // ----- Send existing markers to map -----
   useEffect(() => {

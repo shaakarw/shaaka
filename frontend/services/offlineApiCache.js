@@ -1,8 +1,19 @@
 import axios from 'axios';
 import { offlineDatabase } from './offlineDatabase';
-import { mediaCache } from './mediaCache';
+import { isStartupPerformanceActive } from './startupPerformance';
 
 const CACHE_COLLECTION = 'http-cache';
+
+const logRequestDuration = (config, status) => {
+  if (typeof __DEV__ !== 'undefined' && !__DEV__) return;
+  if (!config?.metadata?.logDuringStartup) return;
+  const startedAt = config?.metadata?.performanceStartedAt;
+  if (!startedAt) return;
+  const path = String(config.url || '').replace(/^https?:\/\/[^/]+/i, '').split('?')[0];
+  if (/\/api\/(posts|messages)(\/|$)/i.test(path)) return;
+  const statusText = status == null ? 'network-error' : `status=${status}`;
+  console.info(`[Perf][API] ${config.method?.toUpperCase() || 'GET'} ${path} ${Date.now() - startedAt}ms ${statusText}`);
+};
 
 const stableStringify = value => {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
@@ -48,25 +59,29 @@ const persistResponse = async response => {
   const record = { data: response.data, status: response.status, statusText: response.statusText };
   try {
     await offlineDatabase.putRecord(CACHE_COLLECTION, key, record, { priority: 'medium' });
-    mediaCache.hydrate(response.data).then(data => {
-      if (data !== response.data) {
-        return offlineDatabase.putRecord(CACHE_COLLECTION, key, { ...record, data }, { priority: 'medium' });
-      }
-      return null;
-    }).catch(() => {});
   } catch (error) {
     // Cache failures should never turn a successful request into a failed one.
   }
 };
 
 export const installOfflineApiCache = () => {
-  const onSuccess = axios.interceptors.response.use(async response => {
-    await persistResponse(response);
+  const onRequest = axios.interceptors.request.use(config => {
+    config.metadata = {
+      ...config.metadata,
+      performanceStartedAt: Date.now(),
+      logDuringStartup: isStartupPerformanceActive(),
+    };
+    return config;
+  });
+  const onSuccess = axios.interceptors.response.use(response => {
+    logRequestDuration(response.config, response.status);
+    persistResponse(response).catch(() => {});
     return response;
   });
   const onError = axios.interceptors.response.use(undefined, async error => {
     const config = error?.config;
-    if (config?.method?.toLowerCase() === 'get' && !error.response) {
+    logRequestDuration(config, error?.response?.status);
+    if (config?.method?.toLowerCase() === 'get' && !error.response && !config.metadata?.disableOfflineFallback) {
       const key = cacheKeyFor(config);
       if (key) {
         try {
@@ -91,6 +106,7 @@ export const installOfflineApiCache = () => {
   });
 
   return () => {
+    axios.interceptors.request.eject(onRequest);
     axios.interceptors.response.eject(onSuccess);
     axios.interceptors.response.eject(onError);
   };

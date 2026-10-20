@@ -6,7 +6,10 @@ const { normalizeRwandaPhone, isValidRwandaPhone } = require('../utils/phoneNorm
 // GET /api/business-ideas/business-ideas
 exports.getBusinessIdeas = async (req, res) => {
   try {
-    const items = await BusinessIdea.find({ category: 'business' }).sort({ createdAt: -1 });
+    const items = await BusinessIdea.find({
+      category: { $nin: ['job', 'skill'] },
+      published: { $ne: false },
+    }).sort({ createdAt: -1 });
     res.json({ success: true, businessIdeas: items });
   } catch (err) {
     console.error('Get business ideas error:', err);
@@ -40,7 +43,7 @@ exports.getSkillCourses = async (req, res) => {
 exports.getAllBusinessIdeas = async (req, res) => {
   try {
     const [businessIdeas, jobs, skills] = await Promise.all([
-      BusinessIdea.find({ category: 'business' }).sort({ createdAt: -1 }),
+      BusinessIdea.find({ category: { $nin: ['job', 'skill'] }, published: { $ne: false } }).sort({ createdAt: -1 }),
       BusinessIdea.find({ category: 'job' }).sort({ createdAt: -1 }),
       BusinessIdea.find({ category: 'skill' }).sort({ createdAt: -1 }),
     ]);
@@ -112,13 +115,25 @@ exports.createItem = async (req, res) => {
     } else if (type === 'business-ideas') {
       payload = {
         name: req.body.name,
-        category: req.body.category || 'business',
+        category: 'business',
+        businessCategory: req.body.businessCategory !== undefined
+          ? req.body.businessCategory
+          : req.body.category === 'business' ? '' : req.body.category || '',
         description: req.body.description || '',
+        fullDescription: req.body.fullDescription || '',
         cost: req.body.cost,
         profit: req.body.profit,
         risk: req.body.risk,
         time: req.body.time,
         steps: req.body.steps || [],
+        targetAudience: req.body.targetAudience || '',
+        requiredSkills: req.body.requiredSkills || [],
+        equipment: req.body.equipment || [],
+        potentialCustomers: req.body.potentialCustomers || [],
+        marketingStrategy: req.body.marketingStrategy || '',
+        challenges: req.body.challenges || [],
+        location: req.body.location || '',
+        additionalInfo: req.body.additionalInfo || '',
         createdBy: req.user.id,
       };
     } else {
@@ -170,13 +185,25 @@ exports.updateItem = async (req, res) => {
     } else if (type === 'business-ideas') {
       updateFields = {
         name: req.body.name,
-        category: req.body.category,
+        category: 'business',
+        businessCategory: req.body.businessCategory !== undefined
+          ? req.body.businessCategory
+          : req.body.category === 'business' ? '' : req.body.category || '',
         description: req.body.description,
+        fullDescription: req.body.fullDescription,
         cost: req.body.cost,
         profit: req.body.profit,
         risk: req.body.risk,
         time: req.body.time,
         steps: req.body.steps,
+        targetAudience: req.body.targetAudience,
+        requiredSkills: req.body.requiredSkills,
+        equipment: req.body.equipment,
+        potentialCustomers: req.body.potentialCustomers,
+        marketingStrategy: req.body.marketingStrategy,
+        challenges: req.body.challenges,
+        location: req.body.location,
+        additionalInfo: req.body.additionalInfo,
       };
     } else {
       return res.status(400).json({ success: false, message: 'Invalid type' });

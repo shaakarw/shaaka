@@ -6,12 +6,12 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
+  Animated,
   SafeAreaView,
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
-  Image,
 } from 'react-native';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
@@ -33,12 +33,33 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
   // Refs for inputs so Enter/Done can move focus or submit
   const phoneRef = useRef(null);
   const passwordRef = useRef(null);
+  const logoScale = useRef(new Animated.Value(1)).current;
+  const logoRotate = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (!error) return;
     const timer = setTimeout(() => setError(''), 2500);
     return () => clearTimeout(timer);
   }, [error]);
+
+  useEffect(() => {
+    const dance = Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(logoScale, { toValue: 1.12, duration: 500, useNativeDriver: true }),
+          Animated.timing(logoRotate, { toValue: 1, duration: 500, useNativeDriver: true }),
+        ]),
+        Animated.parallel([
+          Animated.timing(logoScale, { toValue: 1, duration: 500, useNativeDriver: true }),
+          Animated.timing(logoRotate, { toValue: -1, duration: 500, useNativeDriver: true }),
+        ]),
+        Animated.timing(logoRotate, { toValue: 0, duration: 300, useNativeDriver: true }),
+      ])
+    );
+
+    dance.start();
+    return () => dance.stop();
+  }, [logoRotate, logoScale]);
 
   const texts = {
     English: {
@@ -148,7 +169,24 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
           contentContainerStyle={[styles.scrollContainer, { paddingBottom: 100 }]}
           keyboardShouldPersistTaps="handled"
         >
-          <Image source={Logo} style={[styles.logos, { width: 100, height: 95,position:'relative' }]} />
+          <Animated.Image
+            source={Logo}
+            style={[
+              styles.logos,
+              { width: 100, height: 95, position: 'relative' },
+              {
+                transform: [
+                  { scale: logoScale },
+                  {
+                    rotate: logoRotate.interpolate({
+                      inputRange: [-1, 0, 1],
+                      outputRange: ['-6deg', '0deg', '6deg'],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          />
           <View style={styles.header}>
             <Text style={[styles.title, { color: theme.text }]}>{t.welcome}</Text>
             <Text style={[styles.subtitle, { color: theme.textSecondary }]}>

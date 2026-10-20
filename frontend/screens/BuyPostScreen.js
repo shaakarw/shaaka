@@ -1,10 +1,10 @@
 // screens/BuyPostScreen.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
-  View, Text, Image, TouchableOpacity, FlatList, StyleSheet,
+  View, Text, Image, TouchableOpacity, FlatList, StyleSheet, ActivityIndicator,
   Dimensions, Share, Alert, Animated,
   TextInput, RefreshControl, ScrollView, TouchableWithoutFeedback,
-  Linking, Platform, LogBox, PanResponder, Modal,
+  Linking, Platform, LogBox, PanResponder, Modal, useWindowDimensions,
 } from 'react-native';
 import BlurView from '../components/BlurViewWrapper';
 import { useTheme } from '../context/ThemeContext';
@@ -17,13 +17,17 @@ import axios from 'axios';
 import BuyLoginSheet from '../components/BuyLoginSheet';
 import { useBottomSheet } from '../context/BottomSheetContext';
 import { BASE_URL } from '../constants';
-import VideoPost from '../components/VideoPost';
+import { VideoView, useVideoPlayer } from 'expo-video';
+import * as VideoThumbnails from 'expo-video-thumbnails';
 import { getUserDisplayName } from '../utils/userIdentity';
 import { videoPreloader } from '../components/VideoPreloader';
 import { POST_SECTIONS, POST_SECTION_KEYS, getPostsForSection } from './postSectionConfig';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import { offlineDatabase } from '../services/offlineDatabase';
 import { mediaCache } from '../services/mediaCache';
+import { networkStatus } from '../services/networkStatus';
+import { setReelsActive } from '../services/reelActivity';
+import { reelVideoCache } from '../services/reelVideoCache';
 
 LogBox.ignoreLogs([
   'The native view manager for module(ExpoBlur)',
@@ -40,6 +44,10 @@ const SCROLL_THRESHOLD = 20;
 const MIN_IMAGE_HEIGHT = 300;
 const MAX_IMAGE_HEIGHT = 700;
 const CARD_BORDER_RADIUS = 0;
+
+// Post media bounds (relative to device height)
+const POST_MEDIA_MIN_RATIO = 0.30; // min height = 30% of screen
+const POST_MEDIA_MAX_RATIO = 0.75; // max height = 75% of screen
 
 let restoredReelIndex = 0;
 
@@ -75,7 +83,7 @@ const translations = {
     videos: 'Videos',
     pleaseLogin: 'Please login to see posts',
     noPosts: 'Wait a moment...',
-    noMyPosts: "",
+    noMyPosts: '',
     noSavedPosts: '',
     noVideos: 'Loading...',
     addNewUpdate: 'New Update',
@@ -213,19 +221,28 @@ const getImageSize = (source) => {
   return Promise.resolve({ width: CARD_WIDTH, height: MIN_IMAGE_HEIGHT });
 };
 
-const computeScaledMediaLayout = (naturalWidth, naturalHeight) => {
+/**
+ * Fit media into [minHeight, maxHeight]:
+ *  - Natural scaled height > maxHeight → crop (`cover`) at maxHeight.
+ *  - Natural scaled height < minHeight → ZOOM IN (`cover`) at minHeight.
+ *  - Otherwise → use scaled height with `contain`.
+ */
+const computeScaledMediaLayout = (naturalWidth, naturalHeight, cardWidth, maxHeight, minHeight = 0) => {
   if (!naturalWidth || !naturalHeight) {
-    return { height: MAX_IMAGE_HEIGHT, resizeMode: 'cover' };
+    return { height: Math.max(minHeight, maxHeight), resizeMode: 'contain' };
   }
-  const scaled = (naturalHeight / naturalWidth) * CARD_WIDTH;
+  const scaled = (naturalHeight / naturalWidth) * cardWidth;
   if (Number.isNaN(scaled) || !Number.isFinite(scaled)) {
-    return { height: MAX_IMAGE_HEIGHT, resizeMode: 'cover' };
+    return { height: Math.max(minHeight, maxHeight), resizeMode: 'contain' };
   }
-  const isClamped = scaled < MIN_IMAGE_HEIGHT || scaled > MAX_IMAGE_HEIGHT;
-  return {
-    height: Math.min(Math.max(scaled, MIN_IMAGE_HEIGHT), MAX_IMAGE_HEIGHT),
-    resizeMode: isClamped ? 'cover' : 'contain',
-  };
+  if (scaled > maxHeight) {
+    return { height: maxHeight, resizeMode: 'cover' };
+  }
+  // Short image → zoom in to fill the min-height area
+  if (scaled < minHeight) {
+    return { height: minHeight, resizeMode: 'cover' };
+  }
+  return { height: scaled, resizeMode: 'contain' };
 };
 
 const mapPost = (post) => ({
@@ -242,7 +259,7 @@ const mapPost = (post) => ({
   contactNumber1: post.contactNumbers?.[0] || '',
   contactNumber2: post.contactNumbers?.[1] || '',
   priceNegotiable: post.priceNegotiable || false,
-  videoUrl: post.videoUrl || '',
+  videoUrl: post.videoUrl || post.videoHlsUrl || post.video?.url || '',
   videoDuration: post.videoDuration || 0,
   videoThumbnail: post.videoThumbnail || '',
   videoLink: post.videoLink || '',
@@ -258,6 +275,655 @@ const getPostOwnerId = (post) => {
   return owner?._id || owner?.id || owner;
 };
 
+/* ============================================================
+   Video helpers (merged from VideoPost + VideoPlayerControls)
+   ============================================================ */
+const safePlayerAction = (player, methodName, ...args) => {
+  if (!player || typeof player[methodName] !== 'function') return false;
+  try { return player[methodName](...args); }
+  catch (_) {
+    if (__DEV__) console.warn(`Video ${methodName} skipped — player released.`);
+    return false;
+  }
+};
+
+const safePlayerSet = (player, propertyName, value) => {
+  if (!player) return false;
+  try { player[propertyName] = value; return true; }
+  catch (_) { return false; }
+};
+
+const GESTURE_SWIPE_ACTIVATION = 14;
+const GESTURE_HORIZONTAL_DOMINANCE = 1.4;
+const SPEED_STEPS = [
+  { distance: 150, speed: 2 },
+  { distance: 95, speed: 1.5 },
+  { distance: 45, speed: 1.25 },
+];
+const PIXELS_PER_REWIND_SECOND = 10;
+const MAX_REWIND_SECONDS = 45;
+const CHROME_HIDE_DELAY = 4000;
+const DOUBLE_TAP_DELAY = 240;
+const DOUBLE_TAP_SEEK_SECONDS = 10;
+
+const _getSpeedForDistance = d => {
+  for (let i = 0; i < SPEED_STEPS.length; i++) {
+    if (d >= SPEED_STEPS[i].distance) return SPEED_STEPS[i].speed;
+  }
+  return 1;
+};
+const _isHorizontalSwipe = gs => {
+  if (Math.abs(gs.dx) < GESTURE_SWIPE_ACTIVATION) return false;
+  return Math.abs(gs.dx) > Math.abs(gs.dy) * GESTURE_HORIZONTAL_DOMINANCE;
+};
+const _getRewindSeconds = d =>
+  Math.max(0, Math.min(MAX_REWIND_SECONDS, Math.round(d / PIXELS_PER_REWIND_SECOND)));
+const _formatTime = s => {
+  const safe = Number.isFinite(s) && s > 0 ? s : 0;
+  return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(Math.floor(safe % 60)).padStart(2, '0')}`;
+};
+
+/* ============================================================
+   ShaakaVideoPlayer — inline player + controls
+   ============================================================ */
+const ShaakaVideoPlayer = ({
+  videoUrl,
+  videoThumbnail,
+  videoLink,
+  videoDuration = 0,
+  theme,
+  containerHeight = null,
+  isVisible = false,
+  muted = true,
+  onMuteChange,
+  progressColor = '#fff',
+  contentFit = 'cover',
+  showPlaybackControls = true,
+  showTopMute,
+  showBottomMute = true,
+  onVideoPress,
+  logReadyPerformance,
+}) => {
+  const [duration, setDuration] = useState(Number(videoDuration) || 0);
+  const [ready, setReady] = useState(false);
+  const [coverImage, setCoverImage] = useState(videoThumbnail || null);
+  const [videoSize, setVideoSize] = useState({ width: 9, height: 16 });
+  const [isPlayingState, setIsPlayingState] = useState(false);
+  const [isMutedState, setIsMutedState] = useState(Boolean(muted));
+  const [currentTime, setCurrentTime] = useState(0);
+  const [chromeVisible, setChromeVisible] = useState(true);
+  const [hasError, setHasError] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(true);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekTime, setSeekTime] = useState(0);
+  const [gestureIndicator, setGestureIndicator] = useState(null);
+  const [retryTick, setRetryTick] = useState(0);
+
+  const player = useVideoPlayer(videoUrl, instance => {
+    instance.loop = true;
+    instance.muted = muted;
+    instance.timeUpdateEventInterval = 0.25;
+  });
+
+  const manualOverride = useRef(null);
+  const chromeOpacity = useRef(new Animated.Value(1)).current;
+  const progressAnim = useRef(new Animated.Value(0)).current;
+  const progressBarWidth = useRef(SCREEN_WIDTH * 0.7);
+  const wasPlayingBeforeSeek = useRef(false);
+  const seekTimeRef = useRef(0);
+  const hideChromeTimeout = useRef(null);
+  const gestureIndicatorTimeout = useRef(null);
+  const mounted = useRef(true);
+  const lastTapRef = useRef(0);
+  const singleTapRef = useRef(null);
+  const gestureRef = useRef({
+    mode: null, baseTime: 0, targetTime: 0,
+    baseSpeed: 1, appliedSpeed: 1,
+    lastRewindSeconds: -1, lastShownSpeed: null,
+  }).current;
+
+  const initialHeight = containerHeight
+    || Math.min(MAX_IMAGE_HEIGHT, Math.max(MIN_IMAGE_HEIGHT, SCREEN_WIDTH * (16 / 9)));
+  const videoHeightAnimation = useRef(new Animated.Value(initialHeight)).current;
+  const latestRef = useRef({ player, duration, currentTime, isPlayingState });
+
+  useEffect(() => {
+    latestRef.current = { player, duration, currentTime, isPlayingState };
+  });
+
+  /* ---------- cover generation ---------- */
+  useEffect(() => {
+    let alive = true;
+    if (!videoUrl) return;
+    if (videoThumbnail) { setCoverImage(videoThumbnail); return; }
+    (async () => {
+      try {
+        const { uri } = await VideoThumbnails.getThumbnailAsync(videoUrl, { time: 3000, quality: 0.8 });
+        if (alive) setCoverImage(uri);
+      } catch (_) {
+        try {
+          const { uri } = await VideoThumbnails.getThumbnailAsync(videoUrl, { time: 1000, quality: 0.5 });
+          if (alive) setCoverImage(uri);
+        } catch (_) { /* ignore */ }
+      }
+    })();
+    return () => { alive = false; };
+  }, [videoUrl, videoThumbnail, retryTick]);
+
+  /* ---------- mute sync ---------- */
+  useEffect(() => {
+    if (player) {
+      safePlayerSet(player, 'muted', muted);
+      setIsMutedState(Boolean(muted));
+    }
+  }, [player, muted]);
+
+  /* ---------- preloader register ---------- */
+  useEffect(() => {
+    videoPreloader.registerPlayer(player);
+    return () => videoPreloader.unregisterPlayer(player);
+  }, [player]);
+
+  /* ---------- autoplay on visibility ---------- */
+  useEffect(() => {
+    if (!player || !ready) return;
+    if (isVisible && manualOverride.current !== false) safePlayerAction(player, 'play');
+    else if (!isVisible) safePlayerAction(player, 'pause');
+  }, [player, ready, isVisible]);
+
+  /* ---------- player events ---------- */
+  useEffect(() => {
+    if (!player) return;
+    const s1 = player.addListener('statusChange', ({ status }) => {
+      setReady(status === 'readyToPlay');
+      setIsBuffering(status === 'loading');
+      if (status === 'error') setHasError(true);
+      if (status === 'readyToPlay') setHasError(false);
+    });
+    const s2 = player.addListener('playingChange', ({ isPlaying }) => {
+      setIsPlayingState(isPlaying);
+      if (isPlaying) videoPreloader.pauseOtherPlayers(player);
+    });
+    const s3 = player.addListener('videoTrackChange', ({ videoTrack }) => {
+      const w = videoTrack?.size?.width, h = videoTrack?.size?.height;
+      if (w > 0 && h > 0) setVideoSize({ width: w, height: h });
+    });
+    const s4 = player.addListener('timeUpdate', ({ currentTime: t, duration: d }) => {
+      if (d > 0 && d !== duration) setDuration(d);
+      if (!isSeeking) {
+        setCurrentTime(t);
+        const total = d || duration;
+        if (total > 0) progressAnim.setValue(t / total);
+      }
+    });
+    return () => { s1.remove(); s2.remove(); s3.remove(); s4.remove(); };
+  }, [player, duration, isSeeking, progressAnim]);
+
+  /* ---------- height animation ---------- */
+  useEffect(() => {
+    if (containerHeight) {
+      Animated.timing(videoHeightAnimation, {
+        toValue: containerHeight, duration: 220, useNativeDriver: false,
+      }).start();
+      return;
+    }
+    const next = Math.min(
+      MAX_IMAGE_HEIGHT,
+      Math.max(MIN_IMAGE_HEIGHT, SCREEN_WIDTH * (videoSize.height / videoSize.width)),
+    );
+    Animated.timing(videoHeightAnimation, {
+      toValue: next, duration: 220, useNativeDriver: false,
+    }).start();
+  }, [videoSize, containerHeight, videoHeightAnimation]);
+
+  /* ---------- cleanup ---------- */
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (hideChromeTimeout.current) clearTimeout(hideChromeTimeout.current);
+      if (gestureIndicatorTimeout.current) clearTimeout(gestureIndicatorTimeout.current);
+      if (singleTapRef.current) clearTimeout(singleTapRef.current);
+      if (player) {
+        safePlayerAction(player, 'pause');
+        videoPreloader.unregisterPlayer(player);
+      }
+    };
+  }, [player]);
+
+  /* ---------- chrome helpers ---------- */
+  const animateChrome = to => {
+    Animated.timing(chromeOpacity, { toValue: to, duration: 220, useNativeDriver: true }).start();
+  };
+  const scheduleChromeHide = () => {
+    if (hideChromeTimeout.current) clearTimeout(hideChromeTimeout.current);
+    if (!isPlayingState || isSeeking) return;
+    hideChromeTimeout.current = setTimeout(() => {
+      hideChromeTimeout.current = null;
+      if (!mounted.current || !latestRef.current.isPlayingState || isSeeking) return;
+      setChromeVisible(false);
+      animateChrome(0);
+    }, CHROME_HIDE_DELAY);
+  };
+  const revealChrome = () => {
+    if (hideChromeTimeout.current) {
+      clearTimeout(hideChromeTimeout.current);
+      hideChromeTimeout.current = null;
+    }
+    setChromeVisible(true);
+    animateChrome(1);
+    scheduleChromeHide();
+  };
+
+  // Auto-hide overlay (play/pause + mute) after 4 s while playing
+  useEffect(() => {
+    if (!ready || !isPlayingState || hasError || isSeeking) return undefined;
+    if (hideChromeTimeout.current) {
+      clearTimeout(hideChromeTimeout.current);
+      hideChromeTimeout.current = null;
+    }
+    hideChromeTimeout.current = setTimeout(() => {
+      hideChromeTimeout.current = null;
+      if (!mounted.current || !latestRef.current.isPlayingState || isSeeking) return;
+      setChromeVisible(false);
+      Animated.timing(chromeOpacity, {
+        toValue: 0,
+        duration: 220,
+        useNativeDriver: true,
+      }).start();
+    }, CHROME_HIDE_DELAY);
+    return () => {
+      if (hideChromeTimeout.current) {
+        clearTimeout(hideChromeTimeout.current);
+        hideChromeTimeout.current = null;
+      }
+    };
+  }, [isPlayingState, ready, hasError, isSeeking, chromeOpacity]);
+
+  const showGestureIndicator = (payload, hideAfter = 700) => {
+    setGestureIndicator(payload);
+    if (gestureIndicatorTimeout.current) clearTimeout(gestureIndicatorTimeout.current);
+    gestureIndicatorTimeout.current = setTimeout(() => {
+      gestureIndicatorTimeout.current = null;
+      if (mounted.current) setGestureIndicator(null);
+    }, hideAfter);
+  };
+
+  /* ---------- core actions ---------- */
+  const togglePlayPause = useCallback(() => {
+    if (!player) return;
+    const willPlay = !isPlayingState;
+    safePlayerAction(player, willPlay ? 'play' : 'pause');
+    setIsPlayingState(willPlay);
+    manualOverride.current = willPlay;
+    revealChrome();
+  }, [player, isPlayingState]);
+
+  const toggleMute = useCallback(() => {
+    const next = !isMutedState;
+    safePlayerSet(player, 'muted', next);
+    setIsMutedState(next);
+    onMuteChange?.(next);
+    revealChrome();
+  }, [player, isMutedState, onMuteChange]);
+
+  const handleRetry = useCallback(() => {
+    if (!player) return;
+    setHasError(false);
+    setReady(false);
+    setIsBuffering(true);
+    try {
+      if (typeof player.replaceAsync === 'function') {
+        player.replaceAsync(videoUrl).catch(() => {});
+      } else if (typeof player.replace === 'function') {
+        player.replace(videoUrl);
+      }
+    } catch (_) { /* ignore */ }
+    setRetryTick(v => v + 1);
+  }, [player, videoUrl]);
+
+  const handleDoubleTapSeek = useCallback((tapX) => {
+    if (!player || duration <= 0) { togglePlayPause(); return; }
+    const isLeft = tapX < SCREEN_WIDTH / 2;
+    const delta = isLeft ? -DOUBLE_TAP_SEEK_SECONDS : DOUBLE_TAP_SEEK_SECONDS;
+    const cur = Number.isFinite(currentTime) ? currentTime : 0;
+    const target = Math.max(0, Math.min(duration, cur + delta));
+    safePlayerSet(player, 'currentTime', target);
+    setCurrentTime(target);
+    progressAnim.setValue(target / duration);
+    revealChrome();
+    showGestureIndicator(
+      { type: 'seek', direction: isLeft ? 'back' : 'forward', seconds: Math.abs(delta), targetTime: target },
+      600,
+    );
+  }, [player, duration, currentTime, progressAnim, togglePlayPause]);
+
+  const handleTap = useCallback((event) => {
+    const now = Date.now();
+    const delta = now - lastTapRef.current;
+    lastTapRef.current = now;
+    const native = event?.nativeEvent || {};
+    const tapX = native.locationX ?? native.pageX ?? SCREEN_WIDTH / 2;
+    if (delta < DOUBLE_TAP_DELAY) {
+      if (singleTapRef.current) { clearTimeout(singleTapRef.current); singleTapRef.current = null; }
+      handleDoubleTapSeek(tapX);
+      return;
+    }
+    if (singleTapRef.current) clearTimeout(singleTapRef.current);
+    singleTapRef.current = setTimeout(() => {
+      singleTapRef.current = null;
+      if (!mounted.current) return;
+      // Always reveal controls (unhide when hidden) + toggle playback.
+      revealChrome();
+      if (onVideoPress) onVideoPress();
+      else togglePlayPause();
+    }, DOUBLE_TAP_DELAY);
+  }, [handleDoubleTapSeek, onVideoPress, togglePlayPause]);
+
+  /* ---------- swipe (right = seek, left = speed) ---------- */
+  const swipePanResponder = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => false,
+    onStartShouldSetPanResponderCapture: () => false,
+    onMoveShouldSetPanResponder: (e, gs) => _isHorizontalSwipe(gs),
+    onMoveShouldSetPanResponderCapture: (e, gs) => _isHorizontalSwipe(gs),
+    onPanResponderGrant: () => {
+      if (gestureIndicatorTimeout.current) { clearTimeout(gestureIndicatorTimeout.current); gestureIndicatorTimeout.current = null; }
+      if (hideChromeTimeout.current) { clearTimeout(hideChromeTimeout.current); hideChromeTimeout.current = null; }
+      revealChrome();
+      const { currentTime: t } = latestRef.current;
+      gestureRef.mode = null;
+      gestureRef.baseTime = Number.isFinite(t) ? t : 0;
+      gestureRef.targetTime = gestureRef.baseTime;
+      gestureRef.baseSpeed = 1;
+      gestureRef.appliedSpeed = 1;
+      gestureRef.lastRewindSeconds = -1;
+      gestureRef.lastShownSpeed = null;
+    },
+    onPanResponderMove: (e, gs) => {
+      const mode = gs.dx < 0 ? 'speed' : 'seek';
+      gestureRef.mode = mode;
+      const dist = Math.abs(gs.dx);
+      if (mode === 'speed') {
+        const next = _getSpeedForDistance(dist);
+        if (next !== gestureRef.appliedSpeed) {
+          gestureRef.appliedSpeed = next;
+          safePlayerSet(latestRef.current.player, 'playbackRate', next);
+        }
+        if (next !== gestureRef.lastShownSpeed) {
+          gestureRef.lastShownSpeed = next;
+          setGestureIndicator({ type: 'speed', speed: next });
+        }
+        return;
+      }
+      const total = latestRef.current.duration || 0;
+      const rewind = _getRewindSeconds(dist);
+      if (rewind === gestureRef.lastRewindSeconds) return;
+      gestureRef.lastRewindSeconds = rewind;
+      const target = Math.max(0, Math.min(total, gestureRef.baseTime - rewind));
+      gestureRef.targetTime = target;
+      setGestureIndicator({
+        type: 'seek', direction: 'back',
+        seconds: Math.max(0, Math.round(gestureRef.baseTime - target)),
+        targetTime: target,
+      });
+    },
+    onPanResponderRelease: () => {
+      const mode = gestureRef.mode;
+      gestureRef.mode = null;
+      if (mode === 'seek' && latestRef.current.player && latestRef.current.duration > 0) {
+        const target = Math.max(0, Math.min(latestRef.current.duration, gestureRef.targetTime));
+        safePlayerSet(latestRef.current.player, 'currentTime', target);
+        setCurrentTime(target);
+        progressAnim.setValue(target / latestRef.current.duration);
+      }
+      if (mode === 'speed') {
+        safePlayerSet(latestRef.current.player, 'playbackRate', 1);
+      }
+      revealChrome();
+      if (gestureIndicatorTimeout.current) clearTimeout(gestureIndicatorTimeout.current);
+      gestureIndicatorTimeout.current = setTimeout(() => {
+        gestureIndicatorTimeout.current = null;
+        if (mounted.current) setGestureIndicator(null);
+      }, mode === 'seek' ? 500 : 800);
+    },
+    onPanResponderTerminate: () => {
+      gestureRef.mode = null;
+      if (gestureIndicatorTimeout.current) clearTimeout(gestureIndicatorTimeout.current);
+      gestureIndicatorTimeout.current = setTimeout(() => {
+        gestureIndicatorTimeout.current = null;
+        if (mounted.current) setGestureIndicator(null);
+      }, 400);
+    },
+  })).current;
+
+  /* ---------- progress bar seek ---------- */
+  const progressPanResponder = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: e => {
+      revealChrome();
+      wasPlayingBeforeSeek.current = isPlayingState;
+      if (isPlayingState && player) safePlayerAction(player, 'pause');
+      setIsSeeking(true);
+      const x = e.nativeEvent.locationX;
+      const t = Math.max(0, Math.min(duration, (x / progressBarWidth.current) * duration));
+      seekTimeRef.current = t;
+      setSeekTime(t);
+    },
+    onPanResponderMove: e => {
+      const x = e.nativeEvent.locationX;
+      const t = Math.max(0, Math.min(duration, (x / progressBarWidth.current) * duration));
+      seekTimeRef.current = t;
+      setSeekTime(t);
+    },
+    onPanResponderRelease: () => {
+      if (player && duration > 0) {
+        safePlayerSet(player, 'currentTime', seekTimeRef.current);
+        setCurrentTime(seekTimeRef.current);
+        progressAnim.setValue(seekTimeRef.current / duration);
+        if (wasPlayingBeforeSeek.current) safePlayerAction(player, 'play');
+      }
+      setIsSeeking(false);
+      revealChrome();
+    },
+    onPanResponderTerminate: () => {
+      if (player && duration > 0) {
+        safePlayerSet(player, 'currentTime', seekTimeRef.current);
+        setCurrentTime(seekTimeRef.current);
+        progressAnim.setValue(seekTimeRef.current / duration);
+        if (wasPlayingBeforeSeek.current) safePlayerAction(player, 'play');
+      }
+      setIsSeeking(false);
+      revealChrome();
+    },
+  })).current;
+
+  if (!videoUrl) return null;
+
+  const progressWidth = progressAnim.interpolate({
+    inputRange: [0, 1], outputRange: ['0%', '100%'],
+  });
+  const displayProgress = duration > 0 ? (isSeeking ? seekTime : currentTime) / duration : 0;
+  const displayTime = isSeeking ? seekTime : currentTime;
+  const accent = progressColor || '#fff';
+  const showTopMuteResolved = showTopMute ?? !showPlaybackControls;
+
+  const muteButton = (size = 18) => (
+    <TouchableOpacity
+      onPress={toggleMute}
+      style={styles.videoMuteBtn}
+      activeOpacity={0.85}
+      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+      accessibilityRole="button"
+      accessibilityLabel={isMutedState ? 'Unmute video' : 'Mute video'}
+    >
+      <Ionicons name={isMutedState ? 'volume-mute' : 'volume-high'} size={size} color="#fff" />
+    </TouchableOpacity>
+  );
+
+  return (
+    <Animated.View style={[styles.videoContainer, { height: videoHeightAnimation }]}>
+      {videoLink ? (
+        <Text
+          style={[styles.videoLinkBadge, { color: theme?.accent || '#fff' }]}
+          numberOfLines={1}
+          onPress={() => Linking.openURL(videoLink)}
+        >
+          <Ionicons name="link-outline" size={12} /> {videoLink}
+        </Text>
+      ) : null}
+
+      <View style={[styles.videoPlayerFrame, { backgroundColor: theme?.mediaLoadingBackground }]}>
+        {!ready && coverImage ? (
+          <Image source={{ uri: coverImage }} style={styles.videoCover} resizeMode="cover" />
+        ) : null}
+
+        <VideoView
+          player={player}
+          style={styles.videoView}
+          contentFit={contentFit}
+          nativeControls={false}
+        />
+
+        {/* Gesture + tap layer */}
+        <View style={StyleSheet.absoluteFill} {...swipePanResponder.panHandlers}>
+          <TouchableWithoutFeedback onPress={handleTap}>
+            <View style={StyleSheet.absoluteFill} />
+          </TouchableWithoutFeedback>
+        </View>
+
+        {/* Loading spinner */}
+        {(isBuffering || !ready) && !hasError && (
+          <View style={styles.videoOverlayCenter} pointerEvents="none">
+            <ActivityIndicator size="large" color="#fff" />
+          </View>
+        )}
+
+        {/* Center play/pause control (fades with chrome) */}
+        {ready && !hasError && !isSeeking && (
+          <Animated.View
+            style={[
+              styles.videoOverlayCenter,
+              { opacity: isPlayingState ? chromeOpacity : 1 },
+            ]}
+            pointerEvents="box-none"
+          >
+            {(!isPlayingState || chromeVisible) && (
+              <TouchableOpacity
+                onPress={togglePlayPause}
+                style={styles.videoPauseCircle}
+                activeOpacity={0.85}
+                accessibilityRole="button"
+                accessibilityLabel={isPlayingState ? 'Pause video' : 'Play video'}
+              >
+                <Ionicons
+                  name={isPlayingState ? 'pause' : 'play'}
+                  size={32}
+                  color="#fff"
+                  style={!isPlayingState ? { marginLeft: 3 } : null}
+                />
+              </TouchableOpacity>
+            )}
+          </Animated.View>
+        )}
+
+        {/* Error overlay */}
+        {hasError && (
+          <View style={styles.videoOverlayCenter}>
+            <View style={styles.videoErrorBox}>
+              <Ionicons name="alert-circle-outline" size={28} color="#fff" />
+              <Text style={styles.videoErrorText}>Video failed to load</Text>
+              <TouchableOpacity style={styles.videoRetryBtn} onPress={handleRetry}>
+                <Ionicons name="refresh" size={14} color="#fff" />
+                <Text style={styles.videoRetryText}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        {/* Top-right mute — fades with chrome, hidden after 4 s */}
+        {showTopMuteResolved && !hasError && (
+          <Animated.View
+            style={[styles.videoTopMute, { opacity: chromeOpacity }]}
+            pointerEvents={chromeVisible ? 'box-none' : 'none'}
+          >
+            {muteButton(20)}
+          </Animated.View>
+        )}
+
+        {/* Full controls bottom bar */}
+        {showPlaybackControls && ready && !hasError && (
+          <Animated.View
+            style={[styles.videoBottomBar, { opacity: chromeOpacity }]}
+            pointerEvents={chromeVisible ? 'box-none' : 'none'}
+          >
+            {showBottomMute && muteButton(17)}
+            <View
+              style={styles.videoProgressWrap}
+              onLayout={e => { progressBarWidth.current = e.nativeEvent.layout.width; }}
+              {...progressPanResponder.panHandlers}
+            >
+              <View style={styles.videoProgressTrack}>
+                <Animated.View
+                  style={[styles.videoProgressFill, { width: progressWidth, backgroundColor: accent }]}
+                />
+                <View
+                  style={[
+                    styles.videoProgressThumb,
+                    { left: `${Math.max(0, Math.min(1, displayProgress)) * 100}%` },
+                  ]}
+                />
+              </View>
+            </View>
+            <Text style={styles.videoTimeText}>
+              {_formatTime(displayTime)} / {_formatTime(duration)}
+            </Text>
+          </Animated.View>
+        )}
+
+        {/* Thin progress line (minimal mode) */}
+        {!showPlaybackControls && ready && !hasError && (
+          <View style={styles.videoProgressLineWrap} pointerEvents="none">
+            <Animated.View
+              style={[styles.videoProgressLine, { width: progressWidth, backgroundColor: accent }]}
+            />
+          </View>
+        )}
+
+        {/* Gesture indicator */}
+        {gestureIndicator && (
+          <View style={styles.videoOverlayCenter} pointerEvents="none">
+            <View style={styles.videoGestureBubble}>
+              <Ionicons
+                name={
+                  gestureIndicator.type === 'speed'
+                    ? 'play-forward'
+                    : gestureIndicator.direction === 'forward'
+                      ? 'play-forward'
+                      : 'play-back'
+                }
+                size={20}
+                color="#fff"
+              />
+              <Text style={styles.videoGestureText}>
+                {gestureIndicator.type === 'speed'
+                  ? `${gestureIndicator.speed}x`
+                  : `${gestureIndicator.direction === 'forward' ? '+' : '-'}${gestureIndicator.seconds}s`}
+              </Text>
+            </View>
+            {gestureIndicator.type === 'seek' && (
+              <Text style={styles.videoGestureSub}>{_formatTime(gestureIndicator.targetTime)}</Text>
+            )}
+          </View>
+        )}
+      </View>
+    </Animated.View>
+  );
+};
+
+/* ============================================================
+   Shared UI helpers
+   ============================================================ */
 const ImageWithPlaceholder = React.memo(({ source, style, resizeMode, transparentBackground }) => {
   const { theme } = useTheme();
   const [loaded, setLoaded] = useState(false);
@@ -342,8 +1008,7 @@ const ImageWithPlaceholder = React.memo(({ source, style, resizeMode, transparen
   );
 });
 
-/* ---------- Slider: no arrows, only dots ---------- */
-const ImageSlider = React.memo(({ images, isDarkMode, height, resizeMode = 'contain', loadingBackground }) => {
+const ImageSlider = React.memo(({ images, isDarkMode, height, width = CARD_WIDTH, resizeMode = 'contain', loadingBackground }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
   const flatListRef = useRef(null);
   const containerHeight = height || MAX_IMAGE_HEIGHT;
@@ -363,13 +1028,7 @@ const ImageSlider = React.memo(({ images, isDarkMode, height, resizeMode = 'cont
       <Image
         source={getImageSource(currentImage)}
         style={[StyleSheet.absoluteFillObject, { width: '100%', height: '100%' }]}
-        resizeMode="cover"
-      />
-      <BlurView
-        tint={isDarkMode ? 'dark' : 'light'}
-        intensity={90}
-        style={StyleSheet.absoluteFill}
-        pointerEvents="none"
+        resizeMode={resizeMode}
       />
       <FlatList
         ref={flatListRef}
@@ -383,7 +1042,7 @@ const ImageSlider = React.memo(({ images, isDarkMode, height, resizeMode = 'cont
         renderItem={({ item }) => (
           <ImageWithPlaceholder
             source={item}
-            style={[styles.houseImage, { height: containerHeight }]}
+            style={[styles.houseImage, { width, height: containerHeight }]}
             resizeMode={resizeMode}
             transparentBackground
           />
@@ -400,8 +1059,7 @@ const ImageSlider = React.memo(({ images, isDarkMode, height, resizeMode = 'cont
   );
 });
 
-/* ---------- Horizontal trending strip (product tiles) ---------- */
-const FeedProductStrip = React.memo(({ products, onPress, onUserPress, title, isDarkMode }) => {
+const FeedProductStrip = React.memo(({ products, onPress, onUserPress, title, isDarkMode, tileHeight = 180, tileWidth = 132 }) => {
   const visibleProducts = products
     .filter(product => product.houseImages?.length || product.videoUrl)
     .slice(0, 10);
@@ -409,7 +1067,7 @@ const FeedProductStrip = React.memo(({ products, onPress, onUserPress, title, is
   if (visibleProducts.length === 0) return null;
 
   return (
-    <View style={[styles.productStrip, title && styles.productStripWithTitle]}>
+    <View style={[styles.productStrip, { height: tileHeight + (title ? 44 : 14) }]}>
       {!!title && (
         <Text style={[styles.productStripTitle, { color: isDarkMode ? '#dddddd' : '#111111' }]}>{title}</Text>
       )}
@@ -430,26 +1088,23 @@ const FeedProductStrip = React.memo(({ products, onPress, onUserPress, title, is
           return (
             <TouchableOpacity
               key={product._id}
-              style={styles.productTile}
+              style={[styles.productTile, { width: tileWidth, height: tileHeight }]}
               onPress={() => onPress(product)}
               activeOpacity={0.9}
             >
               <Image source={getImageSource(image)} style={styles.productTileImage} />
               <View style={styles.productTileShade} />
 
-              {/* Top-left: product name */}
               <Text style={styles.productTileLabel} numberOfLines={2}>
                 {label}
               </Text>
 
-              {/* Top-right: video indicator */}
               {product.videoUrl && (
                 <View style={styles.productTileVideoBadge}>
                   <Ionicons name="videocam" size={11} color="#fff" />
                 </View>
               )}
 
-              {/* Bottom-left: user profile */}
               <View style={styles.productTileUserRow}>
                 <TouchableOpacity
                   onPress={event => {
@@ -467,7 +1122,6 @@ const FeedProductStrip = React.memo(({ products, onPress, onUserPress, title, is
                 </TouchableOpacity>
               </View>
 
-              {/* Bottom-right: price */}
               {!!amountText && (
                 <Text style={styles.productTilePrice} numberOfLines={1}>
                   {amountText}
@@ -481,7 +1135,6 @@ const FeedProductStrip = React.memo(({ products, onPress, onUserPress, title, is
   );
 });
 
-/* ---------- Suggestion overlay (inline mode supported) ---------- */
 const SuggestionOverlayContent = React.memo(({
   isDarkMode,
   theme,
@@ -571,6 +1224,7 @@ const SuggestionOverlayContent = React.memo(({
   const containerBase = inline
     ? styles.suggestionOverlayInline
     : [styles.suggestionOverlay, isVideo && styles.suggestionOverlayVideo];
+
   if (suggestionState.status === 'sending') {
     return (
       <View style={[containerBase, !inline && styles.suggestionOverlaySending]}>
@@ -615,27 +1269,12 @@ const SuggestionOverlayContent = React.memo(({
     <Animated.View style={[containerBase, { transform: [{ translateX: shakeAnim }] }]}>
       <View style={styles.suggestionRow}>
         <TouchableOpacity
-          style={[
-            styles.suggestionSection,
-            styles.suggestionSectionLeft,
-            {
-              borderRightWidth: 1.5,
-              borderRightColor: 'rgba(255,255,255,0.7)',
-            }
-          ]}
+          style={styles.suggestionSection}
           activeOpacity={0.7}
-          onPress={() => handleQuickSuggestion(`Is that ${suggestionText} available?`)}
+          onPress={() => handleQuickSuggestion(`Is this ${suggestionText} available?`)}
           disabled={isSendingSuggestion}
         >
-          <Text style={styles.suggestionTitle}>Is that {suggestionText} available?</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.suggestionSection, styles.suggestionSectionRight]}
-          activeOpacity={0.7}
-          onPress={() => handleQuickSuggestion(`Where can I find this ${suggestionText}?`)}
-          disabled={isSendingSuggestion}
-        >
-          <Text style={styles.suggestionTitle}>Where can I find this {suggestionText}?</Text>
+          <Text style={styles.suggestionTitle}>Is this {suggestionText} available?</Text>
         </TouchableOpacity>
       </View>
     </Animated.View>
@@ -677,23 +1316,116 @@ const ReportReasonSheet = ({ visible, onClose, onSelect, t, theme }) => (
 );
 
 /* ============================================================
-   HouseCard — TikTok-style layout
-   Top-left: product name  |  Top-right: video indicator
-   Bottom-left: user profile  |  Bottom-right: price
+   ReelVideo
+   ============================================================ */
+const ReelVideo = React.memo(({
+  reel,
+  isVisible,
+  muted,
+  onMuteChange,
+  theme,
+  height,
+}) => {
+  const [sourceUri, setSourceUri] = useState(null);
+  const [sourceChecked, setSourceChecked] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => networkStatus.subscribe(status => {
+    if (status.isOnline) setAttempt(value => value + 1);
+  }), []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSourceChecked(false);
+    setSourceUri(null);
+    reelVideoCache.getPlayableUri(reel._id, reel.videoUrl)
+      .then(uri => {
+        if (cancelled) return;
+        setSourceUri(uri);
+        setSourceChecked(true);
+      })
+      .catch(error => {
+        console.error('Could not resolve Reel video source:', error);
+        if (!cancelled) setSourceChecked(true);
+      });
+    return () => { cancelled = true; };
+  }, [reel._id, reel.videoUrl, attempt]);
+
+  if (sourceUri) {
+    return (
+      <ShaakaVideoPlayer
+        videoUrl={sourceUri}
+        videoThumbnail={reel.videoThumbnail}
+        videoLink={reel.videoLink}
+        videoDuration={reel.videoDuration}
+        theme={theme}
+        containerHeight={height}
+        isVisible={isVisible}
+        muted={muted}
+        onMuteChange={onMuteChange}
+        showPlaybackControls={true}
+        showTopMute={true}
+        showBottomMute={false}
+        contentFit="cover"
+      />
+    );
+  }
+
+  return (
+    <View style={[styles.reelSourcePlaceholder, { height, backgroundColor: theme.reel }]}>
+      {!!reel.videoThumbnail && (
+        <Image
+          source={{ uri: reel.videoThumbnail }}
+          style={StyleSheet.absoluteFillObject}
+          resizeMode="cover"
+        />
+      )}
+      {sourceChecked ? (
+        <View style={styles.reelOfflineMessage}>
+          <Ionicons name="cloud-offline-outline" size={28} color="#fff" />
+          <Text style={styles.reelOfflineText}>This Reel is not saved for offline playback.</Text>
+          <TouchableOpacity
+            style={styles.reelRetryButton}
+            onPress={() => {
+              setSourceChecked(false);
+              setAttempt(value => value + 1);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading Reel"
+          >
+            <Text style={styles.reelRetryText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <ActivityIndicator color="#fff" size="large" />
+      )}
+    </View>
+  );
+});
+
+/* ============================================================
+   HouseCard
    ============================================================ */
 const HouseCard = React.memo(({
   house, theme, isDarkMode, onPress, onShare, isSaved, onToggleSave,
   isLoggedIn, showLoginModal, isMyPost, onUserPress, onReport,
   onMessagePress, t, onQuickSuggestion, isSendingSuggestion,
   suggestionState, videoKey, isVideoVisible, isMuted, onMuteChange,
+  maxMediaHeight, minMediaHeight, screenWidth,
 }) => {
   const [showFullDesc, setShowFullDesc] = useState(false);
   const [reportSheetVisible, setReportSheetVisible] = useState(false);
   const [isDescTruncated, setIsDescTruncated] = useState(false);
   const [displayDesc, setDisplayDesc] = useState(house.description || '');
-  const [mediaHeight, setMediaHeight] = useState(MAX_IMAGE_HEIGHT);
-  const [mediaResizeMode, setMediaResizeMode] = useState('cover');
+  const [mediaHeight, setMediaHeight] = useState(
+    Math.max(minMediaHeight || 0, maxMediaHeight)
+  );
+  const [mediaResizeMode, setMediaResizeMode] = useState('contain');
   const description = house.description || '';
+  const boundedMediaHeight = Math.max(
+    minMediaHeight || 0,
+    Math.min(mediaHeight, maxMediaHeight)
+  );
 
   useEffect(() => {
     setShowFullDesc(false);
@@ -715,8 +1447,8 @@ const HouseCard = React.memo(({
 
       if (!source) {
         if (!cancelled) {
-          setMediaHeight(MAX_IMAGE_HEIGHT);
-          setMediaResizeMode('cover');
+          setMediaHeight(maxMediaHeight);
+          setMediaResizeMode('contain');
         }
         return;
       }
@@ -724,20 +1456,26 @@ const HouseCard = React.memo(({
       try {
         const { width, height } = await getImageSize(source);
         if (cancelled) return;
-        const mediaLayout = computeScaledMediaLayout(width, height);
+        const mediaLayout = computeScaledMediaLayout(
+          width,
+          height,
+          screenWidth,
+          maxMediaHeight,
+          minMediaHeight || 0,
+        );
         setMediaHeight(mediaLayout.height);
         setMediaResizeMode(mediaLayout.resizeMode);
       } catch (e) {
         if (!cancelled) {
-          setMediaHeight(MAX_IMAGE_HEIGHT);
-          setMediaResizeMode('cover');
+          setMediaHeight(maxMediaHeight);
+          setMediaResizeMode('contain');
         }
       }
     };
 
     computeHeight();
     return () => { cancelled = true; };
-  }, [house._id, house.videoUrl, house.videoThumbnail, house.houseImages]);
+  }, [house._id, house.videoUrl, house.videoThumbnail, house.houseImages, maxMediaHeight, minMediaHeight, screenWidth]);
 
   const handleDescLayout = useCallback((event) => {
     const lines = event.nativeEvent.lines || [];
@@ -751,7 +1489,7 @@ const HouseCard = React.memo(({
       setDisplayDesc(description);
       return;
     }
-    const containerWidth = CARD_WIDTH - 24;
+    const containerWidth = screenWidth - 24;
     const secondLine = lines[1];
     const secondWidth = secondLine?.width || 0;
     const secondRatio = containerWidth > 0 ? secondWidth / containerWidth : 0;
@@ -768,7 +1506,7 @@ const HouseCard = React.memo(({
     const cutLen = Math.ceil(secondText.length * 0.7);
     const truncated = `${firstText} ${secondText.substring(0, cutLen).trimEnd()}`;
     setDisplayDesc(truncated);
-  }, [description]);
+  }, [description, screenWidth]);
 
   const handleToggleSave = useCallback(() => {
     if (!isLoggedIn) { showLoginModal(t.pleaseLoginToSave); return; }
@@ -793,58 +1531,65 @@ const HouseCard = React.memo(({
     setReportSheetVisible(true);
   }, [isLoggedIn, showLoginModal, t.pleaseLoginToView]);
 
+  const openDetail = useCallback(() => onPress(house), [onPress, house]);
+
   const productName = house.productName || house.category || '';
   const amountText = house.amount || (house.price != null ? `RWF ${house.price.toLocaleString()}` : '');
   const hasAmount = !!amountText;
 
   return (
-    <View style={[styles.card, { backgroundColor: theme.background }]}>
-      {/* ---------- Full-bleed media with overlays ---------- */}
-      <View style={[styles.cardMediaWrap, { height: mediaHeight }]}>
-        {/* ---- TOP overlay: product name ---- */}
+    <View style={[styles.card, { width: screenWidth, backgroundColor: theme.background }]}>
+      <View style={[styles.cardMediaWrap, { height: boundedMediaHeight }]}>
         <View style={styles.topOverlay} pointerEvents="box-none">
           <View style={styles.topMetaRow}>
-            <View style={styles.topProductRow}>
+            <TouchableOpacity
+              style={styles.topProductRow}
+              onPress={openDetail}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel={`Open ${productName || 'post'} details`}
+            >
               {!!productName && (
                 <Text style={styles.topProductName} numberOfLines={1}>
                   {productName}
                 </Text>
               )}
-            </View>
+            </TouchableOpacity>
           </View>
         </View>
 
-        {/* ---- Media ---- */}
         {hasVideo ? (
-          <VideoPost
+          <ShaakaVideoPlayer
             videoUrl={house.videoUrl}
             videoThumbnail={house.videoThumbnail}
             videoLink={house.videoLink}
             videoDuration={house.videoDuration}
             theme={theme}
+            containerHeight={boundedMediaHeight}
+            contentFit={mediaResizeMode}
             isVisible={isVideoVisible}
             muted={isMuted}
             onMuteChange={onMuteChange}
             showPlaybackControls={false}
-            onVideoPress={() => onPress(house)}
+            showTopMute={true}
           />
         ) : (
           <TouchableOpacity
             activeOpacity={0.9}
-            onPress={() => onPress(house)}
+            onPress={openDetail}
             style={{ flex: 1 }}
           >
             <ImageSlider
               images={house.houseImages}
               isDarkMode={isDarkMode}
-              height={mediaHeight}
+              height={boundedMediaHeight}
+              width={screenWidth}
               resizeMode={mediaResizeMode}
               loadingBackground={theme.mediaLoadingBackground}
             />
           </TouchableOpacity>
         )}
 
-        {/* ---------- Right side vertical actions ---------- */}
         <View style={styles.rightActions}>
           {!isMyPost && (
             <TouchableOpacity style={styles.rightActionBtn} onPress={handleToggleSave} activeOpacity={0.8}>
@@ -892,7 +1637,6 @@ const HouseCard = React.memo(({
           )}
         </View>
 
-        {/* ---------- Bottom overlay: user (left) + price (right), suggestion below ---------- */}
         <View style={styles.bottomOverlay} pointerEvents="box-none">
           <View style={styles.bottomMetaRow}>
             <TouchableOpacity
@@ -908,7 +1652,6 @@ const HouseCard = React.memo(({
                 {getUserDisplayName(house.user || house, 'User')}
               </Text>
             </TouchableOpacity>
-
           </View>
 
           <View style={styles.suggestionInlineWrap}>
@@ -927,17 +1670,18 @@ const HouseCard = React.memo(({
         </View>
       </View>
 
-      {/* ---------- Description BELOW the image ---------- */}
       {(hasAmount || !!description) && (
         <View style={styles.descriptionSection}>
           {hasAmount && (
-            <Text style={[styles.amountText, { color: theme.text }]} numberOfLines={1}>
-              {amountText}
-            </Text>
+            <TouchableOpacity onPress={openDetail} activeOpacity={0.85}>
+              <Text style={[styles.amountText, { color: theme.text }]} numberOfLines={1}>
+                {amountText}
+              </Text>
+            </TouchableOpacity>
           )}
 
-          {!!description && (hasVideo ? (
-            <TouchableOpacity onPress={() => onPress(house)} activeOpacity={0.85}>
+          {!!description && (
+            <TouchableOpacity onPress={openDetail} activeOpacity={0.85}>
               <Text
                 style={[styles.descText, { color: theme.text }]}
                 numberOfLines={showFullDesc ? undefined : 2}
@@ -946,15 +1690,7 @@ const HouseCard = React.memo(({
                 {showFullDesc ? description : displayDesc}
               </Text>
             </TouchableOpacity>
-          ) : (
-            <Text
-              style={[styles.descText, { color: theme.text }]}
-              numberOfLines={showFullDesc ? undefined : 2}
-              ellipsizeMode="tail"
-            >
-              {showFullDesc ? description : displayDesc}
-            </Text>
-          ))}
+          )}
 
           {!!description && isDescTruncated && !showFullDesc && (
             <TouchableOpacity
@@ -984,7 +1720,6 @@ const HouseCard = React.memo(({
         </View>
       )}
 
-      {/* Hidden measure for truncation math */}
       {!!description && (
         <View style={styles.hiddenMeasure} pointerEvents="none" accessible={false}>
           <Text
@@ -1010,6 +1745,9 @@ const HouseCard = React.memo(({
   );
 });
 
+/* ============================================================
+   ReelsFeed
+   ============================================================ */
 const ReelsFeed = React.memo(({
   reels,
   loading,
@@ -1027,18 +1765,22 @@ const ReelsFeed = React.memo(({
   onMessagePress,
   onReport,
   onUserPress,
+  onLoadMore,
   showLoginModal,
   t,
 }) => {
   const isFocused = useIsFocused();
   const listRef = useRef(null);
-  const swipeStartX = useRef(0);
   const [expandedDescriptionIds, setExpandedDescriptionIds] = useState({});
   const [descriptionLineCounts, setDescriptionLineCounts] = useState({});
   const [activeIndex, setActiveIndex] = useState(0);
   const [reportTarget, setReportTarget] = useState(null);
   const [containerHeight, setContainerHeight] = useState(SCREEN_HEIGHT);
   const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 80 }).current;
+  const latestReelsRef = useRef(reels);
+  const onLoadMoreRef = useRef(onLoadMore);
+  latestReelsRef.current = reels;
+  onLoadMoreRef.current = onLoadMore;
 
   const handleLayout = useCallback((e) => {
     const h = e.nativeEvent.layout.height;
@@ -1048,13 +1790,43 @@ const ReelsFeed = React.memo(({
   const visibleItemsChanged = useRef(({ viewableItems }) => {
     const visibleItem = viewableItems.find(item => item.isViewable);
     if (visibleItem?.index == null) return;
-    restoredReelIndex = visibleItem.index;
-    setActiveIndex(visibleItem.index);
+    const index = visibleItem.index;
+    restoredReelIndex = index;
+    setActiveIndex(index);
+
+    const currentReels = latestReelsRef.current;
+    [index - 1, index + 1].forEach(reelIndex => {
+      const reel = currentReels[reelIndex];
+      if (reel?.videoThumbnail) {
+        videoPreloader.preloadThumbnail(reel.videoThumbnail, String(reel._id));
+      }
+    });
+    if (index >= currentReels.length - 2) onLoadMoreRef.current?.();
   }).current;
 
   useEffect(() => {
-    if (!isFocused) videoPreloader.pauseAll();
+    setReelsActive(isFocused);
+    if (!isFocused) {
+      videoPreloader.pauseAll();
+      reelVideoCache.cancelPreload();
+    }
+    return () => {
+      setReelsActive(false);
+      reelVideoCache.cancelPreload();
+    };
   }, [isFocused]);
+
+  useEffect(() => {
+    if (!isFocused) return;
+    const nextReel = reels[activeIndex + 1];
+    if (!nextReel) {
+      reelVideoCache.cancelPreload();
+      return;
+    }
+    reelVideoCache.preloadNext(nextReel, activeIndex).catch(error => {
+      console.warn('Next Reel preload could not start:', error.message);
+    });
+  }, [activeIndex, isFocused, reels.length]);
 
   useEffect(() => {
     if (!reels.length || containerHeight <= 0) return;
@@ -1080,13 +1852,6 @@ const ReelsFeed = React.memo(({
     return (
       <View
         style={[styles.reelPage, { height: containerHeight, width: SCREEN_WIDTH }]}
-        onTouchStart={event => { swipeStartX.current = event.nativeEvent.pageX; }}
-        onTouchEnd={event => {
-          const deltaX = event.nativeEvent.pageX - swipeStartX.current;
-          if (Math.abs(deltaX) >= 70) {
-            onCloseVideos();
-          }
-        }}
       >
         <TouchableOpacity
           style={styles.reelCloseButton}
@@ -1098,17 +1863,14 @@ const ReelsFeed = React.memo(({
           <Ionicons name="close" size={26} color="#fff" />
         </TouchableOpacity>
 
-        <VideoPost
-          videoUrl={item.videoUrl}
-          videoThumbnail={item.videoThumbnail}
-          videoLink={item.videoLink}
-          videoDuration={item.videoDuration}
+        <ReelVideo
+          key={item._id}
+          reel={item}
+          height={containerHeight}
           theme={theme}
-          containerHeight={containerHeight}
           isVisible={isFocused && activeIndex === index}
           muted={isMuted}
           onMuteChange={onMuteChange}
-          onVideoPress={() => onPostPress(item)}
         />
 
         <View style={styles.reelBottomShade} pointerEvents="none" />
@@ -1131,9 +1893,16 @@ const ReelsFeed = React.memo(({
           </TouchableOpacity>
 
           {!!item.amount && (
-            <Text style={styles.reelAmount} numberOfLines={1}>
-              {item.amount}
-            </Text>
+            <TouchableOpacity
+              onPress={() => onPostPress(item)}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel={`View details for ${item.productName || 'post'}`}
+            >
+              <Text style={styles.reelAmount} numberOfLines={1}>
+                {item.amount}
+              </Text>
+            </TouchableOpacity>
           )}
         </View>
 
@@ -1189,7 +1958,7 @@ const ReelsFeed = React.memo(({
             style={styles.reelActionButton}
             onPress={() => onMessagePress(item)}
             accessibilityRole="button"
-            accessibilityLabel="Reply"
+            accessibilityLabel="Message seller"
           >
             <Ionicons name="chatbubble-ellipses" size={30} color="#fff" />
           </TouchableOpacity>
@@ -1246,7 +2015,7 @@ const ReelsFeed = React.memo(({
   }
 
   return (
-    <View style={styles.reelsContainer} onLayout={handleLayout}>
+    <View style={styles.reelsContainer} onLayout={handleLayout} backgroundColor={theme.background}>
       <FlatList
         ref={listRef}
         data={reels}
@@ -1267,7 +2036,7 @@ const ReelsFeed = React.memo(({
         maxToRenderPerBatch={2}
         initialNumToRender={1}
         updateCellsBatchingPeriod={50}
-        removeClippedSubviews
+        removeClippedSubviews={false}
         onScrollToIndexFailed={({ index }) => {
           listRef.current?.scrollToOffset({
             offset: containerHeight * index,
@@ -1289,7 +2058,11 @@ const ReelsFeed = React.memo(({
   );
 });
 
+/* ============================================================
+   Main screen
+   ============================================================ */
 const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const { theme, isDarkMode } = useTheme();
   const { user: authUser } = useAuth();
   const { showBottomSheet } = useBottomSheet();
@@ -1297,6 +2070,25 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   const t = translations[language] || translations.English;
 
   const [activeTab, setActiveTab] = useState(initialTab);
+  const [screenAreaHeight, setScreenAreaHeight] = useState(windowHeight);
+
+  // Max = 75% of screen (or available area)
+  const maxPostMediaHeight = Math.max(
+    1,
+    Math.min(windowHeight * POST_MEDIA_MAX_RATIO, screenAreaHeight - HEADER_HEIGHT)
+  );
+  // Min = exactly 30% of screen (clamped to max)
+  const minPostMediaHeight = Math.min(
+    windowHeight * POST_MEDIA_MIN_RATIO,
+    maxPostMediaHeight
+  );
+
+  const productTileHeight = Math.max(100, Math.min(180, Math.round(screenAreaHeight * 0.22)));
+  const productTileWidth = Math.min(132, Math.max(104, Math.round(windowWidth * 0.34)));
+  const handleScreenLayout = useCallback((event) => {
+    const height = event.nativeEvent.layout.height;
+    if (height > 0) setScreenAreaHeight(height);
+  }, []);
   const initialLoadStartedRef = useRef(false);
   const [currentUser, setCurrentUser] = useState(null);
   const viewerId = currentUser?._id || authUser?._id || authUser?.id;
@@ -1305,9 +2097,10 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     return Boolean(viewerId && ownerId && String(viewerId) === String(ownerId));
   }, [viewerId]);
   const [feedPosts, setFeedPosts] = useState([]);
-  const [feedPage, setFeedPage] = useState(1);
+  const [feedCursor, setFeedCursor] = useState(null);
   const [hasMoreFeed, setHasMoreFeed] = useState(true);
   const [isAppendingFeed, setIsAppendingFeed] = useState(false);
+  const feedAppendLock = useRef(false);
   const [feedLoopCount, setFeedLoopCount] = useState(3);
   const isExtendingFeedLoop = useRef(false);
   const [myPosts, setMyPosts] = useState([]);
@@ -1340,11 +2133,14 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       const data = videoDataRef.current;
       const activeIndex = visibleVideo.index;
       data.slice(activeIndex + 1, activeIndex + 3).forEach((item, offset) => {
-        if (item?.videoUrl) {
-          videoPreloader.preloadVideo(item.videoUrl, `${item._id}_${activeIndex + offset + 1}`);
+        const thumbnail = item?.videoThumbnail || (item?.videoUrl
+          ? getVideoCover(item.videoUrl, item.videoThumbnail)
+          : null);
+        if (thumbnail) {
+          videoPreloader.preloadThumbnail(thumbnail, `${item._id}_${activeIndex + offset + 1}`);
         }
       });
-      videoPreloader.cleanupOldVideos();
+      videoPreloader.cleanupOldThumbnails();
     }
   }).current;
 
@@ -1480,14 +2276,6 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     headerOpacityAnim.setValue(1);
   }, [activeTab, headerHeightAnim, headerOpacityAnim]);
 
-  // ---------------------------------------------------------------
-  // Tab synchronization with navigation params.
-  //
-  // IMPORTANT: this effect must ONLY depend on `route.params?.activeTab`
-  // (NOT on `activeTab`). If it depended on `activeTab`, manually
-  // switching to Videos / My Posts / Saved would re-trigger the effect
-  // and bounce the user back to the initial tab.
-  // ---------------------------------------------------------------
   useEffect(() => {
     const paramTab = route.params?.activeTab;
     if (paramTab && POST_SECTION_KEYS.includes(paramTab)) {
@@ -1555,24 +2343,99 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     }
   }, [loadViewedTimestamps]);
 
-  const fetchFeed = useCallback(async (page = 1, limit = 20) => {
-    try {
-      const response = await axios.get(`${BASE_URL}/api/posts`, {
-        params: { page, limit },
+  const fetchFeed = useCallback(async (cursor = null, limit = 20, onCachedFeed) => {
+    const cachedPostsPromise = cursor
+      ? Promise.resolve(null)
+      : (async () => {
+        try {
+          const cachedPages = await offlineDatabase.getCollection('buy-post-feed-pages');
+          if (cachedPages.length) {
+            const uniquePosts = new Map();
+            cachedPages
+              .sort((first, second) => first.value.pageNumber - second.value.pageNumber)
+              .forEach(({ value }) => {
+                (value.posts || []).forEach(post => uniquePosts.set(String(post._id), post));
+              });
+            return [...uniquePosts.values()];
+          }
+          const cachedFeed = await offlineDatabase.getRecord('buy-post-feed', 'page-1');
+          if (Array.isArray(cachedFeed)) return cachedFeed;
+          const legacyFeed = await offlineDatabase.getRecord('feed', 'page-1');
+          return Array.isArray(legacyFeed) ? legacyFeed : null;
+        } catch (error) {
+          console.warn('Could not read cached BuyPost feed:', error.message);
+          return null;
+        }
+      })();
+    let networkFeedReceived = false;
+    if (onCachedFeed) {
+      cachedPostsPromise.then(cachedPosts => {
+        if (Array.isArray(cachedPosts) && !networkFeedReceived) {
+          onCachedFeed({
+            posts: cachedPosts.map(mapPost).filter(post => post.status !== 'stopped'),
+            hasMore: false,
+            nextCursor: null,
+          });
+        }
+      }).catch(error => {
+        console.warn('Could not read cached BuyPost feed:', error.message);
       });
-      const activePosts = (response.data.posts || []).map(mapPost).filter(p => p.status !== 'stopped');
-      return { posts: activePosts, hasMore: response.data.hasMore !== false };
+    }
+
+    try {
+      const networkPromise = networkStatus.start().then(status => {
+        if (!status.isOnline) throw new Error('No network connection');
+        return axios.get(`${BASE_URL}/api/posts`, {
+          params: { pagination: 'cursor', cursor: cursor || undefined, limit },
+        });
+      });
+      const response = await networkPromise;
+      networkFeedReceived = true;
+      const activePosts = (response.data.posts || []).map(mapPost).filter(post => post.status !== 'stopped');
+      (async () => {
+        try {
+          const pages = await offlineDatabase.getCollection('buy-post-feed-pages');
+          const previousPage = cursor
+            ? pages.find(page => page.value.nextCursor === cursor)
+            : null;
+          const pageNumber = previousPage
+            ? previousPage.value.pageNumber + 1
+            : cursor ? pages.length + 1 : 1;
+          const cachedFeed = await mediaCache.hydrate(response.data.posts || []);
+          const pageRecord = {
+            cursor,
+            pageNumber,
+            posts: cachedFeed,
+            hasMore: response.data.hasMore !== false,
+            nextCursor: response.data.nextCursor || null,
+          };
+          await offlineDatabase.putRecord(
+            'buy-post-feed-pages',
+            cursor || 'first',
+            pageRecord,
+            { priority: 'medium' }
+          );
+          if (!cursor) {
+            await offlineDatabase.putRecord('buy-post-feed', 'page-1', cachedFeed, { priority: 'medium' });
+          }
+        } catch (cacheError) {
+          console.warn('Could not cache BuyPost feed page:', cacheError.message);
+        }
+      })();
+      return {
+        posts: activePosts,
+        hasMore: response.data.hasMore !== false,
+        nextCursor: response.data.nextCursor || null,
+      };
     } catch (error) {
       console.error('Public feed fetch failed:', error.message);
-      if (page === 1) {
-        const cachedFeed = await offlineDatabase.getRecord('feed', 'page-1');
-        if (cachedFeed) {
-          const hydratedFeed = await mediaCache.hydrate(cachedFeed);
-          return {
-            posts: hydratedFeed.map(mapPost).filter(post => post.status !== 'stopped'),
-            hasMore: false,
-          };
-        }
+      const cachedPosts = await cachedPostsPromise;
+      if (Array.isArray(cachedPosts)) {
+        return {
+          posts: cachedPosts.map(mapPost).filter(post => post.status !== 'stopped'),
+          hasMore: false,
+          nextCursor: null,
+        };
       }
       throw error;
     }
@@ -1608,8 +2471,6 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     }
   }, [getToken]);
 
-  // Silent refresh for a single tab (My Posts / Saved).
-  // Does NOT flip `loading` → no spinner, no blank screen.
   const refreshTabData = useCallback(async (tabKey) => {
     if (!isLoggedIn) return;
     try {
@@ -1625,9 +2486,6 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     }
   }, [isLoggedIn, fetchMyPosts, fetchSavedPosts]);
 
-  // When the user opens My Posts or Saved, silently re-fetch that
-  // list in the background so content is always fresh — without
-  // showing any loading indicator.
   useEffect(() => {
     if (activeTab === 'utanga' || activeTab === 'saved') {
       refreshTabData(activeTab);
@@ -1651,19 +2509,29 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     setLoading(true);
     setFeedError(false);
 
-    try {
-      const [feed, notes] = await Promise.all([fetchFeed(), fetchNotes()]);
+    const applyFeed = feed => {
       let filteredFeed = feed.posts;
       if (isLoggedIn && currentUser) {
         filteredFeed = feed.posts.filter(post => post.userId !== currentUser._id);
       }
-      const sortedFeed = sortFeedPosts(filteredFeed, isRefresh);
-      setFeedPosts(sortedFeed);
-      setFeedPage(1);
+      setFeedPosts(sortFeedPosts(filteredFeed, isRefresh));
+      setFeedCursor(feed.nextCursor);
       setHasMoreFeed(feed.hasMore);
+      setLoading(false);
+    };
+
+    try {
+      const feedPromise = fetchFeed(null, 20, applyFeed);
+      const feed = await feedPromise;
+      applyFeed(feed);
+      const notesPromise = fetchNotes();
+      const userPostsPromise = isLoggedIn
+        ? Promise.all([fetchMyPosts(), fetchSavedPosts()])
+        : Promise.resolve(null);
+      const [notes, userPosts] = await Promise.all([notesPromise, userPostsPromise]);
       setUpdates(notes);
       if (isLoggedIn) {
-        const [my, saved] = await Promise.all([fetchMyPosts(), fetchSavedPosts()]);
+        const [my, saved] = userPosts;
         setMyPosts(my);
         setSavedPosts(saved);
       } else {
@@ -2039,6 +2907,12 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       myPosts: isLoggedIn ? myPosts : [],
       savedPosts: isLoggedIn ? savedPosts : [],
     });
+    if (activeTab === 'videos') {
+      posts.sort((a, b) => {
+        const dateDifference = new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+        return dateDifference || String(b._id).localeCompare(String(a._id));
+      });
+    }
     return activeTab === 'utanga' ? posts : posts.filter(post => !isOwnPost(post));
   }, [activeTab, browseFeedPosts, isLoggedIn, isOwnPost, myPosts, savedPosts]);
 
@@ -2094,25 +2968,29 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   }, [activeTab, feedStreamData, getDisplayedPosts]);
 
   const handleFeedEndReached = useCallback(async () => {
-    if (activeTab !== 'ushaka' || refreshing || feedError || isAppendingFeed) return;
+    if ((activeTab !== 'ushaka' && activeTab !== 'videos') ||
+      refreshing || feedError || isAppendingFeed || feedAppendLock.current) return;
     if (!hasMoreFeed) return;
     if (!feedPosts || feedPosts.length === 0) return;
+    feedAppendLock.current = true;
     setIsAppendingFeed(true);
     try {
-      const nextPage = feedPage + 1;
-      const result = await fetchFeed(nextPage, 20);
-      const combined = [...feedPosts, ...result.posts];
-      const sortedCombined = sortFeedPosts(combined, false);
-      setFeedPosts(sortedCombined);
-      setFeedPage(nextPage);
-      setHasMoreFeed(result.hasMore);
+      const result = await fetchFeed(feedCursor, 20);
+      setFeedPosts(currentPosts => {
+        const existingIds = new Set(currentPosts.map(post => String(post._id)));
+        const additions = result.posts.filter(post => !existingIds.has(String(post._id)));
+        return sortFeedPosts([...currentPosts, ...additions], false);
+      });
+      setFeedCursor(result.nextCursor);
+      setHasMoreFeed(result.hasMore && Boolean(result.nextCursor));
     } catch (error) {
       Alert.alert('Error', 'Failed to load more posts.');
       setFeedError(true);
     } finally {
+      feedAppendLock.current = false;
       setIsAppendingFeed(false);
     }
-  }, [activeTab, refreshing, feedError, isAppendingFeed, hasMoreFeed, feedPosts, feedPage, fetchFeed, sortFeedPosts]);
+  }, [activeTab, refreshing, feedError, isAppendingFeed, hasMoreFeed, feedPosts.length, feedCursor, fetchFeed, sortFeedPosts]);
 
   const handleFeedLoopEndReached = useCallback(() => {
     if (activeTab !== 'ushaka' || isExtendingFeedLoop.current || feedPosts.length === 0) return;
@@ -2144,7 +3022,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       ? getVideoCover(item.videoUrl, item.videoThumbnail)
       : item.houseImages?.[0];
     return (
-      <View style={styles.gridPostItem}>
+      <View style={[styles.gridPostItem, { width: (windowWidth - 32) / 2 }]}>
         <TouchableOpacity style={styles.gridPostImageContainer} onPress={() => handlePostPress(item)}>
           <Image source={{ uri: imageUri || item.houseImages?.[0] || 'https://via.placeholder.com/150' }} style={styles.gridPostImage} />
           {item.videoUrl && (
@@ -2172,7 +3050,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         )}
       </View>
     );
-  }, [activeTab, isLoggedIn, isDarkMode, handlePostPress, toggleSave, confirmDeletePost]);
+  }, [activeTab, isLoggedIn, isDarkMode, handlePostPress, toggleSave, confirmDeletePost, windowWidth]);
 
   const renderEmpty = useCallback(() => {
     if (loading) {
@@ -2221,40 +3099,43 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   const renderHouseCard = useCallback(({ item, index }) => {
     const videoKey = `${item._id}_${index}`;
     return (
-    <HouseCard
-      house={item}
-      theme={theme}
-      isDarkMode={isDarkMode}
-      onPress={handlePostPress}
-      onShare={handleShare}
-      isSaved={savedPostIds.includes(item._id)}
-      onToggleSave={toggleSave}
-      isLoggedIn={isLoggedIn}
-      showLoginModal={(msg) => {
-        showBottomSheet({
-          type: 'login',
-          title: t.loginRequired,
-          message: msg,
-          buttonText: 'Login',
-          secondaryButtonText: t.cancel,
-          buttonAction: () => navigation.navigate('Login'),
-        });
-      }}
-      isMyPost={false}
-      onUserPress={() => handleUserPress(item.userId, item.username)}
-      onReport={handleReport}
-      onMessagePress={handleMessagePress}
-      t={t}
-      onQuickSuggestion={sendQuickSuggestion}
-      isSendingSuggestion={isSendingSuggestion}
-      suggestionState={getSuggestionState(item._id)}
-      videoKey={videoKey}
-      isVideoVisible={activeVideoKey === videoKey}
-      isMuted={isMuted}
-      onMuteChange={handleMuteChange}
-    />
+      <HouseCard
+        house={item}
+        theme={theme}
+        isDarkMode={isDarkMode}
+        onPress={handlePostPress}
+        onShare={handleShare}
+        isSaved={savedPostIds.includes(item._id)}
+        onToggleSave={toggleSave}
+        isLoggedIn={isLoggedIn}
+        showLoginModal={(msg) => {
+          showBottomSheet({
+            type: 'login',
+            title: t.loginRequired,
+            message: msg,
+            buttonText: 'Login',
+            secondaryButtonText: t.cancel,
+            buttonAction: () => navigation.navigate('Login'),
+          });
+        }}
+        isMyPost={false}
+        onUserPress={() => handleUserPress(item.userId, item.username)}
+        onReport={handleReport}
+        onMessagePress={handleMessagePress}
+        t={t}
+        onQuickSuggestion={sendQuickSuggestion}
+        isSendingSuggestion={isSendingSuggestion}
+        suggestionState={getSuggestionState(item._id)}
+        videoKey={videoKey}
+        isVideoVisible={activeVideoKey === videoKey}
+        isMuted={isMuted}
+        onMuteChange={handleMuteChange}
+        maxMediaHeight={maxPostMediaHeight}
+        minMediaHeight={minPostMediaHeight}
+        screenWidth={windowWidth}
+      />
     );
-  }, [theme, isDarkMode, handlePostPress, handleShare, savedPostIds, toggleSave, isLoggedIn, handleUserPress, handleReport, handleMessagePress, t, sendQuickSuggestion, isSendingSuggestion, getSuggestionState, activeVideoKey, isMuted, handleMuteChange, showBottomSheet, navigation]);
+  }, [theme, isDarkMode, handlePostPress, handleShare, savedPostIds, toggleSave, isLoggedIn, handleUserPress, handleReport, handleMessagePress, t, sendQuickSuggestion, isSendingSuggestion, getSuggestionState, activeVideoKey, isMuted, handleMuteChange, showBottomSheet, navigation, maxPostMediaHeight, minPostMediaHeight, windowWidth]);
 
   const renderFeedItem = useCallback(({ item, index }) => {
     if (item.isFeedProductStrip) {
@@ -2265,11 +3146,13 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
           onPress={handlePostPress}
           onUserPress={handleUserPress}
           isDarkMode={isDarkMode}
+          tileHeight={productTileHeight}
+          tileWidth={productTileWidth}
         />
       );
     }
     return renderHouseCard({ item, index });
-  }, [handlePostPress, renderHouseCard, t.trending, trendingPosts, isDarkMode]);
+  }, [handlePostPress, handleUserPress, renderHouseCard, t.trending, isDarkMode, productTileHeight, productTileWidth]);
 
   const shouldShowUnread = useCallback((update) => {
     if (!update.lastViewedAt) return true;
@@ -2281,7 +3164,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   }, []);
 
   return (
-    <View style={[styles.container, { backgroundColor: theme.background }]}>
+    <View style={[styles.container, { backgroundColor: theme.background }]} onLayout={handleScreenLayout}>
       <Animated.View
         style={[
           styles.topBar,
@@ -2318,11 +3201,8 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
                   style={styles.tabCircleItem}
                   onPress={() => {
                     if (route.name === 'BuyPost') {
-                      // In-place tab switch on the main BuyPost screen.
                       if (activeTab !== tab.key) setActiveTab(tab.key);
                     } else if (route.name !== tab.route) {
-                      // Cross-route navigation to a sibling section screen.
-                      // Pass activeTab so the mounted screen aligns immediately.
                       navigation.navigate(tab.route, { activeTab: tab.key });
                     }
                   }}
@@ -2394,6 +3274,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
           onMessagePress={handleMessagePress}
           onReport={handleReport}
           onUserPress={handleUserPress}
+          onLoadMore={handleFeedEndReached}
           showLoginModal={(message) => showBottomSheet({
             type: 'login',
             title: t.loginRequired,
@@ -2419,6 +3300,8 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
                   onPress={handlePostPress}
                   onUserPress={handleUserPress}
                   isDarkMode={isDarkMode}
+                  tileHeight={productTileHeight}
+                  tileWidth={productTileWidth}
                 />
                 <Text style={[styles.newPostsTitle, { color: isDarkMode ? '#dddddd' : '#111111' }]}>
                   {t.newPosts}
@@ -2526,6 +3409,9 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   );
 };
 
+/* ============================================================
+   Styles
+   ============================================================ */
 const styles = StyleSheet.create({
   container: { flex: 1 },
   contentArea: { flex: 1 },
@@ -2586,8 +3472,6 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.22)',
   },
-
-  /* Tile — top-left: product name */
   productTileLabel: {
     position: 'absolute',
     top: 10,
@@ -2600,8 +3484,6 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
   },
-
-  /* Tile — top-right: video indicator */
   productTileVideoBadge: {
     position: 'absolute',
     top: 10,
@@ -2613,8 +3495,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-
-  /* Tile — bottom-left: user profile */
   productTileUserRow: {
     position: 'absolute',
     left: 8,
@@ -2630,8 +3510,6 @@ const styles = StyleSheet.create({
     borderColor: '#fff',
     backgroundColor: '#333',
   },
-
-  /* Tile — bottom-right: price */
   productTilePrice: {
     position: 'absolute',
     right: 10,
@@ -2667,10 +3545,9 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  /* ---------- Reels (Instagram-style) ---------- */
+  /* ---------- Reels ---------- */
   reelsContainer: {
     flex: 1,
-    backgroundColor: '#000',
   },
   reelsEmpty: {
     flex: 1,
@@ -2686,6 +3563,38 @@ const styles = StyleSheet.create({
     position: 'relative',
     overflow: 'hidden',
   },
+  reelSourcePlaceholder: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  reelOfflineMessage: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+    paddingVertical: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.01)',
+    borderRadius: 96,
+  },
+  reelOfflineText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '900',
+    lineHeight: 20,
+    textAlign: 'center',
+    marginTop: 10,
+  },
+  reelRetryButton: {
+    marginTop: 12,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.67)',
+    borderRadius: 20,
+    fontWeight: '900',
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+  },
+  reelRetryText: { color: '#fff', fontSize: 14, fontWeight: '700' },
   reelBottomShade: {
     position: 'absolute',
     left: 0,
@@ -2694,7 +3603,6 @@ const styles = StyleSheet.create({
     height: 220,
     backgroundColor: 'rgba(1, 34, 37, 0)',
   },
-
   reelInfo: {
     position: 'absolute',
     left: 14,
@@ -2818,7 +3726,7 @@ const styles = StyleSheet.create({
   listContent: { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 0 },
   postsGrid: { paddingHorizontal: 8, paddingTop: 0, paddingBottom: 0 },
 
-  /* ---------- Card (TikTok style) ---------- */
+  /* ---------- Card ---------- */
   card: {
     width: CARD_WIDTH,
     alignSelf: 'stretch',
@@ -2840,7 +3748,6 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 0,
   },
 
-  /* ---------- Top overlay (product name left, video indicator right) ---------- */
   topOverlay: {
     position: 'absolute',
     top: 0,
@@ -2866,13 +3773,11 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     flexShrink: 1,
     letterSpacing: 0.2,
-    textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
+    textShadowColor: '#111111',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 1.5,
   },
 
-  /* Video indicator badge (top-right corner) */
-  /* ---------- Right side vertical actions ---------- */
   rightActions: {
     position: 'absolute',
     right: 8,
@@ -2926,7 +3831,6 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-end',
   },
 
-  /* ---------- Bottom overlay (user left, price right) ---------- */
   bottomOverlay: {
     position: 'absolute',
     left: 0,
@@ -2963,9 +3867,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     flexShrink: 1,
-    textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
+    textShadowColor: '#111111',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 1.5,
   },
   bottomAmount: {
     color: '#ffffff',
@@ -2978,14 +3882,14 @@ const styles = StyleSheet.create({
   },
 
   videoProductName: {
-    color: '#fff',
+    color: '#ffffff',
     fontSize: 16,
     fontWeight: '800',
     marginHorizontal: 12,
     marginBottom: 6,
-    textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
+    textShadowColor: '#111111',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 1.5,
   },
 
   /* ---------- Description (below image) ---------- */
@@ -3037,35 +3941,37 @@ const styles = StyleSheet.create({
     padding: 0,
     zIndex: 8,
     overflow: 'hidden',
-    backgroundColor: 'transparent',
+    backgroundColor: '#11111100',
     minHeight: 50,
   },
   suggestionOverlaySending: {
-    backgroundColor: 'transparent',
+    backgroundColor: '#11111100',
   },
   suggestionOverlayVideo: {
-    bottom: 60,
+    bottom: 0,
   },
   suggestionOverlayInline: {
     position: 'relative',
     width: '100%',
     minHeight: 50,
     borderRadius: 12,
+    marginLeft: 20,
+    marginBottom: -20,
     overflow: 'hidden',
-    backgroundColor: 'transparent',
+    backgroundColor: '#11111100',
   },
   suggestionInlineWrap: {
     paddingHorizontal: 0,
     paddingTop: 0,
     paddingBottom: 0,
-    paddingLeft: 5,
+    paddingLeft: 0,
     paddingRight: 0,
   },
   suggestionRow: {
     flexDirection: 'row',
     alignItems: 'center',
     minHeight: 42,
-    backgroundColor: 'transparent',
+    backgroundColor: '#111111c1',
   },
   suggestionSection: {
     flex: 1,
@@ -3074,8 +3980,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     minHeight: 34,
   },
-  suggestionSectionLeft: { borderRightWidth: 1.5 },
-  suggestionSectionRight: { borderRightWidth: 0 },
   suggestionTitle: {
     fontSize: 10,
     fontWeight: '700',
@@ -3087,7 +3991,7 @@ const styles = StyleSheet.create({
     paddingRight: 0,
     marginTop: 0,
     marginBottom: 0,
-    marginLeft: 0,
+    marginLeft: 50,
     marginRight: 0,
     letterSpacing: 0.3,
     color: '#ffffff',
@@ -3222,8 +4126,8 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 2,
   },
-  sheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center ' },
-  sheetTitle: { fontSize: 18, fontWeight: 'bold', color:'#47ae87' },
+  sheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  sheetTitle: { fontSize: 18, fontWeight: 'bold', color: '#47ae87' },
   postButton: { paddingVertical: 14, borderRadius: 12, alignItems: 'center', marginTop: 10 },
   postButtonText: { color: '#fff', fontWeight: '600', fontSize: 16 },
   reportPrompt: { fontSize: 15, marginBottom: 16, marginTop: 8 },
@@ -3295,6 +4199,193 @@ const styles = StyleSheet.create({
   reportReasonText: { fontSize: 15, fontWeight: '600' },
   reportCancelButton: { minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
   reportCancelText: { fontSize: 15, fontWeight: '600' },
+
+  /* ---------- Inline video player ---------- */
+  videoContainer: {
+    width: '100%',
+    backgroundColor: 'transparent',
+    overflow: 'hidden',
+  },
+  videoPlayerFrame: {
+    width: '100%',
+    maxWidth: SCREEN_WIDTH,
+    height: '100%',
+    overflow: 'hidden',
+    position: 'relative',
+    alignSelf: 'center',
+  },
+  videoCover: {
+    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+    zIndex: 0,
+  },
+  videoView: {
+    width: '100%',
+    height: '100%',
+    zIndex: 2,
+    backgroundColor: 'transparent',
+  },
+  videoLinkBadge: {
+    fontSize: 11,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    zIndex: 10,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 8,
+    maxWidth: '80%',
+  },
+
+  videoOverlayCenter: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 6,
+  },
+  videoPauseCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(12,14,18,0.5)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 6,
+  },
+
+  videoErrorBox: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(12,14,18,0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+    alignItems: 'center',
+    gap: 6,
+  },
+  videoErrorText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  videoRetryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.6)',
+  },
+  videoRetryText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+
+  videoTopMute: {
+    position: 'absolute',
+    top: 12,
+    right: 14,
+    zIndex: 8,
+  },
+  videoMuteBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(18,12,14,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+
+  videoBottomBar: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 14,
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 24,
+    backgroundColor: 'rgba(12, 14, 18, 0)',
+    borderBottomWidth: 0,
+    borderColor: 'rgba(255, 255, 255, 0)',
+    zIndex: 8,
+  },
+  videoProgressWrap: {
+    flex: 1,
+    minWidth: 50,
+    height: 30,
+    justifyContent: 'center',
+  },
+  videoProgressTrack: {
+    height: 3,
+    width: '100%',
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.34)',
+    overflow: 'visible',
+    justifyContent: 'center',
+  },
+  videoProgressFill: { height: '100%', borderRadius: 2 },
+  videoProgressThumb: {
+    position: 'absolute',
+    top: -4,
+    width: 11,
+    height: 11,
+    borderRadius: 6,
+    marginLeft: -5,
+    backgroundColor: '#fff',
+  },
+  videoTimeText: {
+    minWidth: 88,
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    textAlign: 'right',
+  },
+
+  videoProgressLineWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 2,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    zIndex: 20,
+  },
+  videoProgressLine: { height: '100%' },
+
+  videoGestureBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(12,14,18,0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+    borderRadius: 24,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  videoGestureText: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '700',
+    marginLeft: 8,
+  },
+  videoGestureSub: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 6,
+    opacity: 0.9,
+  },
 });
 
 export default BuyPostScreen;

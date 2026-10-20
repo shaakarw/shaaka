@@ -18,6 +18,21 @@ const readCollection = async (key, fallbackKey) => {
 
 const writeCollection = (key, value, options) => offlineDatabase.putRecord(MAP_SCOPE, key, value, options);
 
+const withCachedOwners = async records => Promise.all(records.map(async record => {
+  const owner = record.owner || record.ownerId || record.userId;
+  if (!owner) return record;
+
+  const ownerId = typeof owner === 'object' ? owner._id || owner.id : owner;
+  let ownerData = typeof owner === 'object' ? owner : null;
+  if (ownerData && ownerId) {
+    await offlineDatabase.putRecord('profiles', String(ownerId), ownerData, { priority: 'medium' });
+  } else if (ownerId) {
+    ownerData = await offlineDatabase.getRecord('profiles', String(ownerId));
+  }
+
+  return ownerData ? { ...record, owner: ownerData } : record;
+}));
+
 const appendRecent = (items, item, limit = 40) => [
   item,
   ...items.filter(existing => existing.id !== item.id),
@@ -25,19 +40,19 @@ const appendRecent = (items, item, limit = 40) => [
 
 export const mapOfflineCache = {
   async getPlaces() {
-    return readCollection(PLACES_KEY, `map:${PLACES_KEY}`);
+    return mediaCache.hydrate(await withCachedOwners(await readCollection(PLACES_KEY, `map:${PLACES_KEY}`)));
   },
 
   async savePlaces(places) {
-    await writeCollection(PLACES_KEY, await mediaCache.hydrate(places), { priority: 'medium' });
+    await writeCollection(PLACES_KEY, await mediaCache.hydrate(await withCachedOwners(places)), { priority: 'medium' });
   },
 
   async getMallShops() {
-    return readCollection(MALL_SHOPS_KEY, `map:${MALL_SHOPS_KEY}`);
+    return mediaCache.hydrate(await withCachedOwners(await readCollection(MALL_SHOPS_KEY, `map:${MALL_SHOPS_KEY}`)));
   },
 
   async saveMallShops(shops) {
-    await writeCollection(MALL_SHOPS_KEY, await mediaCache.hydrate(shops), { priority: 'medium' });
+    await writeCollection(MALL_SHOPS_KEY, await mediaCache.hydrate(await withCachedOwners(shops)), { priority: 'medium' });
   },
 
   async saveSearch(query, results) {

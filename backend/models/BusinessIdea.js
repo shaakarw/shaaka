@@ -14,11 +14,21 @@ const BusinessIdeaSchema = new mongoose.Schema(
       default: '',
       trim: true,
     },
+    businessCategory: {
+      type: String,
+      default: '',
+      trim: true,
+    },
     description: {
       type: String,
       default: '',
       trim: true,
       maxlength: 800,
+    },
+    fullDescription: {
+      type: String,
+      default: '',
+      trim: true,
     },
 
     // ---- Business idea specific ----
@@ -45,6 +55,19 @@ const BusinessIdeaSchema = new mongoose.Schema(
     steps: {
       type: [String],
       default: [],
+    },
+    targetAudience: { type: String, default: '', trim: true },
+    requiredSkills: { type: [String], default: [] },
+    equipment: { type: [String], default: [] },
+    potentialCustomers: { type: [String], default: [] },
+    marketingStrategy: { type: String, default: '', trim: true },
+    challenges: { type: [String], default: [] },
+    location: { type: String, default: '', trim: true },
+    additionalInfo: { type: String, default: '', trim: true },
+    published: {
+      type: Boolean,
+      default: true,
+      index: true,
     },
 
     // ---- Job specific ----
@@ -146,6 +169,11 @@ const BusinessIdeaSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
+    },
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
     },
   },
   { timestamps: true }

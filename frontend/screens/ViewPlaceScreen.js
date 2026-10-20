@@ -22,6 +22,7 @@ import {
 } from 'react-native';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth, useUserLimits } from '../context/AuthContext';
+import { useBottomSheet } from '../context/BottomSheetContext';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
@@ -30,6 +31,10 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { Video } from '../utils/expoAvCompat';
 import { useFocusEffect } from '@react-navigation/native';
+import { offlineDatabase } from '../services/offlineDatabase';
+import { networkStatus } from '../services/networkStatus';
+import { mediaCache } from '../services/mediaCache';
+import { mapOfflineCache } from '../services/mapOfflineCache';
 
 const { height, width } = Dimensions.get('window');
 const MODAL_HEIGHT_80 = height * 0.7;
@@ -178,6 +183,7 @@ const toggleFavoritePlace = async (placeId) => {
 
 export default function ViewPlaceScreen({ route, navigation }) {
   const { theme, isDarkMode } = useTheme();
+  const { showBottomSheet } = useBottomSheet();
   const { refreshUser } = useAuth();
   const adminLimits = useUserLimits();
   const { place, pendingShopId } = route.params || {};
@@ -189,6 +195,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const [ownerData, setOwnerData] = useState(null);
   const [loadingOwner, setLoadingOwner] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
+  const [streetImageUri, setStreetImageUri] = useState(null);
   // ----- Shopping Mall specific state -----
   const [shops, setShops] = useState([]);
   const [loadingShops, setLoadingShops] = useState(false);
@@ -197,6 +204,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const [redirectingToShop, setRedirectingToShop] = useState(false);
   const isMall =
     place?.category === 'shoppingmall' || place?.category === 'shopping_mall';
+  const placeOwnerId = place?.userId?._id || place?.userId || place?.owner?._id || place?.ownerId?._id || place?.ownerId;
 
   // ----- Add product swipe‑up sheet state -----
   const [addProductSheetVisible, setAddProductSheetVisible] = useState(false);
@@ -204,7 +212,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
     new Animated.Value(ADD_PRODUCT_SHEET_HEIGHT)
   ).current;
   const addProductBackdropOpacity = useRef(new Animated.Value(0)).current;
-  const [productImages, setProductImages] = useState([]); // multiple images
+  const [productImages, setProductImages] = useState([]);
   const [newProduct, setNewProduct] = useState({ name: '', price: '' }); // no description
   const [submittingProduct, setSubmittingProduct] = useState(false);
 
@@ -246,6 +254,15 @@ export default function ViewPlaceScreen({ route, navigation }) {
       );
     });
   }, [shops, shopSearchQuery]);
+  const currentUserId = currentUser?._id || currentUser?.id;
+  const hasExistingMallShop = Boolean(
+    currentUserId &&
+      shops.some((shop) => {
+        const owner = shop.owner || shop.ownerId || shop.userId;
+        const ownerId = typeof owner === 'object' ? owner?._id || owner?.id : owner;
+        return String(ownerId) === String(currentUserId);
+      })
+  );
 
   const modalHeight = useRef(new Animated.Value(MODAL_HEIGHT_80)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -377,10 +394,20 @@ export default function ViewPlaceScreen({ route, navigation }) {
   };
 
   const fetchCurrentUser = async () => {
+    await networkStatus.start();
+    let cachedUser = null;
+    try {
+      const cached = await AsyncStorage.getItem('user');
+      if (cached) cachedUser = JSON.parse(cached);
+    } catch {}
+    if (!networkStatus.get().isOnline) {
+      setCurrentUser(cachedUser);
+      return;
+    }
     try {
       const token = await getToken();
       if (!token) {
-        setCurrentUser(null);
+        setCurrentUser(cachedUser);
         return;
       }
       const response = await axios.get(`${BASE_URL}/api/users/me`, {
@@ -388,9 +415,10 @@ export default function ViewPlaceScreen({ route, navigation }) {
       });
       const data = response?.data?.user || response?.data;
       setCurrentUser(data && (data._id || data.id) ? data : null);
+      if (data && (data._id || data.id)) await AsyncStorage.setItem('user', JSON.stringify(data));
     } catch (e) {
       console.warn('Fetch logged-in user profile failed:', e);
-      setCurrentUser(null);
+      setCurrentUser(cachedUser);
     }
   };
 
@@ -398,36 +426,56 @@ export default function ViewPlaceScreen({ route, navigation }) {
     fetchCurrentUser();
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const imageUri = place?.images?.street || place?.images?.streetImage || null;
+    if (!imageUri) {
+      setStreetImageUri(null);
+      return () => { cancelled = true; };
+    }
+    mediaCache.cacheImage(imageUri).then(uri => {
+      if (!cancelled) setStreetImageUri(uri);
+    });
+    return () => { cancelled = true; };
+  }, [place]);
+
   const fetchOwner = async (userId) => {
     if (!userId) return;
+    const ownerId = typeof userId === 'object' ? userId._id || userId.id : userId;
+    const embeddedOwner = typeof userId === 'object' ? userId : place?.owner;
     setLoadingOwner(true);
+    let cachedOwner = null;
+    try {
+      cachedOwner = embeddedOwner || await offlineDatabase.getRecord('profiles', String(ownerId));
+      if (cachedOwner) setOwnerData(await mediaCache.hydrate(cachedOwner));
+    } catch {}
+
+    await networkStatus.start();
+    if (!networkStatus.get().isOnline) {
+      if (!cachedOwner) setOwnerData({ _id: ownerId, name: 'User', username: 'user' });
+      setLoadingOwner(false);
+      return;
+    }
     try {
       const token = await getToken();
       if (!token) {
-        setLoadingOwner(false);
-        setOwnerData({ _id: userId, name: 'User', username: 'user', phone: 'N/A' });
+        if (!cachedOwner) setOwnerData({ _id: ownerId, name: 'User', username: 'user' });
         return;
       }
 
       let response = null;
       try {
-        response = await axios.get(`${BASE_URL}/api/users/${userId}`, {
+        response = await axios.get(`${BASE_URL}/api/users/${ownerId}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
       } catch (primaryError) {
         try {
-          response = await axios.get(`${BASE_URL}/api/user/${userId}`, {
+          response = await axios.get(`${BASE_URL}/api/user/${ownerId}`, {
             headers: { Authorization: `Bearer ${token}` },
           });
         } catch (secondaryError) {
           console.warn('Owner fetch failed, using fallback');
-          setOwnerData({
-            _id: userId,
-            name: 'User',
-            username: 'user',
-            phone: 'N/A',
-          });
-          setLoadingOwner(false);
+          if (!cachedOwner) setOwnerData({ _id: ownerId, name: 'User', username: 'user' });
           return;
         }
       }
@@ -440,12 +488,15 @@ export default function ViewPlaceScreen({ route, navigation }) {
         else if (response.data._id) userData = response.data;
       }
 
-      setOwnerData(
-        userData || { _id: userId, name: 'User', username: 'user', phone: 'N/A' }
-      );
+      const nextOwner = userData || cachedOwner || { _id: ownerId, name: 'User', username: 'user' };
+      const hydratedOwner = await mediaCache.hydrate(nextOwner);
+      setOwnerData(hydratedOwner);
+      if (userData || embeddedOwner) {
+        await offlineDatabase.putRecord('profiles', String(ownerId), userData || embeddedOwner, { priority: 'medium' });
+      }
     } catch (error) {
       console.error('Fetch owner error:', error);
-      setOwnerData({ _id: userId, name: 'User', username: 'user', phone: 'N/A' });
+      if (!cachedOwner) setOwnerData({ _id: ownerId, name: 'User', username: 'user' });
     } finally {
       setLoadingOwner(false);
     }
@@ -455,23 +506,42 @@ export default function ViewPlaceScreen({ route, navigation }) {
     if (!isMall || !place?.id) return;
     if (refresh) setRefreshingShops(true);
     else setLoadingShops(true);
+    const mallId = String(place._id || place.id);
+    let cachedShops = null;
+    try {
+      cachedShops = await offlineDatabase.getRecord('mall-shops-by-mall', mallId);
+      if (!Array.isArray(cachedShops)) {
+        const allCachedShops = await mapOfflineCache.getMallShops();
+        cachedShops = allCachedShops.filter(shop =>
+          String(shop.mallId?._id || shop.mallId || shop.mall?._id || '') === mallId
+        );
+      }
+      if (Array.isArray(cachedShops)) setShops(await mediaCache.hydrate(cachedShops));
+    } catch {}
+
+    await networkStatus.start();
+    if (!networkStatus.get().isOnline) {
+      if (!Array.isArray(cachedShops)) setShops([]);
+      setLoadingShops(false);
+      setRefreshingShops(false);
+      return;
+    }
     try {
       const token = await getToken();
       if (!token) {
-        setLoadingShops(false);
-        setRefreshingShops(false);
+        if (!Array.isArray(cachedShops)) setShops([]);
         return;
       }
       const response = await axios.get(`${BASE_URL}/api/mall-shops`, {
-        params: { mallId: place.id },
+        params: { mallId },
         headers: { Authorization: `Bearer ${token}` },
       });
-      setShops(
-        response.data && response.data.shops ? response.data.shops : []
-      );
+      const nextShops = await mediaCache.hydrate(response.data?.shops || []);
+      setShops(nextShops);
+      await offlineDatabase.putRecord('mall-shops-by-mall', mallId, nextShops, { priority: 'high' });
     } catch (error) {
       console.error('Error fetching mall shops:', error);
-      setShops([]);
+      if (!Array.isArray(cachedShops)) setShops([]);
     } finally {
       setLoadingShops(false);
       setRefreshingShops(false);
@@ -526,19 +596,26 @@ export default function ViewPlaceScreen({ route, navigation }) {
   }, [place]);
 
   useEffect(() => {
-    if (place?.userId) {
-      fetchOwner(place.userId);
+    if (placeOwnerId) {
+      fetchOwner(place.userId || place.owner || place.ownerId);
     }
-  }, [place]);
+  }, [place, placeOwnerId]);
 
   const isOwner = Boolean(
     currentUser &&
-      place?.userId &&
-      String(place.userId) === String(currentUser._id || currentUser.id)
+      placeOwnerId &&
+      String(placeOwnerId) === String(currentUser._id || currentUser.id)
   );
 
   const checkUserHasNormalPlace = async () => {
     if (!currentUser?._id && !currentUser?.id) return false;
+    await networkStatus.start();
+    if (!networkStatus.get().isOnline) {
+      const cachedPlaces = await mapOfflineCache.getPlaces();
+      return cachedPlaces.some(place =>
+        String(place.userId?._id || place.userId) === String(currentUser._id || currentUser.id)
+      );
+    }
     try {
       const token = await AsyncStorage.getItem('userToken');
       if (!token) return false;
@@ -553,6 +630,18 @@ export default function ViewPlaceScreen({ route, navigation }) {
   };
 
   const handleAddMallShop = async () => {
+    if (hasExistingMallShop) {
+      showBottomSheet({
+        type: 'info',
+        title: 'Shop Already Added',
+        message:
+          'You already have a shop inside this shopping mall. Delete your existing shop first, or contact the Shaaka owner for help.',
+        icon: 'storefront-outline',
+        buttonText: 'OK',
+      });
+      return;
+    }
+
     const hasPlace = await checkUserHasNormalPlace();
     if (hasPlace) {
       Alert.alert('Limit Reached', 'You already have a Shop/Place. You cannot add a Shopping Mall Shop.');
@@ -599,9 +688,15 @@ export default function ViewPlaceScreen({ route, navigation }) {
   useEffect(() => {
     const loadShareLink = async () => {
       try {
+        await networkStatus.start();
+        if (!networkStatus.get().isOnline) {
+          setAppShareLink((await AsyncStorage.getItem('appShareLink')) || '');
+          return;
+        }
         const response = await axios.get(`${BASE_URL}/api/settings/share-link`);
         if (response.data.success) {
           setAppShareLink(response.data.shareLink || '');
+          await AsyncStorage.setItem('appShareLink', response.data.shareLink || '');
         }
       } catch (error) {
         console.error('Load share link error:', error.message);
@@ -721,7 +816,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
 
   const getAllImages = () => {
     const images = [];
-    const streetImage =
+    const streetImage = streetImageUri ||
       place.images?.street ||
       place.images?.streetImage ||
       place.images?.images?.street;
@@ -760,7 +855,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
     );
   };
 
-  // ---------- Pick multiple product images ----------
+  // ---------- Pick one product image ----------
   const pickProductImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
@@ -769,16 +864,17 @@ export default function ViewPlaceScreen({ route, navigation }) {
     }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsMultipleSelection: true,
+      allowsMultipleSelection: false,
       quality: 0.85,
     });
-    if (!result.canceled && result.assets.length > 0) {
-      const newImgs = result.assets.map((asset) => ({
+    if (!result.canceled && result.assets?.length > 0) {
+      const asset = result.assets[0];
+      const newImgs = [{
         uri: asset.uri,
-        type: 'image/jpeg',
+        type: asset.mimeType || 'image/jpeg',
         name: `product_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.jpg`,
-      }));
-      setProductImages((prev) => [...prev, ...newImgs]);
+      }];
+      setProductImages(newImgs);
     }
   };
 
@@ -841,6 +937,11 @@ export default function ViewPlaceScreen({ route, navigation }) {
       );
 
       if (response.data.success) {
+        if (response.data.place) {
+          navigation.setParams({ place: response.data.place });
+        }
+        setProductImages([]);
+        setNewProduct({ name: '', price: '' });
         Alert.alert('Success', 'Product added to the place.');
         closeAddProductSheet();
       } else {
@@ -873,7 +974,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
       <View
         style={[
           styles.productGridItem,
-          { backgroundColor: isDarkMode ? '#2a2a2a' : '#fff' },
+          { backgroundColor: isDarkMode ? '#2a2a2a' : '#ffffff' },
         ]}
       >
         <TouchableOpacity
@@ -1046,7 +1147,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
 
   // ----- Owner section (reused) -----
   const renderOwner = () => {
-    if (!place.userId) return null;
+    if (!placeOwnerId) return null;
     if (loadingOwner) {
       return (
         <View style={styles.ownerSection}>
@@ -1068,8 +1169,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
 
     const initials = ownerData.username?.charAt(0).toUpperCase() || '?';
     const displayName = ownerData.name || ownerData.username || 'User';
-    const ownerPhone = ownerData.phone || 'N/A';
-    const ownerId = ownerData._id;
+    const ownerId = ownerData._id || placeOwnerId;
 
     return (
       <View style={styles.ownerSection}>
@@ -1114,13 +1214,6 @@ export default function ViewPlaceScreen({ route, navigation }) {
             <Text style={[styles.ownerName, { color: theme.text }]}>
               {displayName}
             </Text>
-            {!isOwner && (
-              <Text
-                style={[styles.ownerPhone, { color: theme.textSecondary }]}
-              >
-                {ownerPhone}
-              </Text>
-            )}
           </View>
           {ownerId && (
             <Ionicons
@@ -1213,8 +1306,20 @@ export default function ViewPlaceScreen({ route, navigation }) {
               Shops Inside This Mall
             </Text>
             <TouchableOpacity
-              style={[styles.addShopButton, { backgroundColor: theme.accent }]}
+              style={[
+                styles.addShopButton,
+                {
+                  backgroundColor: hasExistingMallShop ? theme.border : theme.accent,
+                  opacity: hasExistingMallShop ? 0.65 : 1,
+                },
+              ]}
               onPress={handleAddMallShop}
+              accessibilityRole="button"
+              accessibilityHint={
+                hasExistingMallShop
+                  ? 'Shows how to manage your existing shop in this mall'
+                  : 'Add your shop to this mall'
+              }
             >
               <Ionicons name="add-circle-outline" size={18} color="#fff" />
               <Text style={styles.addShopButtonText}>Add Your Shop</Text>
@@ -1239,6 +1344,15 @@ export default function ViewPlaceScreen({ route, navigation }) {
         <Text style={[styles.title, { color: theme.text }]} numberOfLines={1}>
           {place.name}
         </Text>
+        <TouchableOpacity
+          style={styles.closePlaceButton}
+          onPress={() => navigation.goBack()}
+          accessibilityRole="button"
+          accessibilityLabel="Close place details"
+          hitSlop={8}
+        >
+          <Ionicons name="close" size={24} color={theme.text} />
+        </TouchableOpacity>
       </View>
       {distance !== null && (
         <Text
@@ -1419,7 +1533,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
               {!expanded && (
                 <>
                   {(() => {
-                    const streetImage =
+                    const streetImage = streetImageUri ||
                       place.images?.street ||
                       place.images?.streetImage ||
                       null;
@@ -1537,7 +1651,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
                     <TouchableOpacity
                       style={[
                         styles.actionBtn,
-                        { backgroundColor: '#2bb673' },
+                        { backgroundColor: theme.accent },
                       ]}
                       onPress={handleMessageOwner}
                     >
@@ -1614,9 +1728,20 @@ export default function ViewPlaceScreen({ route, navigation }) {
                     <TouchableOpacity
                       style={[
                         styles.addShopBigButton,
-                        { backgroundColor: theme.accent },
+                        {
+                          backgroundColor: hasExistingMallShop
+                            ? theme.border
+                            : theme.accent,
+                          opacity: hasExistingMallShop ? 0.65 : 1,
+                        },
                       ]}
                       onPress={handleAddMallShop}
+                      accessibilityRole="button"
+                      accessibilityHint={
+                        hasExistingMallShop
+                          ? 'Shows how to manage your existing shop in this mall'
+                          : 'Add your shop to this mall'
+                      }
                     >
                       <Ionicons
                         name="add-circle-outline"
@@ -1783,9 +1908,9 @@ export default function ViewPlaceScreen({ route, navigation }) {
               />
 
               <View style={styles.modalImagePicker}>
-                <Text style={[styles.modalImageLabel, { color: theme.text }]}>
-                  Images:
-                </Text>
+                  <Text style={[styles.modalImageLabel, { color: theme.text }]}>
+                    Image:
+                  </Text>
                 <TouchableOpacity
                   style={[
                     styles.modalAddImageBtn,
@@ -1795,7 +1920,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
                 >
                   <Ionicons name="add" size={24} color={theme.accent} />
                   <Text style={{ color: theme.accent, marginLeft: 8 }}>
-                    Add Images
+                    Choose Image
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -1969,6 +2094,13 @@ addProductBtnText: {
     alignItems: 'center',
     marginBottom: 2,
   },
+  closePlaceButton: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+  },
   title: {
     fontSize: 20,
     fontWeight: 'bold',
@@ -2010,7 +2142,7 @@ addProductBtnText: {
   contactBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 5,
+    paddingHorizontal: 10,
     paddingVertical: 8,
     borderRadius: 10,
     marginRight: 2,
@@ -2019,7 +2151,8 @@ addProductBtnText: {
   contactBtnText: {
     color: '#fff',
     marginLeft: 4,
-    fontWeight: '500',
+    fontSize: 13,
+    fontWeight: '400',
   },
   actionRow: {
     flexDirection: 'row',
@@ -2029,7 +2162,7 @@ addProductBtnText: {
   actionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 5,
+    paddingHorizontal: 10,
     paddingVertical: 8,
     borderRadius: 13,
     marginRight: 8,
@@ -2038,7 +2171,7 @@ addProductBtnText: {
   actionBtnText: {
     color: '#fff',
     marginLeft: 6,
-    fontWeight: '600',
+    fontWeight: '400',
   },
   sectionTitle: {
     fontSize: 18,

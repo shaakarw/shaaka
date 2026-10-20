@@ -22,6 +22,8 @@ export const POST_SECTION_KEYS = Object.values(POST_SECTIONS).map(section => sec
 export const getPostsForSection = ({ sectionKey, feedPosts, myPosts, savedPosts }) => {
   if (sectionKey === POST_SECTIONS.myPosts.key) return myPosts;
   if (sectionKey === POST_SECTIONS.saved.key) return savedPosts;
-  if (sectionKey === POST_SECTIONS.videos.key) return feedPosts.filter(post => post.videoUrl);
+  if (sectionKey === POST_SECTIONS.videos.key) {
+    return feedPosts.filter(post => post.videoUrl || post.videoHlsUrl || post.video?.url);
+  }
   return feedPosts;
 };

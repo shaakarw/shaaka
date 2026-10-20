@@ -434,7 +434,7 @@ exports.getAllSavedPosts = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Authentication required' });
     }
 
-    const savedEntries = await SavedPost.find({})
+    const savedEntries = await SavedPost.find({ user: req.user.id })
       .populate({
         path: 'post',
         populate: { path: 'user', select: 'username avatar' },

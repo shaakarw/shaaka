@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');   // ✅ already imported
 const User = require('../models/User');
 const adminController = require('../controllers/adminController');
+const { normalizeForAuth } = require('../utils/phoneNormalizer');
 
 // ---------- Admin verification middleware ----------
 const verifyAdmin = async (req, res, next) => {
@@ -41,7 +42,12 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Phone and password required' });
     }
 
-    const user = await User.findOne({ phone });
+    const normalizedPhone = normalizeForAuth(phone);
+    if (!normalizedPhone) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    const user = await User.findOne({ phone: normalizedPhone });
     if (!user || user.role !== 'admin') {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
@@ -91,7 +97,12 @@ router.put('/shops/:shopId/stop', adminController.stopShop);
 router.put('/shops/:shopId/restore', adminController.restoreShop);
 
 // Business ideas
-router.post('/business-ideas', adminController.createBusinessIdea);
+router.get('/business-ideas', adminController.getManagedBusinessIdeas);
+router.get('/business-ideas/:ideaId', adminController.getManagedBusinessIdea);
+router.post('/business-ideas', adminController.createManagedBusinessIdea);
+router.put('/business-ideas/:ideaId', adminController.updateManagedBusinessIdea);
+router.patch('/business-ideas/:ideaId/status', adminController.updateManagedBusinessIdeaStatus);
+router.delete('/business-ideas/:ideaId', adminController.deleteManagedBusinessIdea);
 
 // Reports
 router.get('/reports', adminController.getReports);
