@@ -23,6 +23,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system/legacy';
+import { FFmpegKit, ReturnCode } from 'ffmpeg-kit-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
@@ -34,13 +35,17 @@ import Logo from '../assets/logos.png';
 import { useBottomSheet } from '../context/BottomSheetContext';
 import VideoUploader from '../components/VideoUploader';
 import VideoPost from '../components/VideoPost';
+import TopBar from '../components/topbar';
 import { getVideoMetaData } from '../utils/videoCompressor';
 import { getMaxMediaHeight } from '../utils/mediaLimits';
 
 const { width } = Dimensions.get('window');
 
-const MAX_COMPRESSED_BYTES = 100 * 1024;
+const MAX_COMPRESSED_BYTES = 150 * 1024;
 const MIN_IMAGE_HEIGHT = 300;
+const MAX_UPLOAD_MEDIA_HEIGHT = 600;
+const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
+const MAX_VIDEO_DURATION_S = 90;
 
 const prepareUploadFile = async (image) => {
   if (Platform.OS !== 'web') return image;
@@ -67,6 +72,7 @@ const translations = {
     takePhoto: 'Take Photo',
     chooseFromLibrary: 'Choose from Gallery',
     removeImage: 'Remove',
+    imageCompressionLimit: 'This image could not be compressed below 100 KB. Please choose another image.',
     next: 'Next',
     back: 'Back',
     post: 'Post',
@@ -93,7 +99,7 @@ const translations = {
     maxChars: 'Maximum 30 words',
     step2HintTitle: '#Product Details#',
     step2HintMessages: [
-      'Enter a catchy product name (max 10 letters).',
+      'Enter a catchy product name (max 20 letters).',
       'Describe your product clearly in 10-30 words.',
       'A good description helps buyers understand what you offer.',
     ],
@@ -132,7 +138,7 @@ const translations = {
     serverError: 'Server error. Please try again later.',
     unexpectedError: 'An unexpected error occurred.',
     pleaseWait: 'Please wait...',
-    productNameLetterLimit: 'Product name must be 10 letters or less (currently {count})',
+    productNameLetterLimit: 'Product name must be 20 letters or less (currently {count})',
     locationLetterLimit: 'Location must be 25 letters or less (currently {count})',
     loginRequiredTitle: 'Login Required',
     loginRequiredMessage: 'You need to login to create a post.',
@@ -157,13 +163,14 @@ const translations = {
     takePhoto: 'Fata Ifoto',
     chooseFromLibrary: 'Koresha ayo ufite',
     removeImage: 'Kuraho',
+    imageCompressionLimit: 'Iyi foto ntiyashoboye kugabanywa munsi ya 100 KB. Hitamo indi foto.',
     next: 'Ibikurikiye',
     back: 'Subira inyuma',
     post: 'Tangaza',
     posting: 'Gutangaza...',
-    fillRequired: 'Nyamuneka andika ibisabwa byose',
-    selectImages: 'Nyamuneka hitamo ishusho 1 byibuze',
-    selectMedia: 'Nyamuneka hitamo amashusho byibuze',
+    fillRequired: 'Nyabuneka andika ibisabwa byose',
+    selectImages: 'Nyabuneka hitamo ishusho 1 byibuze',
+    selectMedia: 'Nyabuneka hitamo amashusho byibuze',
     imageTooShort: 'Iyi foto ni ngufi cyane ku buryo wayishyiraho. Uburebure ntarengwa ni {min} px.',
     videoTooShort: 'Iyi videwo ni ngufi cyane ku buryo wayishyiraho. Uburebure ntarengwa ni {min} px.',
     videoTooTall: 'Iyi videwo irengeje {max} px. Yigabanye ibe hagati ya {min}-{max} px muri porogaramu yo guhindura videwo, wongere uyihitemo.',
@@ -177,13 +184,13 @@ const translations = {
     contactNumberCall: 'Numero ya Telefone (Guhamura):',
     contactNumberWhatsApp: 'Numero ya WhatsApp (WhatsApp):',
     phoneError: 'Numero igomba gutangira na 072, 073, 078, cyangwa 079 kandi ibe imibare 10',
-    phoneRequired: 'Nyamuneka shyiraho nimero',
+    phoneRequired: 'Nyabuneka shyiraho nimero',
     descriptionLength: 'Ibisobanuro bigomba kuba hagati y\'amagambo 10 na 30',
     minChars: 'Byibuze amgambo 10',
     maxChars: 'Nturenze amagambo 30',
     step2HintTitle: '#Ibisobanuro by’Igicuruzwa#',
     step2HintMessages: [
-      'Andika izina ry’igicuruzwa (inyuguti 10 ntarengwa).',
+      'Andika izina ry’igicuruzwa (inyuguti 20 ntarengwa).',
       'Sobanura igicuruzwa cyawe neza mu magambo 10-30.',
       'Ibisobanuro byiza bifasha abaguzi kumva icyo utanga.',
     ],
@@ -221,14 +228,14 @@ const translations = {
     uploadingPost: 'Turatangaza inyandiko yawe',
     serverError: 'Ikibazo cya Server. Ongera ugerageze nyuma.',
     unexpectedError: 'Habaye ikibazo cyitateganizwe.',
-    pleaseWait: 'Nyamuneka tegereza...',
-    productNameLetterLimit: 'Izina rigomba kuba inyuguti 10 cyangwa munsi (ubu {count})',
+    pleaseWait: 'Nyabuneka tegereza...',
+    productNameLetterLimit: 'Izina rigomba kuba inyuguti 20 cyangwa munsi (ubu {count})',
     locationLetterLimit: 'Ahantu hagomba kuba inyuguti 25 cyangwa munsi (ubu {count})',
     loginRequiredTitle: 'Ugomba kwinjira',
     loginRequiredMessage: 'Ugomba kwinjira kugirango utangaze igicuruzwa.',
     login: 'Injira',
     cancel: 'Oya',
-    uploadingWait: 'Nyamuneka tegereza turatangaza',
+    uploadingWait: 'Nyabuneka tegereza mugihe dutangaza ',
   },
 };
 
@@ -296,7 +303,7 @@ const SimplePostPreview = ({ productName, images, theme }) => {
 };
 
 // ---------- Main Component ----------
-const AddPostScreen = ({ navigation, language = 'English' }) => {
+const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => {
   const { theme, isDarkMode } = useTheme();
   const { height: windowHeight } = useWindowDimensions();
   const maxMediaHeight = getMaxMediaHeight(windowHeight);
@@ -309,6 +316,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState('');
   const [formData, setFormData] = useState({
     productName: '',
@@ -327,27 +335,49 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
   const [priceDisplay, setPriceDisplay] = useState('');
 
   useEffect(() => {
-    const croppedImageUri = route.params?.croppedImageUri;
-    if (!croppedImageUri) return;
+    const editedMediaUri = route.params?.editedMediaUri || route.params?.croppedImageUri;
+    if (!editedMediaUri) return;
 
-    const addCroppedImage = async () => {
+    const applyEditedMedia = async () => {
       try {
-        const processedImage = await processImageForUpload(croppedImageUri);
-        setFormData(prev => ({ ...prev, images: [processedImage], video: null }));
+        if (route.params?.editedMediaType === 'video' || route.params?.mediaType === 'video') {
+          const editedVideo = route.params?.editedVideo;
+          if (!editedVideo) {
+            throw new Error('The edited video details could not be restored.');
+          }
+          setFormData(prev => ({
+            ...prev,
+            images: [],
+            video: { ...editedVideo, uri: editedMediaUri },
+          }));
+        } else {
+          const processedImage = await processImageForUpload(editedMediaUri);
+          setFormData(prev => ({ ...prev, images: [processedImage], video: null }));
+        }
+        setStep(2);
+        setError('');
       } catch (err) {
-        console.warn('Cropped image processing failed:', err);
+        console.warn('Edited media processing failed:', err);
         showBottomSheet({
           type: 'error',
-          title: 'Image Error',
-          message: 'Unable to process this image. Please try another image.',
+          title: 'Media Error',
+          message: err.code === 'IMAGE_COMPRESSION_LIMIT'
+            ? t.imageCompressionLimit
+            : err.message || 'Unable to process this media. Please try again.',
           buttonText: 'OK',
         });
       } finally {
-        navigation.setParams?.({ croppedImageUri: undefined });
+        navigation.setParams?.({
+          editedMediaUri: undefined,
+          editedMediaType: undefined,
+          editedVideo: undefined,
+          croppedImageUri: undefined,
+          mediaType: undefined,
+        });
       }
     };
-    addCroppedImage();
-  }, [route.params?.croppedImageUri]);
+    applyEditedMedia();
+  }, [route.params?.editedMediaUri, route.params?.croppedImageUri]);
 
   useEffect(() => {
     if (!formData.price) {
@@ -403,6 +433,22 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
     });
   };
 
+  const getProcessedImageSize = async (uri) => {
+    if (Platform.OS === 'web') {
+      const response = await fetch(uri);
+      if (!response.ok) {
+        throw new Error('Unable to read the processed image.');
+      }
+      return (await response.blob()).size;
+    }
+
+    const info = await FileSystem.getInfoAsync(uri);
+    if (!info.exists || typeof info.size !== 'number') {
+      throw new Error('Unable to get the processed image size.');
+    }
+    return info.size;
+  };
+
   const getExifRotation = (exif = null) => {
     if (!exif) return 0;
     const orientation = exif.Orientation ?? exif.orientation ?? exif['Orientation'];
@@ -422,52 +468,43 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
     }
   };
 
-  const processImageForUpload = async (sourceUri, exif = null) => {
+  const processImageForUpload = async (sourceUri, exif = null, maxHeight = null) => {
     if (!sourceUri) throw new Error('No image selected');
 
     const { width: originalWidth, height: originalHeight } = await getImageDimensions(sourceUri);
     const rotation = getExifRotation(exif);
     const orientedWidth = rotation % 180 === 0 ? originalWidth : originalHeight;
     const orientedHeight = rotation % 180 === 0 ? originalHeight : originalWidth;
-    const fitScale = Math.min(1, maxMediaHeight / orientedHeight);
-    const targetWidth = Math.max(1, Math.round(orientedWidth * fitScale));
-    const targetHeight = Math.max(1, Math.round(orientedHeight * fitScale));
-
-    const qualitySequence = [0.9, 0.82, 0.74, 0.66, 0.58, 0.5, 0.42, 0.34, 0.26, 0.18];
-    let bestResult = null;
-
-    for (const quality of qualitySequence) {
-      const actions = [];
-      if (rotation) actions.push({ rotate: rotation });
-      actions.push({ resize: { width: targetWidth, height: targetHeight } });
-
+    const actions = [];
+    if (rotation) actions.push({ rotate: rotation });
+    if (maxHeight && orientedHeight > maxHeight) {
+      actions.push({ resize: { height: maxHeight } });
+    }
+    for (const quality of [0.8, 0.6, 0.4, 0.25, 0.15, 0.08, 0.05]) {
       const processed = await ImageManipulator.manipulateAsync(
         sourceUri,
         actions,
         { compress: quality, format: ImageManipulator.SaveFormat.JPEG }
       );
-
-      const info = await FileSystem.getInfoAsync(processed.uri);
-      if (!info.exists || typeof info.size !== 'number') {
-        throw new Error('Unable to get the processed image size.');
+      const processedSize = await getProcessedImageSize(processed.uri);
+      if (processedSize < MAX_COMPRESSED_BYTES) {
+        return {
+          uri: processed.uri,
+          type: 'image/jpeg',
+          name: `post_${Date.now()}.jpg`,
+          size: processedSize,
+          width: processed.width || (maxHeight && orientedHeight > maxHeight
+            ? Math.max(1, Math.round(orientedWidth * maxHeight / orientedHeight))
+            : orientedWidth),
+          height: processed.height || Math.min(orientedHeight, maxHeight || orientedHeight),
+          originalUri: sourceUri,
+        };
       }
-
-      const result = {
-        uri: processed.uri,
-        type: 'image/jpeg',
-        name: `post_${Date.now()}.jpg`,
-        size: info.size,
-        width: processed.width || targetWidth,
-        height: processed.height || targetHeight,
-      };
-      if (result.height > maxMediaHeight) {
-        throw new Error(t.mediaTooTall.replace('{max}', maxMediaHeight));
-      }
-      if (!bestResult || result.size < bestResult.size) bestResult = result;
-      if (result.size < MAX_COMPRESSED_BYTES) return result;
     }
 
-    return bestResult;
+    const error = new Error('Unable to compress image below 150 KB.');
+    error.code = 'IMAGE_COMPRESSION_LIMIT';
+    throw error;
   };
 
   // ---------- Fetch limits and usage ----------
@@ -601,7 +638,37 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
     setError('');
   };
 
-  const handleVideoChange = (video, errorMessage) => {
+  const trimVideo = async (uri) => {
+    if (Platform.OS === 'web') {
+      throw new Error('Automatic video trimming is not supported on web. Please choose a video that is 1 minute 30 seconds or shorter.');
+    }
+
+    const outputUri = `${FileSystem.cacheDirectory}trimmed_${Date.now()}.mp4`;
+    const session = await FFmpegKit.execute(
+      `-i "${uri}" -t ${MAX_VIDEO_DURATION_S} -map 0:v:0 -map 0:a? -c copy -movflags +faststart "${outputUri}"`
+    );
+    if (!ReturnCode.isSuccess(await session.getReturnCode())) {
+      throw new Error('Video trimming failed. Please choose another video.');
+    }
+
+    const metadata = await getVideoMetaData(outputUri);
+    const duration = Number(metadata.duration);
+    if (!Number.isFinite(duration) || duration <= 0 || duration > MAX_VIDEO_DURATION_S) {
+      throw new Error('The video could not be trimmed to 1 minute 30 seconds.');
+    }
+    const fileInfo = await FileSystem.getInfoAsync(outputUri);
+
+    return {
+      uri: outputUri,
+      type: 'video/mp4',
+      name: `post_${Date.now()}.mp4`,
+      ...metadata,
+      duration,
+      size: Number(fileInfo.size) || 0,
+    };
+  };
+
+  const handleVideoChange = async (video, errorMessage) => {
     if (errorMessage) {
       setError(errorMessage);
       return;
@@ -613,8 +680,29 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         setError(t.videoTooShort.replace('{min}', minimumVideoHeight));
         return;
       }
-      if (videoHeight > maxMediaHeight) {
-        setError(t.mediaTooTall.replace('{max}', maxMediaHeight));
+
+      let videoDuration = Number(video.duration);
+      if (!Number.isFinite(videoDuration) || videoDuration <= 0) {
+        const metadata = await getVideoMetaData(video.uri);
+        videoDuration = Number(metadata.duration);
+        video = { ...video, ...metadata, duration: videoDuration };
+      }
+      if (videoDuration > MAX_VIDEO_DURATION_S) {
+        setLoading(true);
+        try {
+          video = { ...video, ...(await trimVideo(video.uri)) };
+        } catch (e) {
+          setError(e.message || 'Video trimming failed. Please try another video.');
+          return;
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      const fileInfo = video.size ? null : await FileSystem.getInfoAsync(video.uri);
+      const videoSize = Number(video.size) || Number(fileInfo?.size) || 0;
+      if (videoSize > MAX_VIDEO_BYTES) {
+        setError('Video exceeds the 50 MB size limit. Please choose a smaller video.');
         return;
       }
     }
@@ -663,24 +751,19 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 
   const countWords = (text) => text.trim().split(/\s+/).filter(w => w.length > 0).length;
 
-  const openCropScreen = (uri) => {
+  const openMediaEditor = (media) => {
+    if (!media?.uri) return;
     cropFlowPendingRef.current = true;
-    navigation.navigate('CropImage', { imageUri: uri, language });
+    navigation.navigate('EditScreen', {
+      imageUri: media.uri,
+      mediaType: media.type?.startsWith('video/') || media.mediaType === 'video' ? 'video' : 'image',
+      video: media.type?.startsWith('video/') || media.mediaType === 'video' ? media : undefined,
+      language,
+    });
   };
 
   const handlePickedImage = async (asset) => {
     try {
-      const { width: imageWidth, height: imageHeight } = await getImageDimensions(asset.uri);
-      const rotation = getExifRotation(asset.exif);
-      const orientedHeight = rotation % 180 === 0 ? imageHeight : imageWidth;
-      if (orientedHeight < MIN_IMAGE_HEIGHT) {
-        setError(t.imageTooShort.replace('{min}', MIN_IMAGE_HEIGHT));
-        return;
-      }
-      if (orientedHeight > maxMediaHeight) {
-        openCropScreen(asset.uri);
-        return;
-      }
       const processed = await processImageForUpload(asset.uri, asset.exif);
       setFormData(prev => ({ ...prev, images: [processed], video: null }));
     } catch (err) {
@@ -688,7 +771,9 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
       showBottomSheet({
         type: 'error',
         title: 'Image Error',
-        message: 'Unable to process this image. Please try another image.',
+        message: err.code === 'IMAGE_COMPRESSION_LIMIT'
+          ? t.imageCompressionLimit
+          : 'Unable to process this image. Please try another image.',
         buttonText: 'OK',
       });
     }
@@ -778,8 +863,8 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         return;
       }
       const result = useCamera
-        ? await ImagePicker.launchCameraAsync({ allowsEditing: true, quality: 1, exif: true })
-        : await ImagePicker.launchImageLibraryAsync({ allowsEditing: true, quality: 1, exif: true });
+        ? await ImagePicker.launchCameraAsync({ allowsEditing: false, quality: 1, exif: true })
+        : await ImagePicker.launchImageLibraryAsync({ allowsEditing: false, quality: 1, exif: true });
       if (!result.canceled && result.assets?.[0]) {
         await handlePickedImage(result.assets[0]);
       }
@@ -815,7 +900,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         if (wc < 10) { setError(`${t.minChars} (${wc}/10 words)`); return false; }
         if (wc > 30) { setError(`${t.maxChars} (${wc}/30 words)`); return false; }
         const nameLength = formData.productName.trim().length;
-        if (nameLength > 10) {
+        if (nameLength > 20) {
           setError(t.productNameLetterLimit.replace('{count}', nameLength));
           return false;
         }
@@ -932,18 +1017,8 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
 
     try {
       for (const image of formData.images) {
-        const dimensions = await getImageDimensions(image.uri);
-        if (dimensions.height > maxMediaHeight) {
-          setError(t.mediaTooTall.replace('{max}', maxMediaHeight));
-          return;
-        }
-      }
-      if (formData.video) {
-        const dimensions = Platform.OS === 'web'
-          ? { width: formData.video.width, height: formData.video.height }
-          : await getVideoMetaData(formData.video.uri);
-        if (!Number.isFinite(Number(dimensions.height)) || Number(dimensions.height) > maxMediaHeight) {
-          setError(t.mediaTooTall.replace('{max}', maxMediaHeight));
+        if (image.size && image.size > MAX_COMPRESSED_BYTES) {
+          setError('Image exceeds the 150 KB limit.');
           return;
         }
       }
@@ -953,6 +1028,7 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
     }
 
     setLoading(true);
+    setUploadProgress(0);
 
     try {
       const token = await getToken();
@@ -967,6 +1043,33 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         return;
       }
 
+      const imagesForUpload = await Promise.all(formData.images.map(async (image) => {
+        const dimensions = await getImageDimensions(image.uri);
+        if (dimensions.height <= MAX_UPLOAD_MEDIA_HEIGHT) return image;
+
+        return processImageForUpload(image.uri, null, MAX_UPLOAD_MEDIA_HEIGHT);
+      }));
+      let videoForUpload = formData.video;
+      if (videoForUpload) {
+        let duration = Number(videoForUpload.duration);
+        if (!Number.isFinite(duration) || duration <= 0) {
+          const metadata = await getVideoMetaData(videoForUpload.uri);
+          duration = Number(metadata.duration);
+          videoForUpload = { ...videoForUpload, ...metadata, duration };
+        }
+        if (duration > MAX_VIDEO_DURATION_S) {
+          videoForUpload = { ...videoForUpload, ...(await trimVideo(videoForUpload.uri)) };
+        }
+
+        const fileInfo = videoForUpload.size
+          ? null
+          : await FileSystem.getInfoAsync(videoForUpload.uri);
+        const videoSize = Number(videoForUpload.size) || Number(fileInfo?.size) || 0;
+        if (videoSize > MAX_VIDEO_BYTES) {
+          throw new Error('Video exceeds the 50 MB size limit. Please choose a smaller video.');
+        }
+      }
+
       const fd = new FormData();
       fd.append('productName', formData.productName);
       fd.append('description', formData.description);
@@ -977,8 +1080,8 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
       fd.append('contactNumber2', formData.contactNumberWhatsApp ? (normalizeRwandaPhone(formData.contactNumberWhatsApp) || formData.contactNumberWhatsApp) : '');
       fd.append('category', 'other');
 
-      for (let i = 0; i < formData.images.length; i += 1) {
-        const img = formData.images[i];
+      for (let i = 0; i < imagesForUpload.length; i += 1) {
+        const img = imagesForUpload[i];
         const uriParts = img.uri.split('/');
         const fileName = img.name || uriParts[uriParts.length - 1] || `image_${i}.jpg`;
         const uploadImage = await prepareUploadFile(img);
@@ -986,19 +1089,19 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         fd.append('images', uploadImage, fileName);
       }
 
-      if (formData.video) {
+      if (videoForUpload) {
         if (!allowVideoUpload || videoUploadLimitPerDay <= 0) {
           throw new Error('Video uploads are not allowed for your account. Please contact the admin for support.');
         }
         if (videosToday >= videoUploadLimitPerDay) {
           throw new Error(`Video upload limit reached. You can upload up to ${videoUploadLimitPerDay} video(s) today.`);
         }
-        const videoUpload = await prepareUploadFile(formData.video);
-        fd.append('video', videoUpload, formData.video.name || `video_${Date.now()}.mp4`);
-        fd.append('videoDuration', String(formData.video.duration || 0));
+        const videoUpload = await prepareUploadFile(videoForUpload);
+        fd.append('video', videoUpload, videoForUpload.name || `video_${Date.now()}.mp4`);
+        fd.append('videoDuration', String(videoForUpload.duration || 0));
         if (Platform.OS !== 'web') {
           try {
-            const thumbnail = await VideoThumbnails.getThumbnailAsync(formData.video.uri, {
+            const thumbnail = await VideoThumbnails.getThumbnailAsync(videoForUpload.uri, {
               time: 1000,
               quality: 0.7,
             });
@@ -1018,26 +1121,17 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         fd.append('videoLink', formData.videoLink.trim());
       }
 
-      let response;
-      let responseData;
-      if (Platform.OS === 'web') {
-        response = await fetch(`${BASE_URL}/api/posts`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-          body: fd,
-        });
-        responseData = await response.json();
-      } else {
-        response = await axios.post(`${BASE_URL}/api/posts`, fd, {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 10 * 60 * 1000,
-        });
-        responseData = response.data;
-      }
-
-      if (!response.ok && Platform.OS === 'web') {
-        throw new Error(responseData?.message || `Upload failed with status ${response.status}`);
-      }
+      const response = await axios.post(`${BASE_URL}/api/posts`, fd, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 10 * 60 * 1000,
+        onUploadProgress: (event) => {
+          if (!event.total) return;
+          const percent = Math.min(99, Math.floor((event.loaded / event.total) * 100));
+          setUploadProgress(prev => Math.max(prev, percent));
+        },
+      });
+      const responseData = response.data;
+      setUploadProgress(100);
 
       if (responseData.success) {
         setRemainingPosts(prev => Math.max(prev - 1, 0));
@@ -1197,7 +1291,26 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
               theme={theme}
             />
 
-            <Text style={[styles.step3SectionTitle, { color: theme.text }]}>{t.addImages}</Text>
+            <View style={styles.step3MediaHeader}>
+              <Text style={[styles.step3SectionTitle, { color: theme.text }]}>{t.addImages}</Text>
+              <TouchableOpacity
+                style={[
+                  styles.step3HeaderEditButton,
+                  {
+                    borderColor: theme.border,
+                    backgroundColor: theme.cardBackground,
+                    opacity: formData.images.length || formData.video ? 1 : 0.45,
+                  },
+                ]}
+                onPress={() => openMediaEditor(formData.video || formData.images[0])}
+                disabled={!formData.images.length && !formData.video}
+                accessibilityRole="button"
+                accessibilityLabel="Edit selected media"
+              >
+                <Ionicons name="create-outline" size={16} color={theme.text} />
+                <Text style={[styles.step3HeaderEditText, { color: theme.text }]}>Edit</Text>
+              </TouchableOpacity>
+            </View>
             <Text style={[styles.step3SectionSubtitle, { color: theme.textSecondary }]}>
               {t.maxImages.replace('{max}', maxImagesPerPost)}
             </Text>
@@ -1236,7 +1349,6 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
             <VideoUploader
               value={formData.video}
               onChange={handleVideoChange}
-              maxMediaHeight={maxMediaHeight}
               videoLink={formData.videoLink}
               onVideoLinkChange={(videoLink) => handleChange('videoLink', videoLink)}
               theme={theme}
@@ -1248,9 +1360,15 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
                   {formData.images.map((item, index) => (
                     <View key={index} style={styles.step3ImagePreviewWrapper}>
                       <Image source={{ uri: item.uri }} style={styles.step3ImagePreview} />
-                      <TouchableOpacity style={styles.step3RemoveImageButton} onPress={() => removeImage(index)}>
-                        <Ionicons name="close-circle" size={24} color="#d87428" />
-                      </TouchableOpacity>
+                      <View style={styles.step3ImageActions}>
+                        <TouchableOpacity style={styles.step3EditImageButton} onPress={() => openMediaEditor(item)}>
+                          <Ionicons name="create-outline" size={14} color={theme.text} />
+                          <Text style={[styles.step3EditImageText, { color: theme.text }]}>Edit</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.step3RemoveImageButton} onPress={() => removeImage(index)}>
+                          <Ionicons name="close-circle" size={24} color="#d87428" />
+                        </TouchableOpacity>
+                      </View>
                     </View>
                   ))}
                 </View>
@@ -1276,11 +1394,12 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
                   value={formData.productName}
                   onChangeText={text => handleChange('productName', text)}
                   onSubmitEditing={() => descriptionRef.current?.focus()}
+                  maxLength={20}
                   returnKeyType="next"
                 />
               </View>
               <Text style={[styles.wordHint, { color: theme.textSecondary }]}>
-                {formData.productName.trim().length}/10 letters
+                {formData.productName.trim().length}/20 letters
               </Text>
             </View>
             <View style={styles.inputGroup}>
@@ -1416,10 +1535,16 @@ const AddPostScreen = ({ navigation, language = 'English' }) => {
         onRequestClose={() => {}}
       >
         <View style={[styles.uploadOverlay, { backgroundColor: isDarkMode ? '#111111' : '#dddddd' }]}>
-          <Text style={[styles.uploadOverlayText, { color: isDarkMode ? '#ffffff' : '#222222' }]}>
-            {t.uploadingWait}
-          </Text>
-          <DancingDots color={theme.accent} />
+          <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} />
+          <View style={styles.uploadOverlayContent}>
+            <Text style={[styles.uploadOverlayText, { color: isDarkMode ? '#ffffff' : '#222222' }]}>
+              {t.uploadingWait}
+            </Text>
+            <DancingDots color={theme.accent} />
+            <Text style={[styles.uploadProgressText, { color: isDarkMode ? '#ffffff' : '#222222' }]}>
+              {uploadProgress}%
+            </Text>
+          </View>
         </View>
       </Modal>
 
@@ -1516,6 +1641,9 @@ const styles = StyleSheet.create({
 
   uploadOverlay: {
     flex: 1,
+  },
+  uploadOverlayContent: {
+    flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     gap: 18,
@@ -1525,6 +1653,10 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textAlign: 'center',
     paddingHorizontal: 24,
+  },
+  uploadProgressText: {
+    fontSize: 18,
+    fontWeight: '700',
   },
   dancingDotsRow: {
     flexDirection: 'row',
@@ -1601,7 +1733,24 @@ const styles = StyleSheet.create({
     padding: 16,
     borderWidth: 0,
   },
-  step3SectionTitle: { fontSize: 18, fontWeight: '600', marginTop: 16, marginBottom: 8 },
+  step3MediaHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  step3SectionTitle: { fontSize: 18, fontWeight: '600' },
+  step3HeaderEditButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderWidth: 1,
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  step3HeaderEditText: { fontSize: 15, fontWeight: '600' },
   step3SectionSubtitle: { fontSize: 12, marginBottom: 16 },
   step3ImageButtons: {
     flexDirection: 'row',
@@ -1623,16 +1772,37 @@ const styles = StyleSheet.create({
     gap: 16,
     marginBottom: 16,
   },
-  step3ImagePreviewWrapper: { position: 'relative' },
+  step3ImagePreviewWrapper: { position: 'relative', marginRight: 10 },
   step3ImagePreview: {
-    width: width * 0.4,
-    height: width * 0.4,
+    width: width * 0.38,
+    height: width * 0.38,
     borderRadius: 12,
   },
-  step3RemoveImageButton: {
+  step3ImageActions: {
     position: 'absolute',
-    top: 0,
-    right: -8,
+    left: 8,
+    right: 8,
+    bottom: 8,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  step3EditImageButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    color: '#fff',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: '#dddd',
+  },
+  step3EditImageText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  step3RemoveImageButton: {
+    position: 'relative',
     backgroundColor: '#ffffff',
     borderRadius: 12,
   },
@@ -1699,10 +1869,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    alignSelf: 'center',
+    width: '100%',
     marginTop: 16,
-    paddingVertical: 10,
-    paddingHorizontal: 26,
+    paddingVertical: 12,
+    paddingHorizontal: 30,
     borderWidth: 1.5,
     borderRadius: 26,
     gap: 8,

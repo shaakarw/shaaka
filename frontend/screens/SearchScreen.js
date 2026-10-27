@@ -14,6 +14,7 @@ import {
   RefreshControl,
   Keyboard,
   ScrollView,
+  PanResponder,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../context/ThemeContext';
@@ -97,11 +98,20 @@ const sortFeedPosts = (posts, shuffleNonFeatured = false) => {
 };
 // ================================================================
 
-const { width } = Dimensions.get('window');
+const { width, height: screenHeight } = Dimensions.get('window');
 const RECENT_SEARCHES_KEY = '@recent_searches';
+const SEARCH_FEED_CACHE_KEY = '@search_feed_cache';
 const PAGE_SIZE = 20;
 const SECTION_WIDTH = width;
 const AUTO_SLIDE_INTERVAL = 10000;
+const SEARCH_INPUT_TOP = 8;
+const SEARCH_CONTENT_TOP_PADDING = 72;
+
+// Draggable eye toggle (shows/hides the search input)
+const EYE_BUTTON_SIZE = 52;
+const EYE_BUTTON_MARGIN = 8;
+const EYE_BUTTON_MIN_TOP = 80;
+const EYE_BUTTON_BOTTOM_PADDING = 100;
 
 // ---------- Hero-deck section (3 cards sliding) ----------
 const HeroDeckSection = ({ posts, theme, isDarkMode, onPressPost, onPressUser }) => {
@@ -177,11 +187,73 @@ const SearchScreen = ({ navigation, route, language }) => {
     }
   }, [authUser]);
 
-  const [showBackToTop, setShowBackToTop] = useState(false);
-  const listRef = useRef(null);
+  // --- Search bar visibility (replaces showBackToTop) ---
+  const [searchBarVisible, setSearchBarVisible] = useState(true);
   const heroScrollRef = useRef(null);
   const [activeSectionIndex, setActiveSectionIndex] = useState(0);
-  const headerOpacityAnim = useRef(new Animated.Value(1)).current;
+
+  // --- Draggable eye button state ---
+  const eyePosRef = useRef({
+    x: width - EYE_BUTTON_SIZE - EYE_BUTTON_MARGIN - 10,
+    y: screenHeight - EYE_BUTTON_SIZE - EYE_BUTTON_BOTTOM_PADDING,
+  });
+  const eyeDragStartRef = useRef({ x: 0, y: 0 });
+  const eyePos = useRef(new Animated.ValueXY(eyePosRef.current)).current;
+  const eyePanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onStartShouldSetPanResponderCapture: () => false,
+      onMoveShouldSetPanResponder: (_, gs) =>
+        Math.abs(gs.dx) > 4 || Math.abs(gs.dy) > 4,
+      onMoveShouldSetPanResponderCapture: (_, gs) =>
+        Math.abs(gs.dx) > 4 || Math.abs(gs.dy) > 4,
+      onPanResponderGrant: () => {
+        eyeDragStartRef.current = { ...eyePosRef.current };
+      },
+      onPanResponderMove: (_, gs) => {
+        const nx = Math.max(
+          0,
+          Math.min(width - EYE_BUTTON_SIZE, eyeDragStartRef.current.x + gs.dx)
+        );
+        const ny = Math.max(
+          EYE_BUTTON_MIN_TOP,
+          Math.min(
+            screenHeight - EYE_BUTTON_SIZE - 20,
+            eyeDragStartRef.current.y + gs.dy
+          )
+        );
+        eyePos.setValue({ x: nx, y: ny });
+      },
+      onPanResponderRelease: (_, gs) => {
+        const draggedX = Math.max(
+          0,
+          Math.min(width - EYE_BUTTON_SIZE, eyeDragStartRef.current.x + gs.dx)
+        );
+        const leftX = EYE_BUTTON_MARGIN;
+        const rightX = Math.max(0, width - EYE_BUTTON_SIZE - EYE_BUTTON_MARGIN);
+        const nx = draggedX + EYE_BUTTON_SIZE / 2 < width / 2 ? leftX : rightX;
+        const ny = Math.max(
+          EYE_BUTTON_MIN_TOP,
+          Math.min(
+            screenHeight - EYE_BUTTON_SIZE - 20,
+            eyeDragStartRef.current.y + gs.dy
+          )
+        );
+        eyePosRef.current = { x: nx, y: ny };
+        eyePos.setValue({ x: nx, y: ny });
+      },
+      onPanResponderTerminate: () => {},
+    })
+  ).current;
+
+  const handleEyePress = useCallback(() => {
+    if (searchBarVisible) {
+      Keyboard.dismiss();
+      setSearchBarVisible(false);
+    } else {
+      setSearchBarVisible(true);
+    }
+  }, [searchBarVisible]);
 
   // ---- 3-per-row trending grid (infinite loop) ----
   const [gridPosts, setGridPosts] = useState([]);
@@ -283,6 +355,15 @@ const SearchScreen = ({ navigation, route, language }) => {
         const feed = await fetchFeed(pageNum);
         const newPosts = feed.posts;
 
+        if (refresh) {
+          AsyncStorage.setItem(
+            SEARCH_FEED_CACHE_KEY,
+            JSON.stringify({ posts: newPosts, hasMore: feed.hasMore })
+          ).catch((error) => {
+            console.error('Search feed cache write failed:', error);
+          });
+        }
+
         let filteredPosts = newPosts;
         if (isLoggedIn && currentUser) {
           filteredPosts = newPosts.filter((post) => post.userId !== currentUser._id);
@@ -312,6 +393,34 @@ const SearchScreen = ({ navigation, route, language }) => {
     [isLoggedIn, currentUser, fetchFeed]
   );
 
+  const restoreCachedFeed = useCallback(async () => {
+    try {
+      const cachedValue = await AsyncStorage.getItem(SEARCH_FEED_CACHE_KEY);
+      if (!cachedValue) return;
+
+      const cachedFeed = JSON.parse(cachedValue);
+      if (!Array.isArray(cachedFeed.posts)) {
+        console.error('Search feed cache is invalid.');
+        return;
+      }
+
+      const cachedPosts = cachedFeed.posts.map(mapPost);
+      const visiblePosts =
+        isLoggedIn && currentUser
+          ? cachedPosts.filter((post) => post.userId !== currentUser._id)
+          : cachedPosts;
+      const sorted = sortFeedPosts(visiblePosts);
+      const trending = sorted.filter((post) => post.trending);
+
+      setAllPosts(sorted);
+      setTrendingPosts(trending.length > 0 ? trending : sorted);
+      setHasMore(cachedFeed.hasMore !== false);
+      setLoading(false);
+    } catch (error) {
+      console.error('Search feed cache read failed:', error);
+    }
+  }, [isLoggedIn, currentUser]);
+
   const loadMorePosts = useCallback(async () => {
     if (
       loading ||
@@ -331,19 +440,6 @@ const SearchScreen = ({ navigation, route, language }) => {
       setLoadingMore(false);
     }
   }, [loading, refreshing, hasMore, searchQuery, page, fetchPosts]);
-
-  const scrollToTop = useCallback(async () => {
-    heroScrollRef.current?.scrollTo({ x: 0, animated: true });
-    setActiveSectionIndex(0);
-    listRef.current?.scrollToOffset({ offset: 0, animated: true });
-    headerOpacityAnim.setValue(1);
-    setRefreshing(true);
-    try {
-      await fetchPosts(1, true);
-    } finally {
-      setRefreshing(false);
-    }
-  }, [fetchPosts, headerOpacityAnim]);
 
   const fetchPostsRef = useRef(fetchPosts);
   const checkLoginStatusRef = useRef(checkLoginStatus);
@@ -373,16 +469,6 @@ const SearchScreen = ({ navigation, route, language }) => {
     return () => clearTimeout(timer);
   }, [activeSectionIndex, sectionGroups.length, searchQuery]);
 
-  // ---------- Scroll ----------
-  const handleScroll = useCallback(
-    (event) => {
-      const currentScrollY = event.nativeEvent.contentOffset.y;
-      setShowBackToTop(currentScrollY > 200);
-      headerOpacityAnim.setValue(Math.max(1 - currentScrollY / 240, 0));
-    },
-    [headerOpacityAnim]
-  );
-
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     fetchPosts(1, true);
@@ -408,7 +494,6 @@ const SearchScreen = ({ navigation, route, language }) => {
             post.username?.toLowerCase().includes(q)
         );
 
-        // Users whose username matches the query
         const userMap = new Map();
         candidates.forEach((post) => {
           const uname = post.username || '';
@@ -437,7 +522,6 @@ const SearchScreen = ({ navigation, route, language }) => {
     [allPosts]
   );
 
-  // Debounced auto-search as the user types
   useEffect(() => {
     const q = searchQuery.trim();
     if (!q) {
@@ -455,7 +539,6 @@ const SearchScreen = ({ navigation, route, language }) => {
     return () => clearTimeout(timer);
   }, [searchQuery, runSearch]);
 
-  // Initial query from route params
   useEffect(() => {
     const initialQuery = route?.params?.searchQuery || '';
     if (initialQuery && initialQuery !== searchQuery) {
@@ -468,8 +551,12 @@ const SearchScreen = ({ navigation, route, language }) => {
   useEffect(() => {
     if (!didInitialLoadRef.current) {
       didInitialLoadRef.current = true;
-      checkLoginStatusRef.current?.();
-      fetchPostsRef.current?.(1, true);
+      const initializeFeed = async () => {
+        await restoreCachedFeed();
+        checkLoginStatusRef.current?.();
+        fetchPostsRef.current?.(1, true);
+      };
+      initializeFeed();
     }
 
     const unsubscribeBlur = navigation.addListener('blur', () => {
@@ -487,7 +574,7 @@ const SearchScreen = ({ navigation, route, language }) => {
       unsubscribeBlur();
       unsubscribeFocus();
     };
-  }, [navigation]);
+  }, [navigation, restoreCachedFeed]);
 
   useEffect(() => {
     if (firstAuthRunRef.current) {
@@ -512,9 +599,6 @@ const SearchScreen = ({ navigation, route, language }) => {
     gridOffsetRef.current = seed.length % source.length;
   }, [trendingPosts, allPosts]);
 
-  // ---------------------------------------------------------------
-  // Infinite loop loader — always cycles from the top of the source
-  // ---------------------------------------------------------------
   const loadMoreGridPosts = useCallback(() => {
     if (loadingMoreRef.current) return;
 
@@ -579,7 +663,6 @@ const SearchScreen = ({ navigation, route, language }) => {
   };
 
   // ---------- RENDERERS ----------
-
   const renderSearchResultItem = ({ item }) => (
     <TouchableOpacity
       style={[
@@ -667,7 +750,6 @@ const SearchScreen = ({ navigation, route, language }) => {
     </TouchableOpacity>
   );
 
-  // ---------- 2-per-row grid tile with overlays ----------
   const renderGridItem = ({ item, index }) => {
     const amountText =
       item.amount ||
@@ -690,24 +772,20 @@ const SearchScreen = ({ navigation, route, language }) => {
             style={styles.gridImage}
           />
 
-          {/* Shade overlay for readability */}
           <View style={styles.gridImageShade} />
 
-          {/* Top-left: product name */}
           {!!item.productName && (
             <Text style={styles.gridOverlayTitle} numberOfLines={2}>
               {item.productName}
             </Text>
           )}
 
-          {/* Top-right: video indicator */}
           {item.videoUrl && (
             <View style={styles.gridVideoBadge}>
               <Ionicons name="videocam" size={12} color="#fff" />
             </View>
           )}
 
-          {/* Bottom-right: amount / price */}
           {!!amountText && (
             <Text style={styles.gridOverlayAmount} numberOfLines={1}>
               {amountText}
@@ -718,14 +796,42 @@ const SearchScreen = ({ navigation, route, language }) => {
     );
   };
 
+  const renderSearchInput = () => (
+    <View
+      style={[
+        styles.searchContainer,
+        { backgroundColor: inputBgColor, borderColor: softBorder },
+      ]}
+    >
+      <Ionicons name="search" size={20} color={subTextColor} style={styles.searchIcon} />
+      <TextInput
+        style={[styles.searchInput, { color: txtColor }]}
+        placeholder={t.placeholder}
+        placeholderTextColor={subTextColor}
+        value={searchQuery}
+        onChangeText={setSearchQuery}
+        onSubmitEditing={handleSearchSubmit}
+        returnKeyType="search"
+        autoFocus={false}
+      />
+      {searchQuery !== '' && (
+        <TouchableOpacity onPress={handleClear} style={styles.clearBtn}>
+          <Ionicons name="close-circle" size={18} color={subTextColor} />
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+
   const renderBrowseView = () => {
     if (sectionGroups.length === 0) {
       return (
-        <View style={styles.center}>
-          <Ionicons name="flame-outline" size={48} color={subTextColor} />
-          <Text style={{ color: subTextColor, fontSize: 15, marginTop: 12 }}>
-            {t.noPosts}
-          </Text>
+        <View style={styles.emptyBrowseContent}>
+          <View style={styles.center}>
+            <Ionicons name="flame-outline" size={48} color={subTextColor} />
+            <Text style={{ color: subTextColor, fontSize: 15, marginTop: 12 }}>
+              {t.noPosts}
+            </Text>
+          </View>
         </View>
       );
     }
@@ -794,19 +900,24 @@ const SearchScreen = ({ navigation, route, language }) => {
     return (
       <FlatList
         key="browse-grid"
-        ref={listRef}
         data={gridPosts}
         keyExtractor={(item, index) => `grid-${item._id}-${index}`}
         renderItem={renderGridItem}
         numColumns={2}
         columnWrapperStyle={styles.gridRow}
         ListHeaderComponent={ListHeader}
-        contentContainerStyle={styles.gridContent}
+        contentContainerStyle={[
+          styles.gridContent,
+          { backgroundColor: bgColor },
+        ]}
         showsVerticalScrollIndicator={false}
-        onScroll={handleScroll}
-        scrollEventThrottle={16}
         onEndReached={loadMoreGridPosts}
         onEndReachedThreshold={0.6}
+        initialNumToRender={6}
+        maxToRenderPerBatch={8}
+        updateCellsBatchingPeriod={40}
+        windowSize={5}
+        removeClippedSubviews
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -826,9 +937,7 @@ const SearchScreen = ({ navigation, route, language }) => {
     );
   };
 
-  // ---------- Search results view (users + products) ----------
   const renderSearchResults = () => {
-    // Build the ListHeader: Users section (if any) + Products heading
     const ListHeader = (
       <View>
         {matchedUsers.length > 0 && (
@@ -867,11 +976,13 @@ const SearchScreen = ({ navigation, route, language }) => {
     return (
       <FlatList
         key="search-results"
-        ref={listRef}
         data={searchResults}
         keyExtractor={(item, index) => `search-${item._id}-${index}`}
         renderItem={renderSearchResultItem}
-        contentContainerStyle={[styles.listContent, { paddingBottom: 40 }]}
+        contentContainerStyle={[
+          styles.listContent,
+          { backgroundColor: bgColor },
+        ]}
         ListHeaderComponent={ListHeader}
         ListEmptyComponent={
           <View style={styles.center}>
@@ -881,9 +992,12 @@ const SearchScreen = ({ navigation, route, language }) => {
             </Text>
           </View>
         }
-        onScroll={handleScroll}
-        scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
+        initialNumToRender={8}
+        maxToRenderPerBatch={10}
+        updateCellsBatchingPeriod={40}
+        windowSize={5}
+        removeClippedSubviews
       />
     );
   };
@@ -911,48 +1025,45 @@ const SearchScreen = ({ navigation, route, language }) => {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: bgColor }]} edges={['top']}>
-      {/* ---------- Sticky search bar ---------- */}
-      <View
-        style={[
-          styles.searchContainer,
-          { backgroundColor:  bgColor, borderColor: softBorder },
-        ]}
-      >
-        <Ionicons name="search" size={20} color={subTextColor} style={styles.searchIcon} />
-        <TextInput
-          style={[styles.searchInput, { color: txtColor }]}
-          placeholder={t.placeholder}
-          placeholderTextColor={subTextColor}
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          onSubmitEditing={handleSearchSubmit}
-          returnKeyType="search"
-          autoFocus={false}
-        />
-        {searchQuery !== '' && (
-          <TouchableOpacity onPress={handleClear} style={styles.clearBtn}>
-            <Ionicons name="close-circle" size={18} color={subTextColor} />
-          </TouchableOpacity>
-        )}
-      </View>
-
       <View style={{ flex: 1 }}>
         {renderContent()}
 
-        {showBackToTop && (
-          <TouchableOpacity
-            style={[
-              styles.showHeaderButton,
-              { backgroundColor: isDarkMode ? '#FFF' : '#111' },
-            ]}
-            onPress={scrollToTop}
-            activeOpacity={0.9}
-          >
-            <Ionicons name="chevron-up" size={24} color={isDarkMode ? '#111' : '#FFF'} />
-          </TouchableOpacity>
+        {searchBarVisible && (
+          <View style={styles.searchInputOverlay}>
+            {renderSearchInput()}
+          </View>
         )}
-      </View>
 
+        {/* === NEW: Draggable See/Unsee eye toggle === */}
+        <Animated.View
+          pointerEvents="box-none"
+          style={[
+            styles.floatingEyeButton,
+            {
+              transform: eyePos.getTranslateTransform(),
+              backgroundColor: isDarkMode ? '#111' : '#ddd',
+              borderColor: isDarkMode ? '#555' : '#999',
+            },
+          ]}
+          {...eyePanResponder.panHandlers}
+        >
+          <TouchableOpacity
+            onPress={handleEyePress}
+            activeOpacity={0.85}
+            style={styles.floatingEyeButtonInner}
+            accessibilityRole="button"
+            accessibilityLabel={
+              searchBarVisible ? 'Hide search input' : 'Show search input'
+            }
+          >
+            <Ionicons
+              name={searchBarVisible ? 'eye-off' : 'eye'}
+              size={24}
+              color={isDarkMode ? '#fff' : '#111'}
+            />
+          </TouchableOpacity>
+        </Animated.View>
+      </View>
     </SafeAreaView>
   );
 };
@@ -961,7 +1072,7 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 60 },
 
-  /* ---------- Sticky search bar ---------- */
+  /* ---------- Search input ---------- */
   searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -970,13 +1081,20 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     height: 48,
     marginHorizontal: 16,
-    marginTop: -40,
     marginBottom: 12,
     shadowColor: '#000',
     shadowOpacity: 0.06,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 3 },
     elevation: 2,
+  },
+  searchInputOverlay: {
+    position: 'absolute',
+    top: SEARCH_INPUT_TOP,
+    left: 0,
+    right: 0,
+    zIndex: 10,
+    elevation: 10,
   },
   searchIcon: { marginRight: 10 },
   searchInput: { flex: 1, fontSize: 16, paddingVertical: 0 },
@@ -1035,7 +1153,13 @@ const styles = StyleSheet.create({
 
   /* ---------- 2-per-row product grid ---------- */
   gridContent: {
-    paddingBottom: 60,
+    paddingTop: SEARCH_CONTENT_TOP_PADDING,
+    paddingBottom: 100,
+  },
+  emptyBrowseContent: {
+    flex: 1,
+    paddingTop: SEARCH_CONTENT_TOP_PADDING,
+    paddingBottom: 100,
   },
   gridRow: {
     justifyContent: 'space-between',
@@ -1043,7 +1167,7 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   gridItem: {
-    width: (width - 40) / 2, // 16 px padding each side + one 8 px gap
+    width: (width - 40) / 2,
   },
   gridImageWrap: {
     width: '100%',
@@ -1062,8 +1186,6 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.22)',
   },
-
-  /* Overlay: product name (top-left) */
   gridOverlayTitle: {
     position: 'absolute',
     top: 8,
@@ -1076,8 +1198,6 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
   },
-
-  /* Overlay: video indicator (top-right) */
   gridVideoBadge: {
     position: 'absolute',
     top: 6,
@@ -1090,8 +1210,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     zIndex: 5,
   },
-
-  /* Overlay: amount (bottom-right) */
   gridOverlayAmount: {
     position: 'absolute',
     right: 8,
@@ -1107,7 +1225,11 @@ const styles = StyleSheet.create({
   },
 
   /* ---------- Search result rows ---------- */
-  listContent: { paddingHorizontal: 0 },
+  listContent: {
+    paddingHorizontal: 0,
+    paddingTop: SEARCH_CONTENT_TOP_PADDING,
+    paddingBottom: 100,
+  },
   resultItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1182,20 +1304,29 @@ const styles = StyleSheet.create({
 
   /* ---------- Misc ---------- */
   loadMoreIndicator: { paddingVertical: 20 },
-  showHeaderButton: {
+
+  /* ---------- NEW: floating draggable eye toggle ---------- */
+  floatingEyeButton: {
     position: 'absolute',
-    right: 18,
-    bottom: 20,
+    top: 0,
+    left: 0,
+    width: EYE_BUTTON_SIZE,
+    height: EYE_BUTTON_SIZE,
+    borderRadius: EYE_BUTTON_SIZE / 2,
+    borderWidth: 1,
     zIndex: 200,
-    padding: 10,
-    borderRadius: 30,
-    elevation: 4,
+    elevation: 8,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    justifyContent: 'center',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+  },
+  floatingEyeButtonInner: {
+    width: '100%',
+    height: '100%',
     alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: EYE_BUTTON_SIZE / 2,
   },
 });
 

@@ -3,7 +3,7 @@ const MallShop = require('../models/MallShop');
 const User = require('../models/User');
 const Place = require('../models/Place');
 const { deleteMallShopWithCleanup } = require('../utils/deletionCleanup');
-const { normalizeRwandaPhone, isValidRwandaPhone } = require('../utils/phoneNormalizer');
+const { normalizeRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
 const storageService = require('../services/storage/storageService');
 
@@ -46,15 +46,14 @@ exports.createMallShop = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Missing required fields (front image required)' });
     }
 
-    if (!isValidRwandaPhone(phone)) {
-      return res.status(400).json({ success: false, message: 'Please enter a valid Rwanda phone number (e.g. 0781234567)' });
-    }
-    if (whatsapp && !isValidRwandaPhone(whatsapp)) {
-      return res.status(400).json({ success: false, message: 'Please enter a valid WhatsApp number or leave it empty' });
-    }
-
     const normalizedPhone = normalizeRwandaPhone(phone);
+    if (!normalizedPhone || !/^\+2507[983]\d{7}$/.test(normalizedPhone)) {
+      return res.status(400).json({ success: false, message: 'Please enter a 10-digit Rwanda phone number starting with 079, 078, or 073' });
+    }
     const normalizedWhatsApp = whatsapp ? normalizeRwandaPhone(whatsapp) : '';
+    if (whatsapp && (!normalizedWhatsApp || !/^\+2507[983]\d{7}$/.test(normalizedWhatsApp))) {
+      return res.status(400).json({ success: false, message: 'Please enter a 10-digit WhatsApp number starting with 079, 078, or 073, or leave it empty' });
+    }
 
     // One-type-only rule: user cannot have both a normal place/shop and a shopping mall shop
     const userId = req.user.id;

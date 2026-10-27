@@ -920,7 +920,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
         >
           {isSavedTab && isOwnProfile && (
             <TouchableOpacity
-              style={styles.unsaveButton}
+              style={[styles.unsaveButton,{backgroundColor: isDarkMode ? '#111' : '#dddd'}]}
               onPress={(e) => {
                 e?.stopPropagation?.();
                 toggleSavePost(item);
@@ -935,7 +935,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
               style={[
                 styles.deleteButton,
                 {
-                  backgroundColor: isDarkMode ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.55)',
+                  backgroundColor: isDarkMode ? '#111' : '#dddd',
                 },
               ]}
               onPress={(e) => {
@@ -984,12 +984,9 @@ const ProfileScreen = ({ navigation, route, language }) => {
 
         <View style={styles.referenceProfileBody}>
           <TouchableOpacity
-            onPress={() => {
-              if (isOwnProfile) pickImage();
-              else if (avatarUri) navigation.navigate('Preview', { imageUri: avatarUri });
-            }}
+            onPress={isOwnProfile ? pickImage : undefined}
             style={styles.referenceAvatarWrap}
-            disabled={uploading}
+            disabled={!isOwnProfile || uploading}
           >
             {avatarUri ? (
               <Image source={{ uri: avatarUri }} style={styles.referenceAvatar} />
@@ -1129,9 +1126,9 @@ const ProfileScreen = ({ navigation, route, language }) => {
   const handleAddFirstPost = () => {
     if (!isOwnProfile) return;
     try {
-      navigation.navigate('Main', { screen: 'AddShop' });
+      navigation.navigate('AddPost');
     } catch (e) {
-      Alert.alert('Error', 'AddShop screen not found.');
+      Alert.alert('Error', 'AddPost screen not found.');
     }
   };
 
@@ -1561,7 +1558,7 @@ const styles = StyleSheet.create({
   gridMenuIconLineShort: { width: '42%' },
   gridMenuIconLineMid: { width: '72%' },
   gridMenuIconLineLong: { width: '100%' },
-  unsaveButton: { position: 'absolute', bottom: 6, right: 6, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 18, padding: 5, zIndex: 5 },
+  unsaveButton: { position: 'absolute', bottom: 0, right: 0,  borderTopLeftRadius: 12, padding: 5, zIndex: 5 },
 
   tabBar: { flexDirection: 'row', justifyContent: 'space-around', borderBottomWidth: 1, paddingTop: 4, paddingBottom: 0, marginTop: 4 },
   tab: { flex: 1, alignItems: 'center', paddingVertical: 12 },

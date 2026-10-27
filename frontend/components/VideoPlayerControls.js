@@ -25,12 +25,7 @@ const safePlayerAction = (player, methodName, ...args) => {
   if (!player || typeof player[methodName] !== 'function') return false;
   try {
     return player[methodName](...args);
-  } catch (error) {
-    if (__DEV__) {
-      console.warn(
-        `Video player ${methodName} skipped because the native player was already released.`
-      );
-    }
+  } catch {
     return false;
   }
 };
@@ -811,7 +806,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     marginLeft: -6,
     top: '100%',
-    marginTop: 4,
+    marginTop: -20,
     backgroundColor: '#ffffff',
     shadowColor: '#000000',
     shadowOffset: { width: 0, height: 2 },

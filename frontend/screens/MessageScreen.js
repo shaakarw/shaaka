@@ -27,6 +27,7 @@ import { BASE_URL } from '../constants';
 import { io } from 'socket.io-client';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import { isReelsActive } from '../services/reelActivity';
+import { logDebug, warnDebug } from '../utils/debugLogger';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const DEFAULT_AVATAR = require('../assets/profile1.png');
@@ -409,7 +410,9 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
         setOnlineUsers(newOnline);
       }
     } catch (error) {
-      console.warn('Failed to fetch online statuses:', error.message);
+      if (error.response?.status !== 404) {
+        warnDebug('Failed to fetch online statuses:', error.message);
+      }
     }
   }, [onlineUsers]);
 
@@ -436,11 +439,11 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      console.log('[MsgScreen Socket] connected', socket.id);
+      logDebug('[MsgScreen Socket] connected', socket.id);
     });
 
     socket.on('reconnect', () => {
-      console.log('[MsgScreen Socket] reconnected');
+      logDebug('[MsgScreen Socket] reconnected');
     });
 
     socket.on('user-online', (payload) => {
@@ -455,7 +458,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
 
     // ---- Lenient typing handler with auto-clear ----
     const handleTyping = (payload, eventName) => {
-      console.log('[MsgScreen Socket] typing event:', eventName, payload);
+      logDebug('[MsgScreen Socket] typing event:', eventName, payload);
 
       // Support multiple possible field names from the server
       const uid = String(
@@ -503,13 +506,13 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     socket.on('user-stop-typing', (payload) => handleTyping(payload, 'user-stop-typing'));
 
     socket.on('disconnect', (reason) => {
-      console.log('[MsgScreen Socket] disconnected:', reason);
+      logDebug('[MsgScreen Socket] disconnected:', reason);
       // Reset typing on disconnect — the state is stale
       setTypingUsers({});
     });
 
     socket.on('connect_error', (err) => {
-      console.log('[MsgScreen Socket] connect_error:', err?.message);
+      logDebug('[MsgScreen Socket] connect_error:', err?.message);
     });
   }, [isLoggedIn, currentUser]);
 
@@ -753,7 +756,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       sellerPhone: sellerPhone,
       postId: conversation?.postId || '',
       postTitle: conversation?.postTitle || '',
-      replyPost: conversation?.replyPost || conversation?.lastMessage?.replyPost || null,
       adminMode,
     });
   };

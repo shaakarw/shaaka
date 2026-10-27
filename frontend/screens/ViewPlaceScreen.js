@@ -19,6 +19,7 @@ import {
   RefreshControl,
   TextInput,
   SectionList,
+  ScrollView,
 } from 'react-native';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth, useUserLimits } from '../context/AuthContext';
@@ -35,6 +36,7 @@ import { offlineDatabase } from '../services/offlineDatabase';
 import { networkStatus } from '../services/networkStatus';
 import { mediaCache } from '../services/mediaCache';
 import { mapOfflineCache } from '../services/mapOfflineCache';
+import { compressImageForUpload } from '../utils/imageCompressor';
 
 const { height, width } = Dimensions.get('window');
 const MODAL_HEIGHT_80 = height * 0.7;
@@ -187,6 +189,15 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const { refreshUser } = useAuth();
   const adminLimits = useUserLimits();
   const { place, pendingShopId } = route.params || {};
+  const showMapMessage = (title, message, type = 'info', buttonAction) => {
+    showBottomSheet({
+      type,
+      title,
+      message,
+      buttonText: 'OK',
+      buttonAction,
+    });
+  };
 
   const [userLocation, setUserLocation] = useState(null);
   const [distance, setDistance] = useState(null);
@@ -360,7 +371,28 @@ export default function ViewPlaceScreen({ route, navigation }) {
   });
 
   // ---- Sheet open/close helpers ----
+  const getProductLimit = useCallback(() => {
+    const rawLimit = Number(currentUser?.placeProductUploadLimitPerDay ?? currentUser?.productUploadLimitPerDay ?? 1);
+    if (!Number.isFinite(rawLimit) || rawLimit <= 0) return 1;
+    return rawLimit;
+  }, [currentUser]);
+
+  const canAddMoreProducts = useCallback(() => {
+    const limit = getProductLimit();
+    const currentProducts = Array.isArray(place?.products) ? place.products.length : 0;
+    return currentProducts < limit;
+  }, [getProductLimit, place]);
+
   const openAddProductSheet = () => {
+    if (!canAddMoreProducts()) {
+      const limit = getProductLimit();
+      showMapMessage(
+        'Product limit reached',
+        `You have reached your daily product limit for places. You can add up to ${limit} product${limit === 1 ? '' : 's'} today.`,
+        'info'
+      );
+      return;
+    }
     setNewProduct({ name: '', price: '' });
     setProductImages([]);
     setAddProductSheetVisible(true);
@@ -644,7 +676,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
 
     const hasPlace = await checkUserHasNormalPlace();
     if (hasPlace) {
-      Alert.alert('Limit Reached', 'You already have a Shop/Place. You cannot add a Shopping Mall Shop.');
+      showMapMessage('Limit Reached', 'You already have a Shop/Place. You cannot add a Shopping Mall Shop.', 'info');
       return;
     }
     navigation.navigate('AddShoppingMallShop', { mall: place });
@@ -679,7 +711,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
       await AsyncStorage.setItem('pendingRoute', JSON.stringify(place));
       navigation.goBack();
     } catch (e) {
-      Alert.alert('Error', 'Could not set route. Please try again.');
+      showMapMessage('Error', 'Could not set route. Please try again.', 'error');
     }
   };
 
@@ -711,7 +743,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
       const message = `📍 ${place.name}\n${place.address || ''}\nCategory: ${categoryLabel}\n\n${link}`;
       await Share.share({ message });
     } catch (e) {
-      Alert.alert('Error', 'Could not share place.');
+      showMapMessage('Error', 'Could not share place.', 'error');
     }
   };
 
@@ -721,44 +753,31 @@ export default function ViewPlaceScreen({ route, navigation }) {
       setIsFavorite(newState);
       await loadFavoriteStatus();
     } catch (error) {
-      Alert.alert('Error', 'Could not update favorite. Please try again.');
+      showMapMessage('Error', 'Could not update favorite. Please try again.', 'error');
     }
   };
 
   const handleMessageOwner = () => {
-    const ownerId = ownerData?._id || place?.userId;
+    const ownerRef = ownerData || place?.userId || place?.owner || place?.ownerId;
+    const ownerId = typeof ownerRef === 'object'
+      ? ownerRef?._id || ownerRef?.id
+      : ownerRef;
     const ownerName = ownerData?.username || ownerData?.name || place?.ownerName || 'Place owner';
     const ownerPhone = ownerData?.phone || place?.phone || '';
     const contextId = place?.id || place?._id || place?.placeId || `place_${place?.name || 'place'}`;
 
     if (!ownerId) {
-      Alert.alert('Error', 'Owner information is not available yet.');
+      showMapMessage('Error', 'Owner information is not available yet.', 'error');
       return;
     }
 
-    const replyPost = {
-      postId: contextId,
-      contextType: 'place',
-      contextId,
-      title: place?.name || 'Place',
-      description: place?.description || '',
-      image: place?.images?.street || place?.images?.cover || place?.image || '',
-      price: null,
-      amount: '',
-      location: place?.address || '',
-      category: place?.category || '',
-      username: ownerName,
-      ownerId,
-      timestamp: new Date().toISOString(),
-    };
-
     navigation.navigate('Chat', {
-      sellerId: ownerId,
+      sellerId: String(ownerId),
       sellerName: ownerName,
       sellerPhone: ownerPhone,
       postId: contextId,
       postTitle: place?.name || 'Place',
-      replyPost,
+      sellerAvatar: ownerData?.avatar || ownerData?.userAvatar || '',
     });
   };
 
@@ -772,7 +791,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
           text: 'Report',
           style: 'destructive',
           onPress: () =>
-            Alert.alert('Thank you', 'Your report has been submitted.'),
+            showMapMessage('Thank you', 'Your report has been submitted.', 'success'),
         },
       ]
     );
@@ -791,7 +810,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
       formattedUrl = 'https://' + formattedUrl;
     }
     Linking.openURL(formattedUrl).catch(() =>
-      Alert.alert('Error', 'Could not open link.')
+      showMapMessage('Error', 'Could not open link.', 'error')
     );
   };
 
@@ -803,50 +822,23 @@ export default function ViewPlaceScreen({ route, navigation }) {
       } else if (fallbackUrl) {
         await Linking.openURL(fallbackUrl);
       } else {
-        Alert.alert('Error', 'Unable to open link');
+        showMapMessage('Error', 'Unable to open link', 'error');
       }
     } catch (error) {
       if (fallbackUrl) {
         await Linking.openURL(fallbackUrl);
       } else {
-        Alert.alert('Error', 'Unable to open link');
+        showMapMessage('Error', 'Unable to open link', 'error');
       }
     }
   };
 
-  const getAllImages = () => {
-    const images = [];
-    const streetImage = streetImageUri ||
-      place.images?.street ||
-      place.images?.streetImage ||
-      place.images?.images?.street;
-    if (streetImage) {
-      images.push(streetImage);
-    }
-    if (place.products && Array.isArray(place.products)) {
-      place.products.forEach((product) => {
-        if (product.images && Array.isArray(product.images)) {
-          product.images.forEach((img) => images.push(img));
-        }
-      });
-    }
-    return images;
-  };
-
-  const openCarousel = (startIndex = 0) => {
-    const allImages = getAllImages();
-    if (allImages.length === 0) return;
-    navigation.navigate('Preview', {
-      images: allImages,
-      initialIndex: Math.min(startIndex, allImages.length - 1),
-    });
-  };
-
-  const renderContactButton = (icon, label, value, onPress) => {
+  // ---- Contact button helper (now takes a per-button background color) ----
+  const renderContactButton = (icon, label, value, backgroundColor, onPress) => {
     if (!value) return null;
     return (
       <TouchableOpacity
-        style={[styles.contactBtn, { backgroundColor: theme.accent }]}
+        style={[styles.contactBtn, { backgroundColor }]}
         onPress={onPress}
       >
         <Ionicons name={icon} size={20} color="#fff" />
@@ -859,7 +851,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const pickProductImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Please allow photo access to choose images.');
+      showMapMessage('Permission needed', 'Please allow photo access to choose images.', 'error');
       return;
     }
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -885,11 +877,21 @@ export default function ViewPlaceScreen({ route, navigation }) {
   // ---------- Submit product (no description) ----------
   const submitProduct = async () => {
     if (!newProduct.name.trim() || !newProduct.price) {
-      Alert.alert('Missing fields', 'Product name and price are required.');
+      showMapMessage('Missing fields', 'Product name and price are required.', 'error');
       return;
     }
     if (productImages.length === 0) {
-      Alert.alert('Missing', 'Please add at least one product image.');
+      showMapMessage('Missing', 'Please add at least one product image.', 'error');
+      return;
+    }
+
+    const limit = getProductLimit();
+    if ((Array.isArray(place?.products) ? place.products.length : 0) >= limit) {
+      showMapMessage(
+        'Product limit reached',
+        `You have reached your daily product limit for places. You can add up to ${limit} product${limit === 1 ? '' : 's'} today.`,
+        'info'
+      );
       return;
     }
 
@@ -901,12 +903,9 @@ export default function ViewPlaceScreen({ route, navigation }) {
       // Upload all images
       const uploadedUrls = [];
       for (const img of productImages) {
+        const compressedImage = await compressImageForUpload(img.uri, img.name || 'product.jpg');
         const formData = new FormData();
-        formData.append('image', {
-          uri: img.uri,
-          type: img.type,
-          name: img.name,
-        });
+        formData.append('image', compressedImage);
         const uploadRes = await axios.post(
           `${BASE_URL}/api/places/upload`,
           formData,
@@ -942,16 +941,17 @@ export default function ViewPlaceScreen({ route, navigation }) {
         }
         setProductImages([]);
         setNewProduct({ name: '', price: '' });
-        Alert.alert('Success', 'Product added to the place.');
+        showMapMessage('Success', 'Product added to the place.', 'success');
         closeAddProductSheet();
       } else {
         throw new Error(response.data.message || 'Product add failed');
       }
     } catch (error) {
       console.error('Product add error:', error);
-      Alert.alert(
+      showMapMessage(
         'Error',
-        error.response?.data?.message || error.message || 'Could not add product.'
+        error.response?.data?.message || error.message || 'Could not add product.',
+        'error'
       );
     } finally {
       setSubmittingProduct(false);
@@ -962,14 +962,6 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const renderProductItem = ({ item }) => {
     const firstImage =
       item.images && item.images.length > 0 ? item.images[0] : null;
-    const productIndex = place.products.indexOf(item);
-    let startIndex = place.images?.street ? 1 : 0;
-    for (let i = 0; i < productIndex; i++) {
-      if (place.products[i].images) {
-        startIndex += place.products[i].images.length;
-      }
-    }
-
     return (
       <View
         style={[
@@ -977,10 +969,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
           { backgroundColor: isDarkMode ? '#2a2a2a' : '#ffffff' },
         ]}
       >
-        <TouchableOpacity
-          activeOpacity={0.8}
-          onPress={() => openCarousel(startIndex)}
-        >
+        <View>
           {firstImage ? (
             <Image
               source={{ uri: firstImage }}
@@ -1001,7 +990,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
               />
             </View>
           )}
-        </TouchableOpacity>
+        </View>
         <Text
           style={[styles.productGridName, { color: theme.text }]}
           numberOfLines={1}
@@ -1133,10 +1122,12 @@ export default function ViewPlaceScreen({ route, navigation }) {
               </View>
             </View>
           </View>
-          <View style={styles.shopCardStats}>
+          <View style={[
+            styles.shopCardStats,
+            { backgroundColor: isDarkMode ? '#111' : '#dddd' },]}>
             <Ionicons
-              name="arrow-forward-circle"
-              size={22}
+              name="arrow-forward"
+              size={29}
               color={theme.textSecondary}
             />
           </View>
@@ -1538,11 +1529,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
                       place.images?.streetImage ||
                       null;
                     return streetImage ? (
-                      <TouchableOpacity
-                        onPress={() => openCarousel(0)}
-                        activeOpacity={0.9}
-                        style={{ marginBottom: 8 }}
-                      >
+                      <View style={{ marginBottom: 8 }}>
                         {getPrimaryMedia({
                           imageUrl: streetImage,
                           videoUrl: streetImage,
@@ -1562,7 +1549,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
                             style={styles.headerImage}
                           />
                         )}
-                      </TouchableOpacity>
+                      </View>
                     ) : null;
                   })()}
 
@@ -1605,17 +1592,25 @@ export default function ViewPlaceScreen({ route, navigation }) {
                     </View>
                   )}
 
-                  <View style={styles.contactRow}>
+                  {/* Contact row — horizontally scrollable, colored like ViewShopScreen */}
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={styles.contactRowScroll}
+                    contentContainerStyle={styles.contactRowContent}
+                  >
                     {renderContactButton(
-                      'call',
+                      'call-outline',
                       'Call',
                       place.phone,
+                      theme.accent,
                       () => openLink(`tel:${place.phone}`)
                     )}
                     {renderContactButton(
                       'logo-whatsapp',
                       'WhatsApp',
                       place.whatsapp,
+                      '#44ae86',
                       () => {
                         const num = place.whatsapp.startsWith('+')
                           ? place.whatsapp
@@ -1624,20 +1619,28 @@ export default function ViewPlaceScreen({ route, navigation }) {
                       }
                     )}
                     {renderContactButton(
-                      'mail',
+                      'mail-outline',
                       'Email',
                       place.email,
+                      '#2e6d55',
                       () => openLink(`mailto:${place.email}`)
                     )}
                     {renderContactButton(
-                      'globe',
+                      'globe-outline',
                       'Website',
                       place.website,
+                      '#ae6d47',
                       () => openLink(place.website)
                     )}
-                  </View>
+                  </ScrollView>
 
-                  <View style={styles.actionRow}>
+                  {/* Action row – horizontally scrollable */}
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={styles.actionRowScroll}
+                    contentContainerStyle={styles.actionRowContent}
+                  >
                     <TouchableOpacity
                       style={[
                         styles.actionBtn,
@@ -1689,7 +1692,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
                       <Ionicons
                         name={isFavorite ? 'heart' : 'heart-outline'}
                         size={22}
-                        color={isFavorite ? '#353535' : theme.text}
+                        color={isFavorite ? 'red' : theme.text}
                       />
                       <Text
                         style={[
@@ -1721,7 +1724,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
                         Report
                       </Text>
                     </TouchableOpacity>
-                  </View>
+                  </ScrollView>
 
                   {/* "Add Your Shop" big button for malls */}
                   {isMall && (
@@ -1792,12 +1795,12 @@ export default function ViewPlaceScreen({ route, navigation }) {
                     )}
 
                   {isOwner && (
-                   <TouchableOpacity
-      style={[styles.addProductBtn, { backgroundColor: theme.accent }]}
-      onPress={openAddProductSheet}>
-      <Ionicons name="add-circle-outline" size={18} color="#fff" />
-      <Text style={styles.addProductBtnText}>Add</Text>
-    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.addProductBtn, { backgroundColor: theme.accent }]}
+                      onPress={openAddProductSheet}>
+                      <Ionicons name="add-circle-outline" size={18} color="#fff" />
+                      <Text style={styles.addProductBtnText}>Add</Text>
+                    </TouchableOpacity>
                   )}
 
                   {renderOwner()}
@@ -1845,14 +1848,14 @@ export default function ViewPlaceScreen({ route, navigation }) {
 
           <Animated.View
             style={[
-               styles.addProductSheet,
-    {
-      height: ADD_PRODUCT_SHEET_HEIGHT,
-      backgroundColor: theme.background,
-      borderTopWidth: 2,
-      borderTopColor: theme.text,
-      transform: [{ translateY: addProductSheetTranslateY }],
-    },
+              styles.addProductSheet,
+              {
+                height: ADD_PRODUCT_SHEET_HEIGHT,
+                backgroundColor: theme.background,
+                borderTopWidth: 2,
+                borderTopColor: theme.text,
+                transform: [{ translateY: addProductSheetTranslateY }],
+              },
             ]}
           >
             <View
@@ -1908,9 +1911,9 @@ export default function ViewPlaceScreen({ route, navigation }) {
               />
 
               <View style={styles.modalImagePicker}>
-                  <Text style={[styles.modalImageLabel, { color: theme.text }]}>
-                    Image:
-                  </Text>
+                <Text style={[styles.modalImageLabel, { color: theme.text }]}>
+                  Image:
+                </Text>
                 <TouchableOpacity
                   style={[
                     styles.modalAddImageBtn,
@@ -2008,30 +2011,30 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   productHeaderRow: {
-  flexDirection: 'row',
-  justifyContent: 'space-between',
-  alignItems: 'center',
-  marginBottom: 10,
-  marginTop: 12,
-},
-productGridTitle: {
-  fontSize: 18,
-  fontWeight: '600',
-},
-addProductBtn: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  paddingHorizontal: 22,
-  width:'40%',
-  paddingVertical: 6,
-  borderRadius: 20,
-},
-addProductBtnText: {
-  color: '#fff',
-  fontSize: 23,
-  fontWeight: '600',
-  marginLeft: 4,
-},
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+    marginTop: 12,
+  },
+  productGridTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  addProductBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 22,
+    width: '40%',
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  addProductBtnText: {
+    color: '#fff',
+    fontSize: 23,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
   modalContainer: {
     width: '100%',
     overflow: 'hidden',
@@ -2134,45 +2137,53 @@ addProductBtnText: {
     fontSize: 15,
     marginLeft: 6,
   },
-  contactRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+
+  // Contact row – horizontal scroll (replaces old wrapping contactRow)
+  contactRowScroll: {
     marginBottom: 12,
+  },
+  contactRowContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingRight: 16,
   },
   contactBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     paddingVertical: 8,
-    borderRadius: 10,
-    marginRight: 2,
-    marginBottom: 0,
+    borderRadius: 20,
+    marginRight: 8,
   },
   contactBtnText: {
     color: '#fff',
     marginLeft: 4,
-    fontSize: 13,
-    fontWeight: '400',
+    fontWeight: '600',
   },
-  actionRow: {
+
+  // Action row – horizontal scroll (replaces old wrapping actionRow)
+  actionRowScroll: {
+    marginBottom: 16,
+  },
+  actionRowContent: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginBottom: 2,
+    alignItems: 'center',
+    paddingRight: 16,
   },
   actionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 13,
     marginRight: 8,
-    marginBottom: 8,
   },
   actionBtnText: {
     color: '#fff',
     marginLeft: 6,
-    fontWeight: '400',
+    fontWeight: '600',
   },
+
   sectionTitle: {
     fontSize: 18,
     fontWeight: '600',
@@ -2467,6 +2478,15 @@ addProductBtnText: {
   },
   shopCardStats: {
     alignItems: 'flex-end',
+    position:"absolute",
+    top:-13,
+    right:-13,
+
+    borderBottomWidth:0,
+    borderBottomLeftRadius: 12,
+    borderColor: 'rgba(255, 255, 255, 0.02)',
+    borderLeftColor:0,
+
   },
   categoryBadgeContainer: {
     flexDirection: 'row',

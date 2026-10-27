@@ -135,6 +135,7 @@ exports.sendMessage = async (req, res) => {
         contactNumbers: replyPost.contactNumbers || postExists?.contactNumbers || [],
         houseImages: replyPost.houseImages || postExists?.houseImages || [],
         videoUrl: replyPost.videoUrl || postExists?.videoUrl || '',
+        videoThumbnail: replyPost.videoThumbnail || postExists?.videoThumbnail || '',
         username: replyPost.username || postExists?.username || '',
         userAvatar: replyPost.userAvatar || postExists?.userAvatar || '',
         ownerId: replyPost.ownerId || postExists?.user || null,
@@ -307,6 +308,7 @@ exports.getMessages = async (req, res) => {
               contactNumbers: postExists.contactNumbers || [],
               houseImages: postExists.houseImages || [],
               videoUrl: postExists.videoUrl || '',
+              videoThumbnail: postExists.videoThumbnail || msgObj.replyPost.videoThumbnail || '',
               username: postExists.username || '',
               userAvatar: postExists.userAvatar || '',
             };
@@ -559,4 +561,3 @@ exports.uploadImage = async (req, res) => {
     res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Image upload failed' });
   }
 };
-

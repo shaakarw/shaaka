@@ -5,13 +5,11 @@ import {
   StyleSheet,
   Text,
   Animated,
-  Easing,
   SafeAreaView,
   TextInput,
   TouchableOpacity,
   Alert,
   Dimensions,
-  Image,
   FlatList,
   TouchableWithoutFeedback,
   Modal,
@@ -29,8 +27,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import Compass from '../components/Compass';
 import { networkStatus } from '../services/networkStatus';
 import { mapOfflineCache } from '../services/mapOfflineCache';
-
-const loadingLogo = require('../assets/logos.png');
+import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 
 const { height, width: SCREEN_WIDTH } = Dimensions.get('window');
 const EXPANDED_SEARCH_WIDTH = SCREEN_WIDTH * 0.7;
@@ -155,9 +152,9 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       myShops: 'My Shops',
       noShopsYet: "You haven't added any shops yet.",
       addFirstShop: 'Add Your First Shop',
-      savedPlaces: 'Saved Places',
-      noSavedPlaces: "You haven't saved any places yet.",
-      savedPlacesHint: 'Tap the ❤️ on any place to save it.',
+      savedPlaces: 'Saved Places & Shops',
+      noSavedPlaces: "You haven't saved any places or shops yet.",
+      savedPlacesHint: 'Tap the ❤️ on a place or shop to save it.',
       deleteShop: 'Delete Shop',
       deleteConfirm: 'Are you sure you want to delete this place?',
       deleteMallShopConfirm: 'Are you sure you want to delete this shop from the mall?',
@@ -203,9 +200,9 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       myShops: 'Amabanga yanjye',
       noShopsYet: 'Nta iduka wongeyemo.',
       addFirstShop: 'Ongera iduka ryawe rya mbere',
-      savedPlaces: 'Ahantu wabitse',
-      noSavedPlaces: 'Nta hantu wabitse.',
-      savedPlacesHint: 'Kanda  kuri ahantu hose kugirango ubibike.',
+      savedPlaces: 'Ahantu n’amaduka wabitse',
+      noSavedPlaces: 'Nta hantu cyangwa iduka wabikitse.',
+      savedPlacesHint: 'Kanda kuri ❤️ ku hantu cyangwa ku iduka uribike.',
       deleteShop: 'Siba iduka',
       deleteConfirm: 'Ese urabyemera gusiba iri duka?',
       deleteMallShopConfirm: 'Ese urashaka gusiba iri duka ryo mu isoko rinini?',
@@ -283,8 +280,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   const [allMallShopsLoaded, setAllMallShopsLoaded] = useState(false);
   const [shopSearchResults, setShopSearchResults] = useState([]);
 
-  // 👇 NEW: spin animation replaces the old scale pulse
-  const spinAnim = useRef(new Animated.Value(0)).current;
   const isClearingRoute = useRef(false);
   const isRouteActive = useRef(false);
 
@@ -344,6 +339,56 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     return true;
   };
 
+  const checkExistingShopBeforeAdd = useCallback(async () => {
+    const authed = await requireAuth();
+    if (!authed) return true;
+
+    const userId = user?._id || user?.id;
+    if (!userId) return false;
+
+    try {
+      const token = await AsyncStorage.getItem('userToken');
+      if (!token) return false;
+
+      const headers = { Authorization: `Bearer ${token}` };
+      const [placesResponse, shopsResponse] = await Promise.all([
+        axios.get(`${BASE_URL}/api/places`, { headers }),
+        axios.get(`${BASE_URL}/api/mall-shops/mine`, { headers }),
+      ]);
+
+      const places = placesResponse.data?.places || [];
+      const mallShops = shopsResponse.data?.shops || [];
+      const normalizeOwnerId = (value) => {
+        if (!value) return null;
+        if (typeof value === 'object') return String(value._id || value.id || '');
+        return String(value);
+      };
+
+      const hasPlaceAlready = places.some(place => {
+        const ownerId = normalizeOwnerId(place.userId || place.owner || place.ownerId);
+        return ownerId && ownerId === String(userId);
+      });
+
+      const hasMallShopAlready = mallShops.some(shop => {
+        const ownerId = normalizeOwnerId(shop.ownerId || shop.userId);
+        return ownerId && ownerId === String(userId);
+      });
+
+      if (hasPlaceAlready || hasMallShopAlready) {
+        showAppAlert(
+          'Shop Already Added',
+          'You have already added a shop before. Please delete your first shop or contact the admin for help.',
+          [{ text: 'OK' }]
+        );
+        return true;
+      }
+    } catch (error) {
+      console.warn('Could not verify existing shop before add:', error?.message || error);
+    }
+
+    return false;
+  }, [navigation, user, showAppAlert]);
+
   // Location & loading
   useEffect(() => {
     (async () => {
@@ -359,30 +404,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       }
     })();
   }, []);
-
-  // 👇 SPINNING animation (replaces the previous scale pulse)
-  useEffect(() => {
-    if (!loading) return undefined;
-
-    spinAnim.setValue(0);
-    const animation = Animated.loop(
-      Animated.timing(spinAnim, {
-        toValue: 1,
-        duration: 2400,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      })
-    );
-    animation.start();
-
-    return () => animation.stop();
-  }, [loading, spinAnim]);
-
-  // Interpolate the animated value into a 0deg → 360deg rotation
-  const spin = spinAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -888,7 +909,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       const query = searchQuery.trim();
       if (query.length > 0 && webViewRef.current) {
         if (!isOnline) {
-          Alert.alert(t.noResultsTitle, t.offlineSearch);
+          showAppAlert(t.noResultsTitle, t.offlineSearch);
           return;
         }
         webViewRef.current.injectJavaScript(`
@@ -905,7 +926,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         }
         if (searchExpanded) toggleSearch();
       } else {
-        Alert.alert(t.noResultsTitle, t.noResultsMessage);
+        showAppAlert(t.noResultsTitle, t.noResultsMessage);
       }
     }
   };
@@ -942,7 +963,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     const lon = place?.location?.longitude ?? place?.lon ?? 0;
 
     if (!lat || !lon) {
-      Alert.alert(t.errorTitle, t.noCoordinates);
+      showAppAlert(t.errorTitle, t.noCoordinates);
       return;
     }
 
@@ -1190,12 +1211,12 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert(t.permissionDenied, t.locationAccessRequired);
+        showAppAlert(t.permissionDenied, t.locationAccessRequired);
         return;
       }
       const servicesEnabled = await Location.hasServicesEnabledAsync();
       if (!servicesEnabled) {
-        Alert.alert(t.servicesDisabled, t.enableGPS);
+        showAppAlert(t.servicesDisabled, t.enableGPS);
         return;
       }
       const location = await Location.getCurrentPositionAsync({
@@ -1241,7 +1262,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       );
     } catch (error) {
       console.error('Directions error:', error);
-      Alert.alert(t.locationError, t.locationFailed);
+      showAppAlert(t.locationError, t.locationFailed);
     }
   };
 
@@ -1264,18 +1285,48 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   // Saved Places
   const loadSavedPlaces = async () => {
     try {
-      const favoritesJson = await AsyncStorage.getItem('favorites');
-      if (!favoritesJson) {
-        setSavedPlaces([]);
-        return;
+      const [favoritesJson, favoriteShopsJson] = await Promise.all([
+        AsyncStorage.getItem('favorites'),
+        AsyncStorage.getItem('favoriteShops'),
+      ]);
+      let favoriteIds = favoritesJson ? JSON.parse(favoritesJson) : [];
+      let favoriteShopIds = favoriteShopsJson ? JSON.parse(favoriteShopsJson) : [];
+      let favoritePlaces = places.filter(place =>
+        favoriteIds.includes(String(place._id || place.id))
+      );
+      let favoriteShops = allMallShops
+        .filter(shop => favoriteShopIds.includes(String(shop._id || shop.id)))
+        .map(shop => ({ ...shop, isMallShop: true }));
+
+      const token = await AsyncStorage.getItem('userToken');
+      if (token && networkStatus.get().isConnected && networkStatus.get().isInternetReachable) {
+        try {
+          const response = await axios.get(`${BASE_URL}/api/favorites`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (response.data?.success) {
+            favoritePlaces = response.data.favorites || [];
+            favoriteShops = (response.data.favoriteShops || []).map(shop => ({
+              ...shop,
+              isMallShop: true,
+            }));
+            favoriteIds = favoritePlaces.map(place => String(place._id || place.id)).filter(Boolean);
+            favoriteShopIds = favoriteShops.map(shop => String(shop._id || shop.id)).filter(Boolean);
+            await Promise.all([
+              AsyncStorage.setItem('favorites', JSON.stringify(favoriteIds)),
+              AsyncStorage.setItem('favoriteShops', JSON.stringify(favoriteShopIds)),
+            ]);
+          }
+        } catch (error) {
+          console.warn('Could not refresh saved places and shops:', error.message);
+        }
       }
-      const favoriteIds = JSON.parse(favoritesJson);
-      const favoritePlaces = places.filter(p => favoriteIds.includes(p._id));
-      const mapped = favoritePlaces.map(p => ({
-        ...p,
-        address: getAddressString(p),
+
+      const mappedPlaces = favoritePlaces.map(place => ({
+        ...place,
+        address: getAddressString(place),
       }));
-      setSavedPlaces(mapped);
+      setSavedPlaces([...mappedPlaces, ...favoriteShops]);
     } catch (error) {
       console.error('Error loading saved places:', error);
       setSavedPlaces([]);
@@ -1293,6 +1344,10 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     const can = await requireAuth();
     if (!can) return;
     setSavedPlacesVisible(false);
+    if (place.isMallShop) {
+      navigation.navigate('ViewShop', { shopId: place._id || place.id });
+      return;
+    }
     navigation.navigate('ViewPlace', { place });
   };
 
@@ -1332,7 +1387,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
               fetchPlaces();
               setMyShopsVisible(false);
             } catch (error) {
-              Alert.alert(t.deleteError, t.deleteFailed);
+              showAppAlert(t.deleteError, t.deleteFailed);
             }
           },
         },
@@ -1366,7 +1421,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
               setMyShopsVisible(false);
             } catch (error) {
               console.error('Error deleting mall shop:', error);
-              Alert.alert(t.deleteError, t.deleteFailed);
+              showAppAlert(t.deleteError, t.deleteFailed);
             }
           },
         },
@@ -1682,7 +1737,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert(t.permissionDenied, t.locationAccessRequired);
+        showAppAlert(t.permissionDenied, t.locationAccessRequired);
         return;
       }
       const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
@@ -1697,7 +1752,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         `);
       }
     } catch (error) {
-      Alert.alert(t.errorTitle, t.locationFailed);
+      showAppAlert(t.errorTitle, t.locationFailed);
     }
   };
 
@@ -1790,9 +1845,10 @@ function LocateScreen({ navigation, route, language = 'English' }) {
               <Text style={[styles.emptyText, { color: secondaryText }]}>{t.noShopsYet}</Text>
               <TouchableOpacity
                 style={[styles.addShopBtn, { backgroundColor: theme.accent }]}
-                onPress={() => {
+                onPress={async () => {
                   setMyShopsVisible(false);
-                  navigation.navigate('AddShop');
+                  const blocked = await checkExistingShopBeforeAdd();
+                  if (!blocked) navigation.navigate('AddShop');
                 }}
               >
                 <Text style={styles.addShopBtnText}>{t.addFirstShop}</Text>
@@ -1812,9 +1868,10 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   );
 
   const renderSavedPlacesModal = () => (
-    <Modal visible={savedPlacesVisible} animationType="slide" transparent>
-      <View style={styles.modalOverlay}>
-        <View style={[styles.modalContent, { backgroundColor: cardBg }]}>
+    <Modal visible={savedPlacesVisible} animationType="slide" transparent onRequestClose={() => setSavedPlacesVisible(false)}>
+      <View style={styles.myShopsOverlay}>
+        <View style={[styles.myShopsSheet, { backgroundColor: cardBg }]}>
+          <View style={[styles.sheetHandle, { backgroundColor: secondaryText }]} />
           <View style={styles.modalHeader}>
             <Text style={[styles.modalTitle, { color: textColor }]}>{t.savedPlaces}</Text>
             <TouchableOpacity onPress={() => setSavedPlacesVisible(false)}>
@@ -1844,11 +1901,13 @@ function LocateScreen({ navigation, route, language = 'English' }) {
                     onPress={() => handleSavedPlacePress(item)}
                   >
                     <View style={styles.savedPlaceInfo}>
-                      <MaterialCommunityIcons name={icon} size={24} color={theme.accent} />
+                      <MaterialCommunityIcons name={item.isMallShop ? 'store' : icon} size={24} color={theme.accent} />
                       <View style={styles.savedPlaceTexts}>
                         <Text style={[styles.savedPlaceName, { color: textColor }]}>{item.name}</Text>
                         <Text style={[styles.savedPlaceAddress, { color: theme.textSecondary }]}>
-                          {addressStr}
+                          {item.isMallShop
+                            ? [item.mall?.name || item.mallName, item.shopNumber ? `Shop ${item.shopNumber}` : null].filter(Boolean).join(' • ')
+                            : addressStr}
                         </Text>
                       </View>
                     </View>
@@ -1856,7 +1915,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
                   </TouchableOpacity>
                 );
               }}
-              keyExtractor={(item) => item._id}
+              keyExtractor={(item) => `${item.isMallShop ? 'shop' : 'place'}-${item._id || item.id}`}
               contentContainerStyle={styles.savedPlacesList}
             />
           )}
@@ -2033,19 +2092,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
           onMessage={handleMessage}
         />
 
-        {loading && (
-          <View style={[styles.loadingOverlay, { backgroundColor: overlayColor }]}>
-            <View style={styles.loadingBadge}>
-              <Animated.Image
-                source={loadingLogo}
-                style={[styles.loadingImage, { transform: [{ rotate: spin }] }]}
-                resizeMode="contain"
-              />
-            </View>
-            <Text style={[styles.loadingText, { color: textColor }]}>{t.loading}</Text>
-          </View>
-        )}
-
         {searchExpanded && (
           <TouchableWithoutFeedback onPress={() => { if (searchExpanded) toggleSearch(); }}>
             <View style={styles.touchOutsideOverlay} />
@@ -2188,6 +2234,16 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
         {renderMyShopsModal()}
         {renderSavedPlacesModal()}
+
+        {loading && (
+          <View style={[StyleSheet.absoluteFillObject, styles.loadingOverlay, { backgroundColor: overlayColor }]}>
+            <ShaakaLoadingScreen
+              message={t.loading}
+              backgroundColor={overlayColor}
+              textColor={textColor}
+            />
+          </View>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -2198,35 +2254,7 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   mapContainer: { flex: 1, position: 'relative' },
   map: { flex: 1 },
-  loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  loadingBadge: {
-    width: Math.min(SCREEN_WIDTH * 0.52, 220),
-    height: Math.min(SCREEN_WIDTH * 0.52, 220),
-    borderRadius: Math.min(SCREEN_WIDTH * 0.26, 110),
-    backgroundColor: '#fff',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 4,
-  },
-  loadingImage: {
-    width: Math.min(SCREEN_WIDTH * 0.4, 170),
-    height: Math.min(SCREEN_WIDTH * 0.4, 170),
-  },
-  loadingText: {
-    marginTop: 28,
-    fontSize: 17,
-    fontWeight: '600',
-    letterSpacing: 0.2,
-  },
-
+  loadingOverlay: { zIndex: 10000, elevation: 10000 },
   touchOutsideOverlay: {
     position: 'absolute',
     top: 0,

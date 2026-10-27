@@ -15,10 +15,7 @@ const safePlayerAction = (player, methodName, ...args) => {
 
   try {
     return player[methodName](...args);
-  } catch (error) {
-    if (__DEV__) {
-      console.warn(`Video player ${methodName} skipped because the native player was already released.`);
-    }
+  } catch {
     return false;
   }
 };

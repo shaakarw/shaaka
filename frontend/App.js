@@ -25,7 +25,7 @@ import AdminDashboardScreen from './screens/AdminDashboardScreen';
 
 // Import Screens
 import HomeScreen from './screens/HomeScreen';
-import CropImageScreen from './screens/CropImageScreen';
+import EditScreen from './screens/EditScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import SearchScreen from './screens/SearchScreen';
 import MessageScreen from './screens/MessageScreen';
@@ -59,7 +59,6 @@ import BusinessIdeasScreen from './screens/BusinessIdeasScreen';
 import NotificationsScreen from './screens/NotificationsScreen';
 import NotificationPreferencesScreen from './screens/NotificationPreferencesScreen';
 import ChangePasswordScreen from './screens/ChangePasswordScreen';
-import PreviewScreen from './screens/PreviewScreen';
 import ShaakaLoadingScreen from './components/ShaakaLoadingScreen';
 import TopBar from './components/topbar';
 import BottomBar from './components/bottombar';
@@ -528,8 +527,6 @@ function AppContent() {
   };
   const navigationRef = useNavigationContainerRef();
   const [language, setLanguage] = useState('Kinyarwanda'); // default language
-  const [isOnline, setIsOnline] = useState(networkStatus.get().isOnline);
-  const [navigationReady, setNavigationReady] = useState(false);
   const [showMobileNavigation, setShowMobileNavigation] = useState(false);
   const toggleLanguage = () => setLanguage(prev => prev === 'English' ? 'Kinyarwanda' : 'English');
 
@@ -538,13 +535,11 @@ function AppContent() {
     let unsubscribe;
     networkStatus.start().then(status => {
       previousOnline = status.isOnline;
-      setIsOnline(status.isOnline);
       if (status.isOnline) {
         syncManager.run('app-start');
         startupPrefetch.run('app-start');
       }
       unsubscribe = networkStatus.subscribe(nextStatus => {
-        setIsOnline(nextStatus.isOnline);
         if (nextStatus.isOnline && !previousOnline) {
           syncManager.run('connection-restored');
           startupPrefetch.run('connection-restored');
@@ -554,12 +549,6 @@ function AppContent() {
     });
     return () => unsubscribe?.();
   }, []);
-
-  useEffect(() => {
-    if (!isOnline && navigationReady && navigationRef.isReady()) {
-      navigationRef.resetRoot({ index: 0, routes: [{ name: 'Main' }] });
-    }
-  }, [isOnline, navigationReady, navigationRef]);
 
   // ---------- GLOBAL ONLINE STATUS (unchanged) ----------
   const setGlobalOnlineStatus = useCallback(async (online) => {
@@ -608,11 +597,12 @@ function AppContent() {
         <NavigationContainer
           ref={navigationRef}
           theme={navigationTheme}
-          onReady={() => setNavigationReady(true)}
           onStateChange={state => {
             const activeRoute = state?.routes?.[state.index];
             setShowMobileNavigation(
-              activeRoute?.name !== 'Main' && activeRoute?.name !== 'AddPost'
+              activeRoute?.name !== 'Main' &&
+              activeRoute?.name !== 'AddPost' &&
+              activeRoute?.name !== 'EditScreen'
             );
           }}
         >
@@ -621,14 +611,6 @@ function AppContent() {
           <Stack.Navigator initialRouteName="Main" screenOptions={{ headerShown: false }}>
             <Stack.Screen name="Main">
               {props => <MainTabs {...props} language={language} toggleLanguage={toggleLanguage} theme={theme} isLoading={isLoading} />}
-            </Stack.Screen>
-            <Stack.Screen name="Preview">
-              {props => (
-                <>
-                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
-                  <PreviewScreen {...props} language={language} />
-                </>
-              )}
             </Stack.Screen>
             <Stack.Screen name="BuyPost">
               {props => (
@@ -660,7 +642,7 @@ function AppContent() {
               )}
             </Stack.Screen>
 
-            <Stack.Screen name="CropImage">
+            <Stack.Screen name="EditScreen">
               {props => (
                 <>
                   <TopBar
@@ -669,7 +651,7 @@ function AppContent() {
                     toggleLanguage={toggleLanguage}
                     showBackButton={true}
                   />
-                  <CropImageScreen
+                  <EditScreen
                     {...props}
                     language={language}
                     toggleLanguage={toggleLanguage}

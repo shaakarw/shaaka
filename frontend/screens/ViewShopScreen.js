@@ -19,6 +19,7 @@ import {
   Modal,
 } from 'react-native';
 import { useTheme } from '../context/ThemeContext';
+import { useBottomSheet } from '../context/BottomSheetContext';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
@@ -28,9 +29,10 @@ import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import { networkStatus } from '../services/networkStatus';
 import { offlineDatabase } from '../services/offlineDatabase';
 import { mediaCache } from '../services/mediaCache';
+import { compressImageForUpload } from '../utils/imageCompressor';
 
 const { height, width } = Dimensions.get('window');
-const MODAL_HEIGHT_80 = height * 0.7;   // same as ViewPlaceScreen
+const MODAL_HEIGHT_80 = height * 0.7;
 const MODAL_HEIGHT_90 = height * 0.9;
 const SWIPE_THRESHOLD = 60;
 const HANDLE_HEIGHT = height * 0.05;
@@ -77,6 +79,7 @@ const toggleFavoriteShop = async (shopId) => {
 
 export default function ViewShopScreen({ route, navigation }) {
   const { theme, isDarkMode } = useTheme();
+  const { showBottomSheet } = useBottomSheet();
   const { shopId } = route.params;
   const [shop, setShop] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -103,12 +106,6 @@ export default function ViewShopScreen({ route, navigation }) {
   const [confirmOnYes, setConfirmOnYes] = useState(null);
   const [confirmDestructive, setConfirmDestructive] = useState(false);
 
-  // Status/info modal state
-  const [statusModalVisible, setStatusModalVisible] = useState(false);
-  const [statusModalTitle, setStatusModalTitle] = useState('');
-  const [statusModalMessage, setStatusModalMessage] = useState('');
-  const [statusModalType, setStatusModalType] = useState('info'); // 'success' | 'error' | 'info'
-
   const modalHeight = useRef(new Animated.Value(MODAL_HEIGHT_80)).current;
 
   // ----- Modal helpers -----
@@ -121,10 +118,12 @@ export default function ViewShopScreen({ route, navigation }) {
   };
 
   const showStatusModal = ({ title, message, type = 'info' }) => {
-    setStatusModalTitle(title);
-    setStatusModalMessage(message);
-    setStatusModalType(type);
-    setStatusModalVisible(true);
+    showBottomSheet({
+      type,
+      title,
+      message,
+      buttonText: 'OK',
+    });
   };
 
   // Add Product swipe-up sheet animation
@@ -132,7 +131,28 @@ export default function ViewShopScreen({ route, navigation }) {
   const addProductBackdropOpacity = useRef(new Animated.Value(0)).current;
   const [addProductSheetVisible, setAddProductSheetVisible] = useState(false);
 
+  const getProductLimit = useCallback(() => {
+    const rawLimit = Number(currentUser?.mallProductUploadLimitPerDay ?? currentUser?.productUploadLimitPerDay ?? 1);
+    if (!Number.isFinite(rawLimit) || rawLimit <= 0) return 1;
+    return rawLimit;
+  }, [currentUser]);
+
+  const canAddMoreProducts = useCallback(() => {
+    const limit = getProductLimit();
+    const currentProducts = Array.isArray(shop?.products) ? shop.products.length : 0;
+    return currentProducts < limit;
+  }, [getProductLimit, shop]);
+
   const openAddProductSheet = () => {
+    if (!canAddMoreProducts()) {
+      const limit = getProductLimit();
+      showStatusModal({
+        title: 'Product limit reached',
+        message: `You have reached your daily product limit for shops. You can add up to ${limit} product${limit === 1 ? '' : 's'} today.`,
+        type: 'info',
+      });
+      return;
+    }
     setNewProduct({ name: '', price: '', images: [] });
     setAddProductSheetVisible(true);
     Animated.parallel([
@@ -419,7 +439,10 @@ export default function ViewShopScreen({ route, navigation }) {
   const handleMessageOwner = () => {
     if (!shop) return;
 
-    const sellerId = owner?._id || shop.ownerId?._id || shop.ownerId || shop.owner || shop.userId;
+    const ownerRef = owner || shop.ownerId || shop.owner || shop.userId;
+    const sellerId = typeof ownerRef === 'object'
+      ? ownerRef?._id || ownerRef?.id
+      : ownerRef;
     const sellerName = owner?.name || owner?.username || shop.ownerName || 'Shop owner';
     const sellerPhone = owner?.phone || shop.phone || '';
     const contextId = shop?._id || shopId || `shop_${shop?.name || 'shop'}`;
@@ -429,33 +452,13 @@ export default function ViewShopScreen({ route, navigation }) {
       return;
     }
 
-    const replyPost = {
-      postId: contextId,
-      contextType: 'shop',
-      contextId,
-      shopId: String(shop._id || shopId),
-      mallId: String(shop.mallId || shop.mall?._id || ''),
-      lat: shop.lat ?? shop.mall?.lat ?? null,
-      lon: shop.lon ?? shop.mall?.lon ?? null,
-      title: shop.name || 'Shop',
-      description: shop.description || '',
-      image: shop.logo || shop.coverImage || shop.image || '',
-      price: null,
-      amount: '',
-      location: shop.address || '',
-      category: shop.category || '',
-      username: sellerName,
-      ownerId: sellerId,
-      timestamp: new Date().toISOString(),
-    };
-
     navigation.navigate('Chat', {
-      sellerId,
+      sellerId: String(sellerId),
       sellerName: sellerName,
       sellerPhone: sellerPhone,
       postId: contextId,
       postTitle: shop.name || 'Shop',
-      replyPost,
+      sellerAvatar: owner?.avatar || '',
     });
   };
 
@@ -568,6 +571,16 @@ export default function ViewShopScreen({ route, navigation }) {
       return;
     }
 
+    const limit = getProductLimit();
+    if ((Array.isArray(shop?.products) ? shop.products.length : 0) >= limit) {
+      showStatusModal({
+        title: 'Product limit reached',
+        message: `You have reached your daily product limit for shops. You can add up to ${limit} product${limit === 1 ? '' : 's'} today.`,
+        type: 'info',
+      });
+      return;
+    }
+
     setUploadingProduct(true);
     try {
       const token = await getToken();
@@ -579,12 +592,9 @@ export default function ViewShopScreen({ route, navigation }) {
       // Upload all images
       const imageUrls = [];
       for (const img of newProduct.images) {
+        const compressedImage = await compressImageForUpload(img.uri, img.name || 'product.jpg');
         const formData = new FormData();
-        formData.append('image', {
-          uri: img.uri,
-          type: img.type || 'image/jpeg',
-          name: img.name,
-        });
+        formData.append('image', compressedImage);
         const uploadRes = await axios.post(`${BASE_URL}/api/places/upload`, formData, {
           headers: {
             'Content-Type': 'multipart/form-data',
@@ -601,7 +611,7 @@ export default function ViewShopScreen({ route, navigation }) {
       const newProductObj = {
         name: newProduct.name.trim(),
         price: Number(newProduct.price.replace(/,/g, '')) || 0,
-        images: imageUrls,   // array of URLs
+        images: imageUrls,
       };
 
       const updatedProducts = [...(shop.products || []), newProductObj];
@@ -626,7 +636,7 @@ export default function ViewShopScreen({ route, navigation }) {
       }
     } catch (error) {
       console.error('Add product error:', error);
-      showStatusModal({ title: 'Error', message: error.response?.data?.message || 'Could not add product. Please try again.', type: 'error' });
+      showStatusModal({ title: 'Error', message: error.response?.data?.message || error.message || 'Could not add product. Please try again.', type: 'error' });
     } finally {
       setUploadingProduct(false);
     }
@@ -634,12 +644,13 @@ export default function ViewShopScreen({ route, navigation }) {
 
   // ---- Delete product ----
   const handleDeleteProduct = (productId, productName) => {
-    openConfirmModal({
+    showBottomSheet({
+      type: 'error',
       title: 'Delete Product',
-      message: `Are you sure you want to delete "${productName}"?`,
-      destructive: true,
-      onYes: async () => {
-        setConfirmModalVisible(false);
+      message: `Are you sure you want to delete "${productName}"? This action cannot be undone.`,
+      buttonText: 'Delete',
+      secondaryButtonText: 'Cancel',
+      buttonAction: async () => {
         try {
           const token = await getToken();
           const updatedProducts = shop.products.filter(p => p._id !== productId);
@@ -675,46 +686,42 @@ export default function ViewShopScreen({ route, navigation }) {
     return shop.products.filter(p => p.name.toLowerCase().includes(lowerQuery));
   }, [shop, searchQuery]);
 
-  // ---- Render product item ----
+  // ---- Render product item (image-first with overlay name + price) ----
   const renderProductItem = ({ item }) => {
     const firstImage = item.images && item.images.length > 0 ? item.images[0] : null;
     return (
       <View style={[styles.productGridItem, { backgroundColor: isDarkMode ? '#2a2a2a' : '#fff' }]}>
-        <TouchableOpacity
-          activeOpacity={0.8}
-          onPress={() => {
-            if (firstImage) {
-              navigation.navigate('Preview', { imageUri: firstImage });
-            }
-          }}
-        >
+        <View style={styles.productGridTouchable}>
           {firstImage ? (
             <Image source={{ uri: firstImage }} style={styles.productGridImage} />
           ) : (
-            <View style={[styles.productGridImage, styles.productImagePlaceholder, { backgroundColor: theme.border }]}>
+            <View style={[styles.productImagePlaceholder, { backgroundColor: theme.border }]}>
               <Ionicons name="image-outline" size={40} color={theme.textSecondary} />
             </View>
           )}
-        </TouchableOpacity>
-        <View style={styles.productGridInfo}>
-          <Text style={[styles.productGridName, { color: theme.text }]} numberOfLines={1}>
-            {item.name}
-          </Text>
-          <Text style={[styles.productGridPrice, { color: theme.accent }]}>
-            {item.price.toLocaleString()} RWF
-          </Text>
-          {isOwner && (
-            <TouchableOpacity
-              style={[
-                styles.productDeleteBtn,
-                { backgroundColor: isDarkMode ? '#353535' : '#111' },   // ← dynamic background
-              ]}
-              onPress={() => handleDeleteProduct(item._id, item.name)}
-            >
-              <Ionicons name="trash-outline" size={18} color="#ddd" />
-            </TouchableOpacity>
-          )}
+
+          {/* Overlay bar with name + price */}
+          <View style={styles.productOverlay}>
+            <Text style={styles.productOverlayName} numberOfLines={1}>
+              {item.name}
+            </Text>
+            <Text style={styles.productOverlayPrice}>
+              {item.price.toLocaleString()} RWF
+            </Text>
+          </View>
         </View>
+
+        {isOwner && (
+          <TouchableOpacity
+            style={[
+              styles.productDeleteBtn,
+              { backgroundColor: isDarkMode ? '#353535' : '#111' },
+            ]}
+            onPress={() => handleDeleteProduct(item._id, item.name)}
+          >
+            <Ionicons name="trash-outline" size={18} color="#ddd" />
+          </TouchableOpacity>
+        )}
       </View>
     );
   };
@@ -770,14 +777,84 @@ export default function ViewShopScreen({ route, navigation }) {
   // ============================================================
   // MAIN RENDER
   // ============================================================
+
+  // ----- Loading state: bottom-sheet height, NOT full screen -----
   if (loading) {
-    return <ShaakaLoadingScreen backgroundColor={theme.background} textColor={theme.text} hideText />;
+    return (
+      <View style={[styles.outerContainer, { backgroundColor: 'transparent' }]}>
+        <View
+          style={[
+            styles.backdrop,
+            {
+              height: height - MODAL_HEIGHT_80,
+              backgroundColor: 'rgba(0,0,0,0.5)',
+            },
+          ]}
+          pointerEvents="box-none"
+        >
+          <TouchableOpacity
+            style={styles.backdropTouch}
+            activeOpacity={1}
+            onPress={() => navigation.goBack()}
+          />
+        </View>
+
+        <View
+          style={[
+            styles.modalContainer,
+            {
+              backgroundColor: theme.background,
+              height: MODAL_HEIGHT_80,
+              borderTopLeftRadius: 25,
+              borderTopRightRadius: 25,
+            },
+          ]}
+        >
+          <ShaakaLoadingScreen
+            backgroundColor={theme.background}
+            textColor={theme.text}
+            hideText
+          />
+        </View>
+      </View>
+    );
   }
 
   if (!shop) {
     return (
-      <View style={[styles.loaderContainer, { backgroundColor: theme.background }]}>
-        <Text style={{ color: theme.text }}>Shop not found.</Text>
+      <View style={[styles.outerContainer, { backgroundColor: 'transparent' }]}>
+        <View
+          style={[
+            styles.backdrop,
+            {
+              height: height - MODAL_HEIGHT_80,
+              backgroundColor: 'rgba(0,0,0,0.5)',
+            },
+          ]}
+          pointerEvents="box-none"
+        >
+          <TouchableOpacity
+            style={styles.backdropTouch}
+            activeOpacity={1}
+            onPress={() => navigation.goBack()}
+          />
+        </View>
+
+        <View
+          style={[
+            styles.modalContainer,
+            {
+              backgroundColor: theme.background,
+              height: MODAL_HEIGHT_80,
+              borderTopLeftRadius: 25,
+              borderTopRightRadius: 25,
+              justifyContent: 'center',
+              alignItems: 'center',
+            },
+          ]}
+        >
+          <Text style={{ color: theme.text }}>Shop not found.</Text>
+        </View>
       </View>
     );
   }
@@ -836,31 +913,6 @@ export default function ViewShopScreen({ route, navigation }) {
       </View>
     </Modal>
   );
-
-  // Status modal component
-  const renderStatusModal = () => {
-    const iconName = statusModalType === 'success' ? 'checkmark-circle' : statusModalType === 'error' ? 'alert-circle' : 'information-circle';
-    const iconColor = statusModalType === 'success' ? '#47ae87' : statusModalType === 'error' ? '#d87428' : theme.accent;
-    return (
-      <Modal transparent visible={statusModalVisible} animationType="fade" onRequestClose={() => setStatusModalVisible(false)}>
-        <View style={[styles.confirmModalOverlay, { backgroundColor: theme.action }]}>
-          <View style={[styles.confirmModalContent, { backgroundColor: theme.background, borderColor: theme.border }]}>
-            <View style={styles.confirmModalIconContainer}>
-              <Ionicons name={iconName} size={40} color={iconColor} />
-            </View>
-            <Text style={[styles.confirmModalTitle, { color: theme.text }]}>{statusModalTitle}</Text>
-            <Text style={[styles.confirmModalMessage, { color: theme.textSecondary }]}>{statusModalMessage}</Text>
-            <TouchableOpacity
-              style={[styles.confirmModalButton, { backgroundColor: theme.accent }]}
-              onPress={() => setStatusModalVisible(false)}
-            >
-              <Text style={[styles.confirmModalButtonText, { color: '#fff' }]}>OK</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-    );
-  };
 
   return (
     <View style={[styles.outerContainer, { backgroundColor: 'transparent' }]}>
@@ -922,14 +974,14 @@ export default function ViewShopScreen({ route, navigation }) {
           renderItem={renderProductItem}
           ListHeaderComponent={
             <>
-              {/* Show detailed info ONLY when NOT expanded (like ViewPlaceScreen) */}
+              {/* Show detailed info ONLY when NOT expanded */}
               {!expanded && (
                 <View style={styles.content}>
                   {/* Cover image */}
                   {frontImage ? (
-                    <TouchableOpacity activeOpacity={0.9} onPress={() => navigation.navigate('Preview', { imageUri: frontImage })}>
+                    <View>
                       <Image source={{ uri: frontImage }} style={styles.coverImage} />
-                    </TouchableOpacity>
+                    </View>
                   ) : (
                     <View style={[styles.coverPlaceholder, { backgroundColor: theme.border }]}>
                       <Ionicons name="storefront-outline" size={60} color={theme.textSecondary} />
@@ -970,8 +1022,13 @@ export default function ViewShopScreen({ route, navigation }) {
                     {ownerId && <Ionicons name="arrow-forward-circle" size={20} color={theme.textSecondary} />}
                   </TouchableOpacity>
 
-                  {/* Contact buttons */}
-                  <View style={styles.contactRow}>
+                  {/* Contact buttons — horizontally scrollable */}
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={styles.contactRowScroll}
+                    contentContainerStyle={styles.contactRowContent}
+                  >
                     {shop.phone && (
                       <TouchableOpacity style={[styles.contactBtn, { backgroundColor: theme.accent }]} onPress={handleCall}>
                         <Ionicons name="call-outline" size={20} color="#fff" />
@@ -979,24 +1036,24 @@ export default function ViewShopScreen({ route, navigation }) {
                       </TouchableOpacity>
                     )}
                     {shop.whatsapp && (
-                      <TouchableOpacity style={[styles.contactBtn, { backgroundColor: '#25d366' }]} onPress={handleWhatsApp}>
+                      <TouchableOpacity style={[styles.contactBtn, { backgroundColor: '#44ae86' }]} onPress={handleWhatsApp}>
                         <Ionicons name="logo-whatsapp" size={20} color="#fff" />
                         <Text style={styles.contactBtnText}>WhatsApp</Text>
                       </TouchableOpacity>
                     )}
                     {shop.email && (
-                      <TouchableOpacity style={[styles.contactBtn, { backgroundColor: '#34b7f1' }]} onPress={() => openLink(`mailto:${shop.email}`)}>
+                      <TouchableOpacity style={[styles.contactBtn, { backgroundColor: '#2e6d55' }]} onPress={() => openLink(`mailto:${shop.email}`)}>
                         <Ionicons name="mail-outline" size={20} color="#fff" />
                         <Text style={styles.contactBtnText}>Email</Text>
                       </TouchableOpacity>
                     )}
                     {shop.website && (
-                      <TouchableOpacity style={[styles.contactBtn, { backgroundColor: '#6c5ce7' }]} onPress={() => openLink(shop.website)}>
+                      <TouchableOpacity style={[styles.contactBtn, { backgroundColor: '#ae6d47' }]} onPress={() => openLink(shop.website)}>
                         <Ionicons name="globe-outline" size={20} color="#fff" />
                         <Text style={styles.contactBtnText}>Website</Text>
                       </TouchableOpacity>
                     )}
-                  </View>
+                  </ScrollView>
 
                   {/* Action row – horizontally scrollable */}
                   <ScrollView
@@ -1189,8 +1246,6 @@ export default function ViewShopScreen({ route, navigation }) {
 
       {/* Confirm modal */}
       {renderConfirmModal()}
-      {/* Status modal */}
-      {renderStatusModal()}
 
     </View>
   );
@@ -1288,7 +1343,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  // ----- Scrollable Content (hidden when expanded) -----
+  // ----- Scrollable Content -----
   coverImage: {
     width: '100%',
     height: 200,
@@ -1358,10 +1413,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: 2,
   },
-  contactRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+
+  // Contact row – horizontal scroll
+  contactRowScroll: {
     marginBottom: 12,
+  },
+  contactRowContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingRight: 16,
   },
   contactBtn: {
     flexDirection: 'row',
@@ -1370,13 +1430,13 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 20,
     marginRight: 8,
-    marginBottom: 6,
   },
   contactBtnText: {
     color: '#fff',
     marginLeft: 4,
     fontWeight: '600',
   },
+
   // Action row – horizontal scroll
   actionRowScroll: {
     marginBottom: 16,
@@ -1480,49 +1540,64 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 12,
   },
+
+  // ---- Product card: image fills card, overlay at bottom ----
   productGridItem: {
     width: (width - 40) / 2,
+    height: 200,
     borderRadius: 8,
     overflow: 'hidden',
-    padding: 8,
+    position: 'relative',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
   },
+  productGridTouchable: {
+    flex: 1,
+  },
   productGridImage: {
     width: '100%',
-    height: 150,
-    borderRadius: 8,
+    height: '100%',
     resizeMode: 'cover',
   },
   productImagePlaceholder: {
+    width: '100%',
+    height: '100%',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  productGridInfo: {
-    position: 'relative',
+  productOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(0,0,0,0.55)',
   },
-  productGridName: {
-    fontSize: 14,
-    fontWeight: '600',
-    marginTop: 4,
+  productOverlayName: {
+    color: '#fff3ed',
+    fontSize: 19,
+    fontWeight: '900',
   },
-  productGridPrice: {
-    fontSize: 15,
-    fontWeight: '700',
+  productOverlayPrice: {
+    color: '#fff',
+    fontSize: 19,
+    fontWeight: '900',
     marginTop: 2,
   },
   productDeleteBtn: {
     position: 'absolute',
-    top: 4,
-    right: 0,
+    top: 6,
+    right: 6,
     width: 28,
     height: 28,
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 10,
   },
 
   noProductsContainer: {

@@ -1,10 +1,23 @@
 import React, { createContext, useContext, useMemo, useRef, useState, useCallback, useEffect } from 'react';
-import { Animated, Dimensions, PanResponder, StyleSheet, Text, TouchableOpacity, TouchableWithoutFeedback, View, ActivityIndicator, Linking } from 'react-native';
+import {
+  Animated,
+  PanResponder,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
+  ActivityIndicator,
+  Linking,
+  Alert,
+  useWindowDimensions,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from './ThemeContext';
 
 const BottomSheetContext = createContext(null);
-const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 let globalBottomSheetHandler = null;
 
 export const setGlobalBottomSheetHandler = (handler) => {
@@ -19,32 +32,30 @@ export const showGlobalBottomSheet = (config) => {
   return false;
 };
 
-const typeHeights = {
-  logout: SCREEN_HEIGHT * 0.40,
-  login: SCREEN_HEIGHT * 0.45,
-  success: SCREEN_HEIGHT * 0.35,
-  error: SCREEN_HEIGHT * 0.45,
-  info: SCREEN_HEIGHT * 0.50,
-  loading: SCREEN_HEIGHT * 0.25,
-  social: SCREEN_HEIGHT * 0.40, // height for social media icons sheet
-};
+// Maximum heights per sheet type (used as a cap; the sheet shrinks to
+// fit its content when it's smaller than this).
+const getTypeMaxHeights = (screenHeight) => ({
+  logout: Math.min(screenHeight * 0.42, 340),
+  login: Math.min(screenHeight * 0.46, 380),
+  success: Math.min(screenHeight * 0.36, 300),
+  error: Math.min(screenHeight * 0.46, 380),
+  info: Math.min(screenHeight * 0.50, 420),
+  loading: Math.min(screenHeight * 0.22, 180),
+  social: Math.min(screenHeight * 0.38, 320),
+});
 
 const getTypeColors = (type, theme) => {
   switch (type) {
     case 'logout':
-      return { accent: '#d87428', secondary: '#d87428', icon: '#d87428' };
-    case 'login':
-      return { accent: '#47ae87', secondary: '#47ae87', icon: '#47ae87' };
-    case 'success':
-      return { accent: '#47ae87', secondary: '#47ae87', icon: '#47ae87' };
     case 'error':
       return { accent: '#d87428', secondary: '#d87428', icon: '#d87428' };
+    case 'login':
+    case 'success':
     case 'info':
+    case 'social':
       return { accent: '#47ae87', secondary: '#47ae87', icon: '#47ae87' };
     case 'loading':
       return { accent: theme.accent, secondary: theme.accent, icon: theme.accent };
-    case 'social':
-      return { accent: '#47ae87', secondary: '#47ae87', icon: '#47ae87' };
     default:
       return { accent: '#47ae87', secondary: '#47ae87', icon: '#d87428' };
   }
@@ -73,7 +84,6 @@ const getTypeAccent = (type) => {
     case 'login':
     case 'success':
     case 'info':
-      return '#47ae87';
     default:
       return '#47ae87';
   }
@@ -81,27 +91,41 @@ const getTypeAccent = (type) => {
 
 export const BottomSheet = ({ visible, config, onClose }) => {
   const { theme } = useTheme();
+  const insets = useSafeAreaInsets();
+  const { height: screenHeight } = useWindowDimensions();
+
   const resolvedConfig = { ...defaultConfig, ...config };
-  const { type, title, message, icon, buttonText, buttonAction, secondaryButtonText, secondaryAction, autoDismiss, onDismiss, loading, socialLinks } = resolvedConfig;
+  const {
+    type,
+    title,
+    message,
+    icon,
+    buttonText,
+    buttonAction,
+    secondaryButtonText,
+    secondaryAction,
+    autoDismiss,
+    onDismiss,
+    loading,
+    socialLinks,
+  } = resolvedConfig;
+
   const colors = useMemo(() => getTypeColors(type, theme), [type, theme]);
-  const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
+  const slideAnim = useRef(new Animated.Value(screenHeight)).current;
   const overlayOpacity = useRef(new Animated.Value(0)).current;
 
   const closeSheet = useCallback(() => {
     Animated.parallel([
       Animated.timing(overlayOpacity, { toValue: 0, duration: 180, useNativeDriver: true }),
-      Animated.timing(slideAnim, { toValue: SCREEN_HEIGHT, duration: 200, useNativeDriver: true }),
+      Animated.timing(slideAnim, { toValue: screenHeight, duration: 200, useNativeDriver: true }),
     ]).start(() => {
       onClose?.();
       onDismiss?.();
     });
-  }, [onClose, onDismiss, overlayOpacity, slideAnim]);
+  }, [onClose, onDismiss, overlayOpacity, slideAnim, screenHeight]);
 
   useEffect(() => {
-    if (!visible) {
-      return;
-    }
-
+    if (!visible) return;
     Animated.parallel([
       Animated.spring(overlayOpacity, { toValue: 1, useNativeDriver: true, speed: 12, bounciness: 4 }),
       Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, speed: 12, bounciness: 5 }),
@@ -110,9 +134,7 @@ export const BottomSheet = ({ visible, config, onClose }) => {
 
   useEffect(() => {
     if (!visible || !autoDismiss) return;
-    const timer = setTimeout(() => {
-      closeSheet();
-    }, autoDismiss);
+    const timer = setTimeout(() => closeSheet(), autoDismiss);
     return () => clearTimeout(timer);
   }, [visible, autoDismiss, closeSheet]);
 
@@ -124,12 +146,9 @@ export const BottomSheet = ({ visible, config, onClose }) => {
         if (!loading && gs.dy > 0) slideAnim.setValue(gs.dy);
       },
       onPanResponderRelease: (_, gs) => {
-        if (!loading) {
-          if (gs.dy > 70 || gs.vy > 0.5) closeSheet();
-          else {
-            Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, speed: 12 }).start();
-          }
-        }
+        if (loading) return;
+        if (gs.dy > 70 || gs.vy > 0.5) closeSheet();
+        else Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, speed: 12 }).start();
       },
     })
   ).current;
@@ -137,16 +156,12 @@ export const BottomSheet = ({ visible, config, onClose }) => {
   if (!visible) return null;
 
   const handlePrimaryPress = () => {
-    if (buttonAction) {
-      buttonAction();
-    }
+    buttonAction?.();
     closeSheet();
   };
 
   const handleSecondaryPress = () => {
-    if (secondaryAction) {
-      secondaryAction();
-    }
+    secondaryAction?.();
     closeSheet();
   };
 
@@ -156,13 +171,16 @@ export const BottomSheet = ({ visible, config, onClose }) => {
       if (supported) await Linking.openURL(url);
       else if (fallbackUrl) await Linking.openURL(fallbackUrl);
       else Alert.alert('Error', 'Unable to open link');
-    } catch (error) {
+    } catch {
       if (fallbackUrl) await Linking.openURL(fallbackUrl);
       else Alert.alert('Error', 'Unable to open link');
     }
   };
 
-  const sheetHeight = typeHeights[type] || SCREEN_HEIGHT * 0.3;
+  // Cap only — the sheet shrinks to fit its content when smaller.
+  const maxHeights = getTypeMaxHeights(screenHeight);
+  const maxHeight = maxHeights[type] || Math.min(screenHeight * 0.4, 340);
+  const bottomPad = Math.max(insets.bottom, 12);
 
   return (
     <>
@@ -174,95 +192,117 @@ export const BottomSheet = ({ visible, config, onClose }) => {
         style={[
           styles.bottomSheet,
           {
-            height: sheetHeight,
+            maxHeight,
             backgroundColor: theme.background,
             borderColor: theme.border,
             transform: [{ translateY: slideAnim }],
+            paddingBottom: bottomPad,
           },
         ]}
         {...panResponder.panHandlers}
       >
         <View style={styles.handle} />
 
-        {type === 'social' ? (
-          <View style={styles.socialContent}>
-            <Text style={[styles.title, { color: theme.text }]}>{title}</Text>
-            <View style={styles.socialIconsRow}>
-              {socialLinks.map((item, index) => (
-                <TouchableOpacity key={index} onPress={() => openSocialLink(item.url, item.fallbackUrl)}>
-                  <View style={[styles.socialIconCircleSmall, { backgroundColor: item.color }]}>
-                    <Ionicons name={item.icon} size={20} color="#fff" />
-                  </View>
-                </TouchableOpacity>
-              ))}
-            </View>
-            <TouchableOpacity style={styles.closeButton} onPress={closeSheet}>
-              <Text style={styles.closeButtonText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        ) : loading ? (
-          <View style={styles.content}>
-            <ActivityIndicator size="large" color={colors.accent} />
-          </View>
-        ) : (
-          <View style={styles.content}>
-            <View
-              style={[
-                styles.iconBadge,
-                {
-                  backgroundColor: type === 'error' ? '#fff1eb' : '#edf9f3',
-                  borderColor: `${getTypeAccent(type)}33`,
-                },
-              ]}
-            >
-              <Ionicons name={icon || 'information-circle-outline'} size={42} color={colors.icon} />
-            </View>
-
-            <Text style={[styles.title, { color: theme.text }]}>{title}</Text>
-
-            {message ? (
-              <Text style={[styles.message, { color: theme.textSecondary }]}>{message}</Text>
-            ) : null}
-
-            {(buttonText || secondaryButtonText) && (
-              <View style={styles.buttonsRow}>
-                {secondaryButtonText ? (
+        {/* Content is scrollable so long text never clips when the sheet
+            is capped by maxHeight. Small sheets shrink naturally. */}
+        <ScrollView
+          bounces={false}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={[
+            styles.scrollContent,
+            { paddingBottom: bottomPad > 0 ? 8 : 0 },
+          ]}
+        >
+          {type === 'social' ? (
+            <View style={styles.socialContent}>
+              <Text style={[styles.title, { color: theme.text }]} numberOfLines={2}>
+                {title}
+              </Text>
+              <View style={styles.socialIconsRow}>
+                {socialLinks.map((item, index) => (
                   <TouchableOpacity
-                    onPress={handleSecondaryPress}
-                    style={[
-                      styles.button,
-                      styles.secondaryButton,
-                      {
-                        backgroundColor: 'transparent',
-                        borderColor: colors.accent,
-                        borderWidth: 1,
-                        flex: 1,
-                      },
-                    ]}
+                    key={index}
+                    onPress={() => openSocialLink(item.url, item.fallbackUrl)}
                   >
-                    <Text style={[styles.secondaryButtonText, { color: colors.accent }]}>{secondaryButtonText}</Text>
+                    <View style={[styles.socialIconCircleSmall, { backgroundColor: item.color }]}>
+                      <Ionicons name={item.icon} size={18} color="#fff" />
+                    </View>
                   </TouchableOpacity>
-                ) : null}
-
-                {buttonText ? (
-                  <TouchableOpacity
-                    onPress={handlePrimaryPress}
-                    style={[
-                      styles.button,
-                      styles.primaryButton,
-                      {
-                        backgroundColor: colors.accent,
-                        flex: secondaryButtonText ? 1 : 1,
-                      },
-                    ]}
-                  >
-                    <Text style={styles.buttonText}>{buttonText}</Text>
-                  </TouchableOpacity>
-                ) : null}
+                ))}
               </View>
-            )}
-          </View>
-        )}
+              <TouchableOpacity style={styles.closeButton} onPress={closeSheet}>
+                <Text style={styles.closeButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          ) : loading ? (
+            <View style={styles.content}>
+              <ActivityIndicator size="large" color={colors.accent} />
+            </View>
+          ) : (
+            <View style={styles.content}>
+              <View
+                style={[
+                  styles.iconBadge,
+                  {
+                    backgroundColor: type === 'error' ? '#fff1eb' : '#edf9f3',
+                    borderColor: `${getTypeAccent(type)}33`,
+                  },
+                ]}
+              >
+                <Ionicons name={icon || 'information-circle-outline'} size={32} color={colors.icon} />
+              </View>
+
+              <Text style={[styles.title, { color: theme.text }]} numberOfLines={3}>
+                {title}
+              </Text>
+
+              {message ? (
+                <Text style={[styles.message, { color: theme.textSecondary }]} numberOfLines={6}>
+                  {message}
+                </Text>
+              ) : null}
+
+              {(buttonText || secondaryButtonText) && (
+                <View style={styles.buttonsRow}>
+                  {secondaryButtonText ? (
+                    <TouchableOpacity
+                      onPress={handleSecondaryPress}
+                      style={[
+                        styles.button,
+                        styles.secondaryButton,
+                        {
+                          backgroundColor: 'transparent',
+                          borderColor: colors.accent,
+                          borderWidth: 1,
+                          flex: 1,
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.secondaryButtonText, { color: colors.accent }]} numberOfLines={1}>
+                        {secondaryButtonText}
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+
+                  {buttonText ? (
+                    <TouchableOpacity
+                      onPress={handlePrimaryPress}
+                      style={[
+                        styles.button,
+                        styles.primaryButton,
+                        { backgroundColor: colors.accent, flex: 1 },
+                      ]}
+                    >
+                      <Text style={styles.buttonText} numberOfLines={1}>
+                        {buttonText}
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+              )}
+            </View>
+          )}
+        </ScrollView>
       </Animated.View>
     </>
   );
@@ -302,9 +342,7 @@ export const BottomSheetProvider = ({ children }) => {
 
 export const useBottomSheet = () => {
   const context = useContext(BottomSheetContext);
-  if (!context) {
-    throw new Error('useBottomSheet must be used inside BottomSheetProvider');
-  }
+  if (!context) throw new Error('useBottomSheet must be used inside BottomSheetProvider');
   return context;
 };
 
@@ -318,66 +356,71 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom:0,
+    bottom: 0,
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     borderTopWidth: 1,
-    paddingHorizontal: 0,
-    paddingTop: 0,
-    paddingBottom: 0,
+    overflow: 'hidden',
     zIndex: 21,
+    // no fixed height — height is driven by content + maxHeight
+  },
+  scrollContent: {
+    flexGrow: 1,
   },
   handle: {
-    width: 44,
+    width: 40,
     height: 4,
     borderRadius: 999,
     backgroundColor: '#b4b4b4',
     alignSelf: 'center',
-    marginBottom: 18,
+    marginTop: 8,
+    marginBottom: 4,
   },
   content: {
-    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 18,
-    paddingVertical: 24,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 12,
   },
   iconBadge: {
-    width: 82,
-    height: 82,
-    borderRadius: 41,
+    width: 36,
+    height: 36,
+    borderRadius: 36,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    marginBottom: 16,
+    marginBottom: 10,
   },
   title: {
-    fontSize: 24,
+    fontSize: 17,
     fontWeight: '700',
     textAlign: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
+    paddingHorizontal: 4,
   },
   message: {
-    fontSize: 16,
-    lineHeight: 24,
+    fontSize: 13,
+    lineHeight: 18,
     textAlign: 'center',
-    marginBottom: 22,
-    paddingHorizontal: 10,
+    marginBottom: 14,
+    paddingHorizontal: 6,
   },
   buttonsRow: {
     width: '100%',
     flexDirection: 'row',
     justifyContent: 'space-between',
-    gap: 12,
-    paddingHorizontal: 4,
+    gap: 10,
+    paddingHorizontal: 2,
+    marginTop: 2,
   },
   button: {
     flex: 1,
-    borderRadius: 14,
-    paddingVertical: 14,
+    borderRadius: 12,
+    paddingVertical: 11,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 50,
+    minHeight: 44,
   },
   primaryButton: {
     shadowColor: '#000',
@@ -392,41 +435,43 @@ const styles = StyleSheet.create({
   buttonText: {
     color: '#fff',
     fontWeight: '700',
-    fontSize: 16,
+    fontSize: 14,
   },
   secondaryButtonText: {
     fontWeight: '700',
-    fontSize: 16,
+    fontSize: 14,
   },
-  // Social sheet styles
+  // Social sheet
   socialContent: {
-    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 10,
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 12,
   },
   socialIconsRow: {
     flexDirection: 'row',
     justifyContent: 'center',
-    gap: 16,
-    marginBottom: 24,
+    flexWrap: 'wrap',
+    gap: 12,
+    marginBottom: 16,
   },
   socialIconCircleSmall: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
   },
   closeButton: {
     backgroundColor: '#d87428',
-    borderRadius: 25,
-    paddingVertical: 12,
-    paddingHorizontal: 40,
+    borderRadius: 22,
+    paddingVertical: 10,
+    paddingHorizontal: 34,
   },
   closeButtonText: {
     color: '#fff',
     fontWeight: '700',
-    fontSize: 16,
+    fontSize: 14,
   },
 });

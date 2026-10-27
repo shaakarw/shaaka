@@ -8,7 +8,6 @@ import {
   TextInput,
   TouchableOpacity,
   Image,
-  Alert,
   ActivityIndicator,
   FlatList,
   Modal,
@@ -33,6 +32,7 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import ArrowUploadLoader from '../components/ArrowUploadLoader';
 import { normalizeRwandaPhone, isValidRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
+import { compressImageForUpload } from '../utils/imageCompressor';
 
 const { width, height } = Dimensions.get('window');
 const MAP_HEIGHT = height * 0.35;
@@ -295,6 +295,15 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
   const { refreshUser } = useAuth();
   const adminLimits = useUserLimits();
   const t = translations[language] || translations.English;
+  const showMapMessage = (title, message, type = 'info', buttonAction) => {
+    showBottomSheet({
+      type,
+      title,
+      message,
+      buttonText: 'OK',
+      buttonAction,
+    });
+  };
 
   // ----- Step & Form State -----
   const [step, setStep] = useState(1);
@@ -659,7 +668,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
         setAddress({ country: '', province: '', district: '', sector: '', cell: '', village: '', street: '', full: '' });
       }
     } catch (error) {
-      Alert.alert(t.error, t.addressError);
+      showMapMessage(t.error, t.addressError, 'error');
     } finally {
       setAddressLoading(false);
     }
@@ -686,7 +695,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert(t.permissionDenied, t.locationAccess);
+        showMapMessage(t.permissionDenied, t.locationAccess, 'error');
         setIsLocating(false);
         return;
       }
@@ -700,7 +709,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
         `);
       }
     } catch (error) {
-      Alert.alert(t.error, t.locationError);
+      showMapMessage(t.error, t.locationError, 'error');
     } finally {
       setIsLocating(false);
     }
@@ -752,14 +761,14 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
   // ----- Image pickers -----
   const pickStreetImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') { Alert.alert(t.permissionDenied, t.imagePermission); return; }
+    if (status !== 'granted') { showMapMessage(t.permissionDenied, t.imagePermission, 'error'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8, allowsEditing: true });
     if (!result.canceled) setStreetImage(result.assets[0].uri);
   };
 
   const pickProductImages = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') { Alert.alert(t.permissionDenied, t.imagePermission); return; }
+    if (status !== 'granted') { showMapMessage(t.permissionDenied, t.imagePermission, 'error'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsMultipleSelection: true, quality: 0.8 });
     if (!result.canceled && result.assets.length > 0) {
       const newImages = result.assets.map(asset => ({ uri: asset.uri, type: 'image/jpeg', name: `product_${Date.now()}_${Math.random()}.jpg` }));
@@ -776,7 +785,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
   // ----- Product CRUD -----
   const addProduct = () => {
     if (!currentProduct.name.trim() || !currentProduct.price || currentProduct.images.length === 0) {
-      Alert.alert(t.missing, t.productMissing); return;
+      showMapMessage(t.missing, t.productMissing, 'error'); return;
     }
     if (editingProductIndex !== null) {
       const updated = [...products];
@@ -806,14 +815,14 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
 
   // ----- Validation -----
   const validateStep = () => {
-    if (step === 1 && !address.full) { Alert.alert(t.missing, t.locationMissing); return false; }
-    if (step === 2 && !selectedCategory) { Alert.alert(t.missing, t.categoryMissing); return false; }
+    if (step === 1 && !address.full) { showMapMessage(t.missing, t.locationMissing, 'error'); return false; }
+    if (step === 2 && !selectedCategory) { showMapMessage(t.missing, t.categoryMissing, 'error'); return false; }
     if (step === 3) {
-      if (!form.name.trim()) { Alert.alert(t.missing, t.nameMissing); return false; }
-      if (form.phone && !validatePhone(form.phone)) { Alert.alert(t.error, t.phoneError); return false; }
-      if (form.whatsapp && !validatePhone(form.whatsapp)) { Alert.alert(t.error, t.phoneError); return false; }
+      if (!form.name.trim()) { showMapMessage(t.missing, t.nameMissing, 'error'); return false; }
+      if (form.phone && !validatePhone(form.phone)) { showMapMessage(t.error, t.phoneError, 'error'); return false; }
+      if (form.whatsapp && !validatePhone(form.whatsapp)) { showMapMessage(t.error, t.phoneError, 'error'); return false; }
     }
-    if (step === 4 && !streetImage) { Alert.alert(t.missing, t.imageMissing); return false; }
+    if (step === 4 && !streetImage) { showMapMessage(t.missing, t.imageMissing, 'error'); return false; }
     return true;
   };
 
@@ -824,7 +833,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
     setProgress(0);
     try {
       const token = await AsyncStorage.getItem('userToken');
-      if (!token) { Alert.alert(t.error, t.loginRequired); setPublishing(false); return; }
+      if (!token) { showMapMessage(t.error, t.loginRequired, 'error'); setPublishing(false); return; }
       
       // One-type-only check: verify user does not already have a shopping mall shop
       const mallShopsRes = await axios.get(`${BASE_URL}/api/mall-shops/mine`, {
@@ -836,7 +845,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
         return ownerId === currentUser?._id;
       });
       if (userMallShops.length > 0) {
-        Alert.alert(t.limitReached, 'You already have a Shopping Mall Shop. You cannot add a Shop/Place.');
+        showMapMessage(t.limitReached, 'You already have a Shopping Mall Shop. You cannot add a Shop/Place.', 'info');
         setPublishing(false);
         return;
       }
@@ -844,12 +853,13 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
       const userPlacesResponse = await axios.get(`${BASE_URL}/api/places`, { headers: { Authorization: `Bearer ${token}` } });
       const allPlaces = userPlacesResponse.data.places || [];
       const userPlaces = allPlaces.filter(p => p.userId === currentUser?._id);
-      if (userPlaces.length > 0) { Alert.alert(t.limitReached, t.limitMessage); setPublishing(false); return; }
+      if (userPlaces.length > 0) { showMapMessage(t.limitReached, t.limitMessage, 'info'); setPublishing(false); return; }
 
       let streetImageUrl = null;
       if (streetImage) {
+        const compressedImage = await compressImageForUpload(streetImage, 'street.jpg');
         const formData = new FormData();
-        formData.append('image', { uri: streetImage, type: 'image/jpeg', name: 'street.jpg' });
+        formData.append('image', compressedImage);
         const uploadRes = await axios.post(`${BASE_URL}/api/places/upload`, formData, {
           headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
         });
@@ -860,8 +870,9 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
       if (!isShoppingMall && products.length > 0) {
         uploadedProducts = await Promise.all(products.map(async (product) => {
           const productImagesUrls = await Promise.all(product.images.map(async (img) => {
+            const compressedImage = await compressImageForUpload(img.uri, img.name || 'product.jpg');
             const formData = new FormData();
-            formData.append('image', { uri: img.uri, type: 'image/jpeg', name: 'product.jpg' });
+            formData.append('image', compressedImage);
             const res = await axios.post(`${BASE_URL}/api/places/upload`, formData, {
               headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
             });
@@ -892,13 +903,12 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
 
       const response = await axios.post(`${BASE_URL}/api/places`, payload, { headers: { Authorization: `Bearer ${token}` } });
       if (response.data.success) {
-        Alert.alert(t.success, t.placePublished);
-        navigation.navigate('Locate');
+        showMapMessage(t.success, t.placePublished, 'success', () => navigation.navigate('Locate'));
       } else {
         throw new Error(response.data.message || 'Publish failed');
       }
     } catch (error) {
-      Alert.alert(t.error, error.response?.data?.message || t.publishFailed);
+      showMapMessage(t.error, error.response?.data?.message || error.message || t.publishFailed, 'error');
     } finally {
       setPublishing(false);
       setProgress(0);

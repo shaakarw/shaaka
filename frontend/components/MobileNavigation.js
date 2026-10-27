@@ -14,7 +14,10 @@ const MobileNavigation = ({ visible = false }) => {
       pointerEvents="none"
       accessibilityElementsHidden
       importantForAccessibility="no"
-      style={[styles.container, { height: insets.bottom, backgroundColor: theme.background }]}
+      style={[
+        styles.container,
+        { height: insets.bottom, backgroundColor: theme.background },
+      ]}
     />
   );
 };

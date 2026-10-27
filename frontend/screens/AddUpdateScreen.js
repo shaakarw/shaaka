@@ -98,6 +98,12 @@ const translations = {
     deleteSelected: 'Delete Selected',
     selectedCount: '{count} selected',
     notesCount: '{count} notes',
+    appShareLink: 'App Share Link',
+    appShareLinkDescription: 'This link is included when users share posts, places, or shops.',
+    shareLinkPlaceholder: 'https://example.com/app',
+    saveShareLink: 'Save Share Link',
+    shareLinkSaved: 'Share link saved successfully',
+    shareLinkSaveFailed: 'Unable to save share link',
   },
   Kinyarwanda: {
     myUpdates: 'Amakuru yanjye',
@@ -134,6 +140,12 @@ const translations = {
     deleteSelected: 'Siba ibyatoranijwe',
     selectedCount: '{count} byatoranijwe',
     notesCount: '{count} amakuru',
+    appShareLink: 'Link yo gusangiza porogaramu',
+    appShareLinkDescription: 'Iyi link ikoreshwa abakoresha basangiza inyandiko, ahantu cyangwa amaduka.',
+    shareLinkPlaceholder: 'https://example.com/app',
+    saveShareLink: 'Bika link yo gusangiza',
+    shareLinkSaved: 'Link yo gusangiza yabitswe neza',
+    shareLinkSaveFailed: 'Ntibishobotse kubika link yo gusangiza',
   },
 };
 
@@ -257,14 +269,14 @@ const AddUpdateScreen = ({ navigation, language }) => {
       if (response.data.success) {
         setShareLink(response.data.shareLink || '');
         setStatusTitle(t.success);
-        setStatusMessage('Share link saved successfully');
+        setStatusMessage(t.shareLinkSaved);
         setStatusModalVisible(true);
       } else {
-        Alert.alert(t.error, response.data.message || 'Unable to save share link');
+        Alert.alert(t.error, response.data.message || t.shareLinkSaveFailed);
       }
     } catch (error) {
       console.error('Save share link error:', error.response?.data || error.message);
-      Alert.alert(t.error, 'Unable to save share link');
+      Alert.alert(t.error, t.shareLinkSaveFailed);
     } finally {
       setShareLinkLoading(false);
     }
@@ -525,6 +537,52 @@ const AddUpdateScreen = ({ navigation, language }) => {
     );
   };
 
+  const renderShareLinkSection = () => (
+    <View style={[styles.shareLinkSection, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
+      <View style={styles.shareLinkHeader}>
+        <LinearGradient colors={PRIMARY_GRADIENT} style={styles.shareLinkIconBadge}>
+          <Ionicons name="share-social-outline" size={18} color="#fff" />
+        </LinearGradient>
+        <Text style={[styles.shareLinkTitle, { color: theme.text }]}>{t.appShareLink}</Text>
+      </View>
+      <Text style={[styles.shareLinkDescription, { color: theme.textSecondary }]}>
+        {t.appShareLinkDescription}
+      </Text>
+      <TextInput
+        style={[
+          styles.shareLinkInput,
+          { color: theme.text, backgroundColor: theme.background, borderColor: theme.border },
+        ]}
+        placeholder={t.shareLinkPlaceholder}
+        placeholderTextColor={theme.textSecondary}
+        value={shareLink}
+        onChangeText={setShareLink}
+        autoCapitalize="none"
+        autoCorrect={false}
+        keyboardType="url"
+        returnKeyType="done"
+      />
+      <TouchableOpacity
+        style={styles.fullGradientWrapper}
+        onPress={saveShareLink}
+        disabled={shareLinkLoading}
+      >
+        <LinearGradient
+          colors={PRIMARY_GRADIENT}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={styles.fullGradientButton}
+        >
+          {shareLinkLoading ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.gradientButtonText}>{t.saveShareLink}</Text>
+          )}
+        </LinearGradient>
+      </TouchableOpacity>
+    </View>
+  );
+
   // ---------- Status modal (themed) ----------
   const renderStatusModal = () => (
     <Modal
@@ -685,34 +743,6 @@ const AddUpdateScreen = ({ navigation, language }) => {
               returnKeyType="done"
             />
 
-            {isAdmin && (
-              <View style={{ marginTop: 12 }}>
-                <Text style={[styles.formBadgeLabel, { color: theme.textSecondary, marginBottom: 8 }]}>Admin Share Link</Text>
-                <TextInput
-                  style={[
-                    styles.formTitleInput,
-                    { color: theme.text, borderBottomColor: theme.border },
-                  ]}
-                  placeholder="https://example.com/app"
-                  placeholderTextColor={theme.textSecondary}
-                  value={shareLink}
-                  onChangeText={setShareLink}
-                  autoCapitalize="none"
-                  keyboardType="url"
-                  returnKeyType="done"
-                />
-                <TouchableOpacity style={styles.gradientButtonWrapper} onPress={saveShareLink} disabled={shareLinkLoading}>
-                  <LinearGradient colors={PRIMARY_GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.gradientButton}>
-                    {shareLinkLoading ? (
-                      <ActivityIndicator color="#fff" />
-                    ) : (
-                      <Text style={styles.gradientButtonText}>Save Share Link</Text>
-                    )}
-                  </LinearGradient>
-                </TouchableOpacity>
-              </View>
-            )}
-
             <View style={styles.confirmButtonsRow}>
               <TouchableOpacity
                 style={[styles.confirmButton, styles.cancelButton, { borderColor: theme.border }]}
@@ -789,6 +819,7 @@ const AddUpdateScreen = ({ navigation, language }) => {
         renderItem={renderNoteCard}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
+        ListHeaderComponent={isAdmin ? renderShareLinkSection : null}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={fetchNotes} tintColor={theme.accent} />}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
@@ -869,6 +900,35 @@ const styles = StyleSheet.create({
 
   // ----- List -----
   listContent: { padding: 16, paddingTop: 4, paddingBottom: 90 },
+  shareLinkSection: {
+    padding: 16,
+    marginBottom: 16,
+    borderRadius: 18,
+    borderWidth: 1,
+  },
+  shareLinkHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  shareLinkIconBadge: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+  },
+  shareLinkTitle: { fontSize: 16, fontWeight: '800' },
+  shareLinkDescription: { fontSize: 13, lineHeight: 18, marginBottom: 12 },
+  shareLinkInput: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    fontSize: 15,
+    marginBottom: 12,
+  },
 
   // ----- Stacked gradient note card (grayscale) -----
   stackWrapper: { marginBottom: 24, paddingTop: 16 },

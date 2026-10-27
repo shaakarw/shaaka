@@ -26,15 +26,18 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from '../utils/expoAvCompat';
 import * as ImagePicker from 'expo-image-picker';
+import * as VideoThumbnails from 'expo-video-thumbnails';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { useFocusEffect } from '@react-navigation/native';
 import { io } from 'socket.io-client';
 import { getRemainingUsage } from '../utils/subscriptionHelpers';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import { getPostCoverUri } from '../components/PostCoverImage';
 import { offlineDatabase } from '../services/offlineDatabase';
 import { networkStatus } from '../services/networkStatus';
 import { syncManager } from '../services/syncManager';
+import { logDebug } from '../utils/debugLogger';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const CHAT_POLICY = {
@@ -230,6 +233,187 @@ const resolveMessageImages = (item) => {
   return [];
 };
 
+// ---------- Helper: prefetch reply-post cover images (requirement 4) ----------
+const prefetchReplyPostCovers = async (messagesToCheck = []) => {
+  const coverUris = Array.from(new Set(
+    messagesToCheck
+      .map(message => resolveReplyCoverUri(message?.replyPost || message?.replyPostContext))
+      .filter(uri => typeof uri === 'string' && /^https?:\/\//i.test(uri))
+  ));
+
+  await Promise.all(coverUris.map(async uri => {
+    try {
+      await Image.prefetch(uri);
+    } catch (error) {
+      console.warn('Could not prefetch chat reply cover:', error.message);
+    }
+  }));
+};
+
+// ---------- Helper: pick a URI out of string / {uri|url|src} / array ----------
+const pickImageUri = (value) => {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const u = pickImageUri(item);
+      if (u) return u;
+    }
+    return null;
+  }
+  if (typeof value === 'object') {
+    for (const c of [value.uri, value.url, value.src, value.path]) {
+      if (typeof c === 'string' && c.trim()) return c.trim();
+    }
+  }
+  return null;
+};
+
+// ---------- Helper: Cloudinary video poster cover ----------
+const getCloudinaryVideoCover = (videoUrl) => {
+  if (!videoUrl || typeof videoUrl !== 'string') return null;
+  if (!videoUrl.includes('res.cloudinary.com')) return null;
+  const [base] = videoUrl.split('?');
+  const marker = '/video/upload/';
+  if (!base.includes(marker)) return null;
+  return base.replace(marker, `${marker}so_1/`).replace(/\.[^/.]+$/, '.jpg');
+};
+
+// ---------- Helper: extract a video URL from a post ----------
+const getReplyVideoUrl = (post) => {
+  if (!post) return '';
+  const candidates = [post.videoUrl, post.video, post.mediaUrl];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c.trim();
+    if (c && typeof c === 'object') {
+      for (const k of [c.url, c.src, c.uri]) {
+        if (typeof k === 'string' && k.trim()) return k.trim();
+      }
+    }
+  }
+  return '';
+};
+
+// ---------- Helper: resolve the cover URI for a replied post ----------
+// Combines getPostCoverUri (video / shop / place / post) with defensive
+// fallbacks for post objects coming from BuyPostScreen (any field name /
+// value shape), and finally falls back to a Cloudinary video poster.
+const resolveReplyCoverUri = (post) => {
+  if (!post) return null;
+
+  // 1) Shared resolver
+  const shared = getPostCoverUri(post);
+  if (shared) return shared;
+
+  // 2) Defensive fallbacks — BuyPostScreen may pass one of these
+  const candidates = [
+    post.image,
+    post.imageUrl,
+    post.postImage,
+    post.postImageUrl,
+    post.cover,
+    post.coverImage,
+    post.coverImageUrl,
+    post.thumbnail,
+    post.thumbnailUrl,
+    post.images,
+    post.imageUrls,
+    post.photos,
+    post.houseImages,
+    post.videoThumbnail,
+    post.video?.thumbnail,
+    post.video?.poster,
+    post.streetImage,
+    post.street,
+  ];
+  for (const c of candidates) {
+    const u = pickImageUri(c);
+    if (u) return u;
+  }
+
+  // 3) Last resort: Cloudinary video poster
+  return getCloudinaryVideoCover(getReplyVideoUrl(post));
+};
+
+// ---------- ReplyCoverImage ----------
+// Self-contained: dark placeholder with the right icon until the image is
+// actually displayed; retries failed loads; falls back to a generated video
+// thumbnail when only a videoUrl is available.
+const ReplyPostImage = ({ uri, videoUrl, style, iconName = 'image-outline', iconSize = 20 }) => {
+  const [generatedCover, setGeneratedCover] = useState(null);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [hasError, setHasError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const retryTimerRef = useRef(null);
+
+  // Generate a video thumbnail when there is a video but no static URI
+  useEffect(() => {
+    setGeneratedCover(null);
+    if (!videoUrl || uri) return undefined;
+
+    let active = true;
+    VideoThumbnails.getThumbnailAsync(videoUrl, { time: 1000, quality: 0.7 })
+      .then(({ uri: thumbUri }) => {
+        if (active && thumbUri) setGeneratedCover(thumbUri);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [uri, videoUrl]);
+
+  const cover = uri || generatedCover;
+
+  // Reset load state whenever the actual cover changes
+  useEffect(() => {
+    setIsLoaded(false);
+    setHasError(false);
+    setAttempt(0);
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, [cover]);
+
+  useEffect(() => () => {
+    if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+  }, []);
+
+  const handleError = () => {
+    if (retryTimerRef.current) return;
+    setHasError(true);
+    retryTimerRef.current = setTimeout(() => {
+      retryTimerRef.current = null;
+      setHasError(false);
+      setIsLoaded(false);
+      setAttempt(a => a + 1);
+    }, 1500);
+  };
+
+  const showPlaceholder = !cover || !isLoaded || hasError;
+
+  return (
+    <View style={style}>
+      {cover && (
+        <Image
+          key={`${cover}_${attempt}`}
+          source={{ uri: cover }}
+          style={StyleSheet.absoluteFillObject}
+          resizeMode="cover"
+          onLoad={() => setIsLoaded(true)}
+          onError={handleError}
+        />
+      )}
+      {showPlaceholder && (
+        <View style={[StyleSheet.absoluteFillObject, styles.chatImageFallback]}>
+          <Ionicons name={iconName} size={iconSize} color="#9aa0a6" />
+        </View>
+      )}
+    </View>
+  );
+};
+
 const ChatImage = ({ uri, style }) => {
   const [hasError, setHasError] = useState(false);
 
@@ -314,7 +498,7 @@ const TypingIndicator = ({ theme, avatar }) => {
 // ============================================================
 // Stacked card deck gallery (ProductHeroDeck style)
 // ============================================================
-const ChatDeckCard = memo(({ uri, index, position, theme, onActivate, onPressImage, onLongPressImage }) => {
+const ChatDeckCard = memo(({ uri, index, position, theme, onActivate, onLongPressImage }) => {
   const positionValue = useRef(new Animated.Value(position)).current;
 
   useEffect(() => {
@@ -374,7 +558,7 @@ const ChatDeckCard = memo(({ uri, index, position, theme, onActivate, onPressIma
     >
       <TouchableOpacity
         activeOpacity={1}
-        onPress={position === 0 ? onPressImage : () => onActivate(index)}
+        onPress={position === 0 ? undefined : () => onActivate(index)}
         onLongPress={onLongPressImage}
         style={[
           styles.chatDeckCardTouch,
@@ -397,7 +581,7 @@ const ChatDeckCard = memo(({ uri, index, position, theme, onActivate, onPressIma
   );
 });
 
-const ChatImageDeck = memo(({ images, theme, messageId, onImagePress, onLongPressImage }) => {
+const ChatImageDeck = memo(({ images, theme, messageId, onLongPressImage }) => {
   const [activeIndex, setActiveIndex] = useState(0);
   const [restartKey, setRestartKey] = useState(0);
   const progress = useRef(new Animated.Value(0)).current;
@@ -476,9 +660,6 @@ const ChatImageDeck = memo(({ images, theme, messageId, onImagePress, onLongPres
             theme={theme}
             onActivate={selectImage}
             onLongPressImage={onLongPressImage}
-            onPressImage={() =>
-              onImagePress && onImagePress(images[currentIndex], currentIndex, images)
-            }
           />
         ))}
       </View>
@@ -604,37 +785,62 @@ const removeCachedMessage = async messageId => {
   }
 };
 
-// ---------- ReplyPostCard Component ----------
-const ReplyPostCard = ({ post, theme, onPress }) => {
+// ============================================================
+// ReplyPostCard — resolves the correct image (video / shop /
+// place / post from BuyPostScreen) with a dark placeholder,
+// retry-on-fail, and sender/receiver-coloured text/details.
+// ============================================================
+const ReplyPostCard = ({ post, color, imageRadiusStyle, onPress }) => {
   if (!post) return null;
-  const imageUri = post.image || post.houseImages?.[0] || post.postImage || null;
-  const title = post.title || post.productName || post.postTitle || 'Product';
+  const title =
+    post.title ||
+    post.productName ||
+    post.postTitle ||
+    post.name ||
+    post.shopName ||
+    post.placeName ||
+    'Product';
   const priceText = post.amount || (post.price != null ? `${post.price} RWF` : '');
+  const isShop = post.contextType === 'shop' || !!post.shopId || !!post.mallShopId;
+  const isPlace = post.contextType === 'place' || !!post.placeId;
+  const isVideo = !!getReplyVideoUrl(post) || post.type === 'video';
+
+  const placeholderIcon = isShop
+    ? 'storefront-outline'
+    : isPlace
+    ? 'location-outline'
+    : isVideo
+    ? 'videocam-outline'
+    : 'image-outline';
+
+  const resolvedColor = color || '#a9a9a9';
+  const coverUri = resolveReplyCoverUri(post);
+  const videoUrl = getReplyVideoUrl(post);
 
   return (
     <TouchableOpacity
-      style={[styles.replyPostCard, { borderColor: theme.border, backgroundColor: theme.accent }]}
+      style={styles.replyPostCard}
       onPress={onPress}
       activeOpacity={0.7}
     >
-      {imageUri ? (
-        <ChatImage uri={imageUri} style={styles.replyPostThumb} />
-      ) : (
-        <View style={[styles.replyPostThumb, styles.replyPostThumbFallback]}>
-          <Ionicons name="image-outline" size={20} color="#fff" />
-        </View>
-      )}
+      <ReplyPostImage
+        uri={coverUri}
+        videoUrl={videoUrl}
+        style={[styles.replyPostThumb, imageRadiusStyle]}
+        iconName={placeholderIcon}
+        iconSize={20}
+      />
       <View style={styles.replyPostInfo}>
-        <Text style={[styles.replyPostTitle, { color: '#fff' }]} numberOfLines={1}>
+        <Text style={[styles.replyPostTitle, { color: resolvedColor }]} numberOfLines={1}>
           {title}
         </Text>
         {priceText ? (
-          <Text style={[styles.replyPostPrice, { color: '#fff' }]} numberOfLines={1}>
+          <Text style={[styles.replyPostPrice, { color: resolvedColor }]} numberOfLines={1}>
             {priceText}
           </Text>
         ) : null}
       </View>
-      <Ionicons name="chevron-forward" size={16} color="#fff" />
+      <Ionicons name="chevron-forward" size={16} color={resolvedColor} />
     </TouchableOpacity>
   );
 };
@@ -652,11 +858,9 @@ const MessageItem = memo(({
   playAudio,
   formatDuration,
   t,
-  onImagePress,
   navigation,
   sellerId,
   sellerName,
-  messageIndex,
   onReplyPostPress,
 }) => {
   const isMe = isOwnMessage(item);
@@ -672,6 +876,15 @@ const MessageItem = memo(({
 
   const bubbleBackground = 'transparent';
   const borderBottomColor = isMe ? '#47ae87' : '#a9a9a9';
+
+  // Sender/receiver border-radius policy
+  const replyMediaRadiusStyle = {
+    borderTopLeftRadius: 6,
+    borderTopRightRadius: 6,
+    borderBottomLeftRadius: isMe ? 6 : 0,
+    borderBottomRightRadius: isMe ? 0 : 6,
+  };
+
   const textColor = theme.text || '#000000';
   const subTextColor = 'rgba(0,0,0,0.5)';
 
@@ -710,7 +923,6 @@ const MessageItem = memo(({
   const singleTapTimerRef = useRef(null);
 
   const handlePress = () => {
-    // For multi-image messages, the carousel handles its own taps.
     if (hasMultipleImages) return;
 
     const now = Date.now();
@@ -728,9 +940,7 @@ const MessageItem = memo(({
         singleTapTimerRef.current = null;
       }
       singleTapTimerRef.current = setTimeout(() => {
-        if (item.imageUrl) {
-          onImagePress && onImagePress(item.imageUrl, messageIndex);
-        } else if (url) {
+        if (url) {
           Linking.openURL(url);
         }
         singleTapTimerRef.current = null;
@@ -804,7 +1014,8 @@ const MessageItem = memo(({
           {hasReplyPost && (
             <ReplyPostCard
               post={replyPostContext}
-              theme={theme}
+              color={borderBottomColor}
+              imageRadiusStyle={replyMediaRadiusStyle}
               onPress={() => onReplyPostPress && onReplyPostPress(replyPostContext)}
             />
           )}
@@ -825,19 +1036,17 @@ const MessageItem = memo(({
                 borderBottomColor: borderBottomColor,
                 borderBottomLeftRadius: 18,
                 borderBottomRightRadius: 18,
-                borderTopLeftRadius: isReplied && !isMe ? 0 : 18,
-                borderTopRightRadius: isReplied && isMe ? 0 : 18,
+                borderTopLeftRadius: (isReplied || hasReplyPost) && !isMe ? 0 : 18,
+                borderTopRightRadius: (isReplied || hasReplyPost) && isMe ? 0 : 18,
               },
             ]}
           >
-            {/* ----- MULTI-IMAGE: stacked card deck ----- */}
             {hasMultipleImages ? (
               <View style={styles.multiImageWrapper}>
                 <ChatImageDeck
                   images={messageImages}
                   theme={theme}
                   messageId={item._id}
-                  onImagePress={onImagePress}
                   onLongPressImage={() => onDoubleTap(item)}
                 />
                 {item.text ? (
@@ -847,7 +1056,6 @@ const MessageItem = memo(({
                 ) : null}
               </View>
             ) : item.imageUrl ? (
-              /* ----- SINGLE IMAGE: normal design ----- */
               <View>
                 <ChatImage uri={item.imageUrl} style={styles.messageImage} />
                 {item.text ? (
@@ -1026,6 +1234,12 @@ const ChatScreen = ({ route, navigation, language }) => {
   const [isOnline, setIsOnline] = useState(false);
   const [sellerAvatarUrl, setSellerAvatarUrl] = useState(sellerAvatar || null);
   const [replyPost, setReplyPost] = useState(null);
+  const clearReplyPost = useCallback(() => {
+    setReplyPost(null);
+    if (route.params?.replyPost) {
+      navigation.setParams({ replyPost: undefined });
+    }
+  }, [navigation, route.params?.replyPost]);
 
   const socketRef = useRef(null);
   const messagesFetchRef = useRef(false);
@@ -1073,10 +1287,37 @@ const ChatScreen = ({ route, navigation, language }) => {
   }, [postId, currentUser?._id, currentUser?.phone, sellerPhone]);
 
   useEffect(() => {
-    if (initialReplyPost) {
-      setReplyPost(initialReplyPost);
+    if (!initialReplyPost) return;
+    if (loading) return;
+
+    const rp = initialReplyPost;
+    const rpId = rp._id || rp.postId || rp.contextId || rp.shopId || rp.mallShopId;
+    const me = currentUser?._id || currentUser?.phone;
+
+    if (rpId && me) {
+      const alreadySent = messages.some((m) => {
+        if (!m.replyPost) return false;
+        if (String(m.senderId) !== String(me)) return false;
+        const mId =
+          m.replyPost._id ||
+          m.replyPost.postId ||
+          m.replyPost.contextId ||
+          m.replyPost.shopId ||
+          m.replyPost.mallShopId;
+        return mId && String(mId) === String(rpId);
+      });
+
+      if (alreadySent) {
+        if (route.params?.replyPost) {
+          navigation.setParams({ replyPost: undefined });
+        }
+        setReplyPost(null);
+        return;
+      }
     }
-  }, [initialReplyPost]);
+
+    setReplyPost(rp);
+  }, [initialReplyPost, loading, messages, currentUser, navigation, route.params?.replyPost]);
 
   // ---------- Animations ----------
   useEffect(() => {
@@ -1166,7 +1407,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   }, [currentUser, fetchUserLimitsAndUsage]);
 
-  // ---------- Helper: show upgrade modal ----------
   const showUpgradeModal = useCallback(() => {
     setUpgradeModalVisible(true);
   }, []);
@@ -1232,7 +1472,6 @@ const ChatScreen = ({ route, navigation, language }) => {
         transports: ['websocket'],
         auth: { token },
         autoConnect: true,
-        // Helps on Android emulators / flaky networks
         reconnection: true,
         reconnectionAttempts: Infinity,
         reconnectionDelay: 1000,
@@ -1242,9 +1481,8 @@ const ChatScreen = ({ route, navigation, language }) => {
 
       socketRef.current = socket;
 
-      // ---- IMPORTANT: join the room every time the socket connects ----
       socket.on('connect', () => {
-        console.log('[Socket] connected', socket.id);
+        logDebug('[Socket] connected', socket.id);
         if (sellerId && !isDemoChat) {
           socket.emit('join-chat', { sellerId });
         }
@@ -1313,23 +1551,18 @@ const ChatScreen = ({ route, navigation, language }) => {
         }
       });
 
-      // ---- Typing: lenient, self-echo-safe, and auto-clearing ----
       const handleTyping = (payload, eventName) => {
-        console.log('[Socket] typing event:', eventName, payload);
+        logDebug('[Socket] typing event:', eventName, payload);
         if (isDemoChat) return;
 
-        // Support several possible field names from the server
         const senderId = String(
           payload?.senderId ?? payload?.userId ?? payload?.from ?? payload?.sender ?? ''
         );
         const me = String(currentUserIdRef.current || '');
         const other = String(sellerId || '');
 
-        // Ignore our own typing echoes
         if (senderId && me && senderId === me) return;
 
-        // If we know the other party's id and the payload's senderId doesn't match,
-        // and the chatId doesn't match either, drop the event.
         if (senderId && other && senderId !== other) {
           const payloadChatId = String(payload?.chatId ?? payload?.chat_id ?? '');
           const ourChatId = String(typingPostIdRef.current || '');
@@ -1338,7 +1571,6 @@ const ChatScreen = ({ route, navigation, language }) => {
           }
         }
 
-        // Determine the typing value from various shapes
         let isTyping;
         if (typeof payload?.typing === 'boolean') isTyping = payload.typing;
         else if (typeof payload?.isTyping === 'boolean') isTyping = payload.isTyping;
@@ -1348,7 +1580,6 @@ const ChatScreen = ({ route, navigation, language }) => {
 
         setOtherTyping(isTyping);
 
-        // Auto-clear after 4s in case the stop event never arrives (mobile networks)
         if (typingClearTimerRef.current) {
           clearTimeout(typingClearTimerRef.current);
           typingClearTimerRef.current = null;
@@ -1365,10 +1596,10 @@ const ChatScreen = ({ route, navigation, language }) => {
       socket.on('user-stop-typing', (payload) => handleTyping(payload, 'user-stop-typing'));
 
       socket.on('disconnect', (reason) => {
-        console.log('[Socket] disconnected:', reason);
+        logDebug('[Socket] disconnected:', reason);
       });
       socket.on('connect_error', (err) => {
-        console.log('[Socket] connect_error:', err?.message);
+        logDebug('[Socket] connect_error:', err?.message);
       });
     } catch (e) {
       console.warn('[Socket] setup failed:', e?.message);
@@ -1379,7 +1610,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     connectPresenceSocket();
   }, [connectPresenceSocket]);
 
-  // Emit join-chat as a fallback for late consumers
   useEffect(() => {
     if (socketRef.current && sellerId && currentUser?._id && !isDemoChat) {
       socketRef.current.emit('join-chat', { sellerId });
@@ -1456,8 +1686,14 @@ const ChatScreen = ({ route, navigation, language }) => {
     messagesFetchRef.current = true;
     if (showLoading) setRefreshing(true);
     try {
+      await prefetchReplyPostCovers([
+        ...messages,
+        { replyPost: replyPost || initialReplyPost },
+      ]);
+
       if (!networkStatus.get().isOnline) {
         const localMessages = await loadLocalMessages();
+        await prefetchReplyPostCovers(localMessages);
         setMessages(previous => mergeMessages(previous, enhanceReplies(localMessages)));
         setLoading(false);
         return;
@@ -1476,7 +1712,6 @@ const ChatScreen = ({ route, navigation, language }) => {
         _id: m._id || m.id,
         createdAt: m.createdAt || m.timestamp || m.createdAt,
         senderId: m.senderId || m.senderPhone || m.senderId,
-        // Preserve replyPost context from server
         replyPost: m.replyPost || m.replyPostContext || null,
       }));
 
@@ -1488,6 +1723,7 @@ const ChatScreen = ({ route, navigation, language }) => {
 
       const enhancedMessages = enhanceReplies(sorted);
 
+      await prefetchReplyPostCovers(enhancedMessages);
       setMessages(previous => mergeMessages(previous, enhancedMessages));
       setLoading(false);
 
@@ -1502,6 +1738,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       console.warn('Using cached messages:', error.message);
       const localMessages = await loadLocalMessages();
       const enhancedLocal = enhanceReplies(localMessages);
+      await prefetchReplyPostCovers(enhancedLocal);
       setMessages(previous => mergeMessages(previous, enhancedLocal));
       setLoading(false);
     } finally {
@@ -1579,6 +1816,7 @@ const ChatScreen = ({ route, navigation, language }) => {
         .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
       const enhanced = enhanceReplies(demoMessages);
+      await prefetchReplyPostCovers(enhanced);
       setMessages(enhanced);
     } catch (error) {
       console.error('Error loading demo messages:', error);
@@ -1602,7 +1840,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     if (isDemoChat) return;
     if (!currentUser?._id || !sellerId) return;
     if (!networkStatus.get().isOnline) return;
-    if (messagesFetchRef.current) return; // avoid overlapping requests
+    if (messagesFetchRef.current) return;
 
     messagesFetchRef.current = true;
     try {
@@ -1633,11 +1871,8 @@ const ChatScreen = ({ route, navigation, language }) => {
 
       const enhanced = enhanceReplies(messagesFromApi);
 
-      // mergeMessages returns the SAME reference when nothing changed,
-      // so React bails out of re-rendering on idle polls.
       setMessages((previous) => mergeMessages(previous, enhanced));
 
-      // Mark seller messages as read (once per message id)
       messagesFromApi.forEach((msg) => {
         const id = String(msg._id);
         if (
@@ -1662,7 +1897,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     postId,
   ]);
 
-  // ---------- Poll every 1 second while the screen is focused ----------
   useFocusEffect(
     useCallback(() => {
       if (isDemoChat) return undefined;
@@ -1748,11 +1982,9 @@ const ChatScreen = ({ route, navigation, language }) => {
 
         const urls = uploadedImages.map((img) => img.uploadedUrl);
 
-        // Multiple images → send as ONE message with imageUrls (stacked deck)
         if (urls.length > 1) {
           await sendMessage(caption, null, replyTo, urls);
         } else {
-          // Single image → normal single-image message
           await sendMessage(caption, urls[0], replyTo);
         }
         return;
@@ -1795,7 +2027,6 @@ const ChatScreen = ({ route, navigation, language }) => {
       return;
     }
 
-    // Snapshot the current replyPost so it survives after state clears
     const currentReplyPost = replyPost || null;
 
     const messageData = {
@@ -1811,7 +2042,6 @@ const ChatScreen = ({ route, navigation, language }) => {
       receiverPhone: sellerPhone,
       text: cleanText,
       imageUrl: primaryImage,
-      // Backward-compatible array for multi-image support
       ...(hasMultiple ? { imageUrls } : {}),
       repliedTo: repliedTo
         ? {
@@ -1862,7 +2092,7 @@ const ChatScreen = ({ route, navigation, language }) => {
         setInputText('');
         setSelectedImages([]);
         setReplyTo(null);
-        setReplyPost(null);
+        clearReplyPost();
         return;
       }
       const token = await getChatAuthToken(adminModeRef.current);
@@ -1871,7 +2101,6 @@ const ChatScreen = ({ route, navigation, language }) => {
         messageData,
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      // Preserve replyPost from the request if the server didn't return it
       const serverMessage = {
         ...response.data.message,
         replyPost:
@@ -1889,7 +2118,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       setSelectedImages([]);
       setReplyTo(null);
       setEditingMessageId(null);
-      setReplyPost(null);
+      clearReplyPost();
       if (primaryImage) {
         fetchUserLimitsAndUsage();
       }
@@ -1900,7 +2129,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       setInputText('');
       setSelectedImages([]);
       setReplyTo(null);
-      setReplyPost(null);
+      clearReplyPost();
       showChatNotice('error', t.error, primaryImage ? t.imageSendFailed : t.couldNotSend);
     }
   };
@@ -1944,7 +2173,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       setSelectedImages([]);
       setReplyTo(null);
       setEditingMessageId(null);
-      setReplyPost(null);
+      clearReplyPost();
       if (flatListRef.current) {
         flatListRef.current.scrollToEnd({ animated: true });
       }
@@ -2029,9 +2258,7 @@ const ChatScreen = ({ route, navigation, language }) => {
         const token = await getChatAuthToken(adminModeRef.current);
         await axios.delete(
           `${BASE_URL}/api/messages/${messageId}`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          }
+          { headers: { Authorization: `Bearer ${token}` } }
         );
         await removeCachedMessage(messageId);
         setMessages(prev => prev.filter(msg => String(msg._id || msg.id) !== String(messageId)));
@@ -2053,7 +2280,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     if (!assets || assets.length === 0) return;
     console.log('SELECTED IMAGE:', assets);
 
-    // Cooldown logic
     try {
       const lastImageSendKey = `lastImageSend_${currentUser?._id || 'default'}`;
       const lastSend = await AsyncStorage.getItem(lastImageSendKey);
@@ -2081,7 +2307,6 @@ const ChatScreen = ({ route, navigation, language }) => {
         return;
       }
 
-      // Prepare files
       const files = assets.map((asset) => {
         const filename = asset.fileName || asset.uri.split('/').pop();
         const match = /\.(\w+)$/.exec(filename);
@@ -2137,7 +2362,6 @@ const ChatScreen = ({ route, navigation, language }) => {
       }
       urls.forEach((imageUrl) => console.log('FINAL IMAGE URL:', imageUrl));
 
-      // Success – update selected images with uploaded URLs
       setSelectedImages(files.map((file, index) => ({
         ...file,
         status: 'done',
@@ -2148,7 +2372,6 @@ const ChatScreen = ({ route, navigation, language }) => {
 
       fetchUserLimitsAndUsage();
 
-      // Update last send time (cooldown)
       const lastImageSendKey = `lastImageSend_${currentUser?._id || 'default'}`;
       await AsyncStorage.setItem(lastImageSendKey, String(Date.now()));
 
@@ -2332,31 +2555,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   }, [actionMessage, showChatNotice, t]);
 
-  // ---------- Image carousel (full-screen viewer navigation) ----------
-  const handleImagePress = useCallback((url, index, allImages) => {
-    let images;
-    let initialIndex;
-
-    if (Array.isArray(allImages) && allImages.length > 0) {
-      // From a stacked deck — open the whole multi-image message collection
-      images = allImages;
-      initialIndex = typeof index === 'number' ? index : 0;
-    } else {
-      // From a single-image message — open all chat images
-      images = messages
-        .flatMap((m) => {
-          if (Array.isArray(m.imageUrls) && m.imageUrls.length > 0) return m.imageUrls;
-          if (m.imageUrl) return [m.imageUrl];
-          return [];
-        });
-      initialIndex = images.indexOf(url);
-    }
-
-    if (images && images.length > 0 && initialIndex >= 0) {
-      navigation.navigate('Preview', { images, initialIndex });
-    }
-  }, [messages, navigation]);
-
   // ---------- Modals ----------
   const renderActionModal = () => {
     if (!actionMessage) return null;
@@ -2372,10 +2570,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     return (
       <Modal transparent visible={actionModalVisible} animationType="fade" onRequestClose={() => setActionModalVisible(false)}>
         <TouchableOpacity
-          style={[
-            styles.actionModalOverlay,
-            { backgroundColor: theme.call }
-          ]}
+          style={[styles.actionModalOverlay, { backgroundColor: theme.call }]}
           activeOpacity={1}
           onPress={() => setActionModalVisible(false)}
         >
@@ -2478,10 +2673,13 @@ const ChatScreen = ({ route, navigation, language }) => {
       return;
     }
     const postIdToOpen = postContext.postId || postContext._id;
-    if (postIdToOpen) navigation.navigate('PostDetail', { postId: postIdToOpen });
+    if (postIdToOpen) {
+      const postData = postContext.productName || postContext.houseImages ? postContext : undefined;
+      navigation.navigate('PostDetail', { postId: String(postIdToOpen), house: postData });
+    }
   }, [navigation]);
 
-  // ---------- Empty state (matches MessageScreen design) ----------
+  // ---------- Empty state ----------
   const renderEmptyState = () => (
     <View style={styles.emptyContainer}>
       <Ionicons name="chatbubble-outline" size={60} color={theme.textSecondary} />
@@ -2520,11 +2718,9 @@ const ChatScreen = ({ route, navigation, language }) => {
           playAudio={playAudio}
           formatDuration={formatDuration}
           t={t}
-          onImagePress={handleImagePress}
           navigation={navigation}
           sellerId={sellerId}
           sellerName={sellerName}
-          messageIndex={index}
           onReplyPostPress={navigateToPostDetail}
         />
       </>
@@ -2542,7 +2738,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     playAudio,
     formatDuration,
     t,
-    handleImagePress,
     navigation,
     sellerId,
     sellerName,
@@ -2683,15 +2878,15 @@ const ChatScreen = ({ route, navigation, language }) => {
           </View>
         )}
 
-        {/* Reply to Post bar */}
+        {/* Reply to Post bar (composer) */}
         {replyPost && (
           <View style={[styles.replyBar, { backgroundColor: theme.cardBackground, borderTopColor: theme.border, borderBottomColor: theme.border }]}>
             <ReplyPostCard
               post={replyPost}
-              theme={theme}
+              color={theme.text}
               onPress={() => navigateToPostDetail(replyPost)}
             />
-            <TouchableOpacity onPress={() => setReplyPost(null)}>
+            <TouchableOpacity onPress={clearReplyPost}>
               <Ionicons name="close" size={24} color={theme.textSecondary} />
             </TouchableOpacity>
           </View>
@@ -2854,15 +3049,19 @@ const styles = StyleSheet.create({
   avatarWrapper: { marginHorizontal: 4 },
   messageAvatar: { width: 30, height: 30, borderRadius: 15 },
   messageContentColumn: { flexDirection: 'column', maxWidth: '85%' },
-  messageBubble: { paddingHorizontal: 12, paddingVertical: 8, 
-    borderBottomLeftRadius: 18, borderBottomRightRadius: 18, borderTopLeftRadius: 18, borderTopRightRadius: 18,
-   },
-  messageText: { fontSize: 13, lineHeight: 13},
+  messageBubble: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomLeftRadius: 18,
+    borderBottomRightRadius: 18,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+  },
+  messageText: { fontSize: 13, lineHeight: 13 },
   messageImage: { width: 220, height: 180, borderRadius: 14, marginBottom: 4 },
   chatImageFallback: { backgroundColor: '#292929', alignItems: 'center', justifyContent: 'center' },
   imageCaption: { marginTop: 6 },
 
-  // ---------- Multi-image (stacked card deck) styles ----------
   multiImageWrapper: {
     width: CHAT_DECK_WIDTH,
     marginVertical: 4,
@@ -2931,10 +3130,14 @@ const styles = StyleSheet.create({
   },
 
   editedBadge: { fontSize: 10, marginTop: 2, fontStyle: 'italic' },
-  replyPreviewOutside: { padding: 6, paddingLeft: 10, marginBottom: 4, 
- borderBottomLeftRadius: 0, borderBottomRightRadius: 18,
-  borderTopLeftRadius: 18, borderTopRightRadius: 18,
-
+  replyPreviewOutside: {
+    padding: 6,
+    paddingLeft: 10,
+    marginBottom: 4,
+    borderBottomLeftRadius: 18,
+    borderBottomRightRadius: 18,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
   },
   replyPostCard: {
     flexDirection: 'row',
@@ -2944,15 +3147,17 @@ const styles = StyleSheet.create({
     borderWidth: 0,
     marginBottom: 4,
     minHeight: 60,
+    backgroundColor: 'transparent',
   },
   replyPostThumb: {
     width: 48,
     height: 48,
     borderRadius: 6,
     marginRight: 10,
-    backgroundColor: '#f0f0f0',
+    backgroundColor: '#292929',
     justifyContent: 'center',
     alignItems: 'center',
+    overflow: 'hidden',
   },
   replyPostThumbFallback: {},
   replyPostInfo: {
@@ -3096,47 +3301,15 @@ const styles = StyleSheet.create({
   callBarExpandBtn: { padding: 6 },
   imagePreviewOverlay: { flex: 1, marginTop: 42, justifyContent: 'center', alignItems: 'center' },
   imagePreviewImage: { width: SCREEN_WIDTH, height: SCREEN_HEIGHT * 0.8 },
-  upgradeModalIconContainer: {
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  upgradeModalTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  upgradeModalMessage: {
-    fontSize: 14,
-    textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 4,
-  },
-  upgradeModalButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 8,
-    gap: 12,
-  },
-  upgradeModalButton: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  upgradeModalCancelButton: {
-    borderWidth: 1,
-    backgroundColor: 'transparent',
-  },
-  upgradeModalUpgradeButton: {
-    borderWidth: 0,
-  },
-  upgradeModalButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-  },
+  upgradeModalIconContainer: { alignItems: 'center', marginBottom: 12 },
+  upgradeModalTitle: { fontSize: 20, fontWeight: 'bold', textAlign: 'center', marginBottom: 8 },
+  upgradeModalMessage: { fontSize: 14, textAlign: 'center', lineHeight: 20, marginBottom: 4 },
+  upgradeModalButtons: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, gap: 12 },
+  upgradeModalButton: { flex: 1, paddingVertical: 12, borderRadius: 8, alignItems: 'center' },
+  upgradeModalCancelButton: { borderWidth: 1, backgroundColor: 'transparent' },
+  upgradeModalUpgradeButton: { borderWidth: 0 },
+  upgradeModalButtonText: { fontSize: 16, fontWeight: '600' },
 
-  // ---------- Empty state (matches MessageScreen design) ----------
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -3144,17 +3317,8 @@ const styles = StyleSheet.create({
     paddingVertical: 60,
     paddingHorizontal: 40,
   },
-  emptyText: {
-    marginTop: 12,
-    fontSize: 18,
-    fontWeight: '500',
-    textAlign: 'center',
-  },
-  emptySubtext: {
-    marginTop: 6,
-    fontSize: 14,
-    textAlign: 'center',
-  },
+  emptyText: { marginTop: 12, fontSize: 18, fontWeight: '500', textAlign: 'center' },
+  emptySubtext: { marginTop: 6, fontSize: 14, textAlign: 'center' },
 });
 
 export default ChatScreen;

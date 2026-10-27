@@ -23,9 +23,11 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import ArrowUploadLoader from '../components/ArrowUploadLoader';
 import { useAuth, useUserLimits } from '../context/AuthContext';
+import { useBottomSheet } from '../context/BottomSheetContext';
 import { computeAggregatedLimits } from '../utils/subscriptionHelpers';
-import { normalizeRwandaPhone, isValidRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
+import { normalizeRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import { compressImageForUpload } from '../utils/imageCompressor';
 
 const { width, height } = Dimensions.get('window');
 const CATEGORY_ICON_SIZE = 28;
@@ -87,8 +89,8 @@ const translations = {
     shopDescription: 'Shop Description (max 500 chars)',
     shopNumber: 'Shop Number / Door Number * (e.g., Shop A-12)',
     floorNumber: 'Building Floor Number (optional, e.g., 2nd Floor)',
-    phone: 'Phone Number *',
-    whatsapp: 'WhatsApp Number',
+    phone: 'Phone Number * (079, 078, or 073)',
+    whatsapp: 'WhatsApp Number (079, 078, or 073)',
     email: 'Email',
     website: 'Website (optional)',
     openingTime: 'Opening Time',
@@ -129,7 +131,7 @@ const translations = {
     previewStatus: 'Open',
     call: 'Call',
     direction: 'Direction',
-    phoneError: 'Phone must start with 07 and be exactly 10 digits',
+    phoneError: 'Phone must be 10 digits and start with 079, 078, or 073',
     alreadyHasShop: 'You already have a shop',
     alreadyHasShopMessage: 'You can only add one shop. If you want to change your shop, please delete the existing one first.',
     sessionExpired: 'Session expired. Please login again.',
@@ -153,8 +155,8 @@ const translations = {
     shopDescription: 'Ibisobanuro (ntagisumvwa 500)',
     shopNumber: 'Numero y\'iduka / Umuryango * (urugero: A-12)',
     floorNumber: 'Igikari cy\'inyubako (bitari ngombwa, urugero: Igikari cya 2)',
-    phone: 'Numero ya telefoni *',
-    whatsapp: 'Numero ya WhatsApp',
+    phone: 'Numero ya telefoni * (079, 078, cyangwa 073)',
+    whatsapp: 'Numero ya WhatsApp (079, 078, cyangwa 073)',
     email: 'Imeyili',
     website: 'Urubuga (bitari ngombwa)',
     openingTime: 'Isaha yo gufungura',
@@ -195,7 +197,7 @@ const translations = {
     previewStatus: 'Ifunguye',
     call: 'Guhamagara',
     direction: 'Inzira',
-    phoneError: 'Numero igomba gutangira na 07 kandi ibe imibare 10',
+    phoneError: 'Numero igomba kuba imibare 10 kandi igatangira na 079, 078, cyangwa 073',
     alreadyHasShop: 'Ufite iduka',
     alreadyHasShopMessage: 'Ushobora kugira iduka rimwe gusa. Niba ushaka guhindura, siba iryawe mbere.',
     sessionExpired: 'Igihe cyawe cyashize. Nyamuneka winjire ondongeye.',
@@ -206,6 +208,7 @@ const translations = {
 
 export default function AddShoppingMallShopScreen({ route, navigation, language = 'English' }) {
   const { theme, isDarkMode } = useTheme();
+  const { showBottomSheet } = useBottomSheet();
   const { refreshUser } = useAuth();
   const adminLimits = useUserLimits();
   const t = translations[language] || translations.English;
@@ -251,12 +254,27 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
   const [checkingShop, setCheckingShop] = useState(true);
   const [hasExistingShop, setHasExistingShop] = useState(false);
 
-  // ----- Themed alert modal state -----
-  const [alertState, setAlertState] = useState(null);
   const showThemedAlert = (title, message, buttons) => {
-    setAlertState({ title, message, buttons });
+    const alertButtons = buttons?.length ? buttons : [{ text: 'OK' }];
+    const normalizedTitle = title.toLowerCase();
+    const type = title === t.success
+      ? 'success'
+      : title === t.error || title === t.permissionDenied || normalizedTitle.includes('error') || normalizedTitle.includes('denied')
+        ? 'error'
+        : title === t.loginRequired || normalizedTitle.includes('login')
+          ? 'login'
+          : 'info';
+
+    showBottomSheet({
+      type,
+      title,
+      message,
+      buttonText: alertButtons[0].text || 'OK',
+      buttonAction: alertButtons[0].onPress,
+      secondaryButtonText: alertButtons[1]?.text,
+      secondaryAction: alertButtons[1]?.onPress,
+    });
   };
-  const closeThemedAlert = () => setAlertState(null);
 
   // ----- Theme colors -----
   const backgroundColor = theme.background;
@@ -358,7 +376,8 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
   // ----- Phone validation -----
   const validatePhone = (number) => {
     if (!number) return true;
-    return isValidRwandaPhone(number);
+    const digits = number.replace(/\D/g, '');
+    return /^07[983]\d{7}$/.test(digits);
   };
 
   const handlePhoneChange = (setter) => (text) => {
@@ -570,12 +589,9 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
       // 1. Upload shop front image
       let frontImageUrl = null;
       if (shopFrontImage) {
+        const compressedImage = await compressImageForUpload(shopFrontImage, 'shop_front.jpg');
         const formData = new FormData();
-        formData.append('image', {
-          uri: shopFrontImage,
-          type: 'image/jpeg',
-          name: 'shop_front.jpg',
-        });
+        formData.append('image', compressedImage);
         const uploadRes = await axios.post(`${BASE_URL}/api/places/upload`, formData, {
           headers: {
             'Content-Type': 'multipart/form-data',
@@ -590,12 +606,9 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
       // 2. Upload product images (if any)
       const uploadedProducts = await Promise.all(products.map(async (product) => {
         const productImagesUrls = await Promise.all(product.images.map(async (img) => {
+          const compressedImage = await compressImageForUpload(img.uri, img.name || 'product.jpg');
           const formData = new FormData();
-          formData.append('image', {
-            uri: img.uri,
-            type: 'image/jpeg',
-            name: 'product.jpg',
-          });
+          formData.append('image', compressedImage);
           const res = await axios.post(`${BASE_URL}/api/places/upload`, formData, {
             headers: {
               'Content-Type': 'multipart/form-data',
@@ -625,8 +638,8 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
         shopNumber: shopNumber.trim(),
         floorNumber: floorNumber.trim(),
         address: shopAddress.trim(),
-        phone: normalizeRwandaPhone(phone) || phone.trim(),
-        whatsapp: whatsapp ? (normalizeRwandaPhone(whatsapp) || whatsapp.trim()) : '',
+        phone: normalizeRwandaPhone(phone),
+        whatsapp: whatsapp ? normalizeRwandaPhone(whatsapp) : '',
         email: email.trim(),
         website: website.trim(),
         openingTime,
@@ -660,7 +673,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
       }
     } catch (error) {
       console.error('Publish error:', error);
-      showThemedAlert(t.error, error.response?.data?.message || t.publishFailed);
+      showThemedAlert(t.error, error.response?.data?.message || error.message || t.publishFailed);
     } finally {
       setPublishing(false);
       setProgress(0);
@@ -765,7 +778,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
               keyboardType="phone-pad"
               value={phone}
               onChangeText={handlePhoneChange(setPhone)}
-              maxLength={10}
+              maxLength={12}
               editable={editable}
               returnKeyType="next"
             />
@@ -776,7 +789,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
               keyboardType="phone-pad"
               value={whatsapp}
               onChangeText={handlePhoneChange(setWhatsapp)}
-              maxLength={10}
+              maxLength={12}
               editable={editable}
               returnKeyType="next"
             />
@@ -1166,68 +1179,6 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
     }
   };
 
-  // ----- Themed alert modal (styled like ChatScreen modals) -----
-  const renderThemedAlert = () => {
-    if (!alertState) return null;
-    const { title, message, buttons } = alertState;
-    const defaultButtons = [{ text: 'OK', onPress: closeThemedAlert }];
-    const btns = buttons && buttons.length > 0 ? buttons : defaultButtons;
-    const isDanger = title === t.error;
-
-    return (
-      <Modal transparent visible animationType="fade" onRequestClose={closeThemedAlert}>
-        <TouchableOpacity
-          style={[styles.alertOverlay, { backgroundColor: theme.action }]}
-          activeOpacity={1}
-          onPress={closeThemedAlert}
-        >
-          <View style={[styles.alertContent, { backgroundColor: theme.background, borderColor: theme.border }]}>
-            <View style={styles.alertIconContainer}>
-              <Ionicons
-                name={title === t.success
-                  ? 'checkmark-circle'
-                  : isDanger
-                    ? 'alert-circle'
-                    : 'information-circle'}
-                size={48}
-                color={title === t.success ? '#00bc38' : isDanger ? '#ff3b30' : accentColor}
-              />
-            </View>
-            <Text style={[styles.alertTitle, { color: theme.text }]}>{title}</Text>
-            <Text style={[styles.alertMessage, { color: theme.textSecondary }]}>{message}</Text>
-
-            <View style={styles.alertButtonsRow}>
-              {btns.map((btn, idx) => {
-                const isPrimary = idx === btns.length - 1;
-                const isCancel = btn.style === 'cancel';
-                return (
-                  <TouchableOpacity
-                    key={idx}
-                    style={[
-                      styles.alertButton,
-                      isCancel
-                        ? [styles.alertCancelButton, { borderColor: theme.border }]
-                        : { backgroundColor: isPrimary ? (title === t.success ? '#00bc38' : accentColor) : theme.border, marginLeft: btn.style === 'cancel' ? 0 : 10 },
-                      btns.length === 1 && styles.alertButtonFull,
-                    ]}
-                    onPress={() => {
-                      if (btn.onPress) btn.onPress();
-                      closeThemedAlert();
-                    }}
-                  >
-                    <Text style={[styles.alertButtonText, { color: isCancel ? theme.textSecondary : '#fff' }]}>
-                      {btn.text}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </View>
-        </TouchableOpacity>
-      </Modal>
-    );
-  };
-
   // ----- Loading / checking state -----
   if (checkingShop || loadingUser) {
     return <ShaakaLoadingScreen message="Checking your account..." backgroundColor={backgroundColor} textColor={textColor} />;
@@ -1307,7 +1258,6 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
-      {renderThemedAlert()}
     </SafeAreaView>
   );
 }

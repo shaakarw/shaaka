@@ -58,6 +58,7 @@ replyPost: {
   contactNumbers: [String],
   houseImages: [String],
   videoUrl: String,
+  videoThumbnail: String,
   username: String,
   userAvatar: String,
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

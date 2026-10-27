@@ -1,18 +1,19 @@
 import axios from 'axios';
 import { offlineDatabase } from './offlineDatabase';
 import { isStartupPerformanceActive } from './startupPerformance';
+import { logPerformance } from '../utils/performanceLogger';
+import { networkStatus } from './networkStatus';
 
 const CACHE_COLLECTION = 'http-cache';
 
 const logRequestDuration = (config, status) => {
-  if (typeof __DEV__ !== 'undefined' && !__DEV__) return;
   if (!config?.metadata?.logDuringStartup) return;
   const startedAt = config?.metadata?.performanceStartedAt;
   if (!startedAt) return;
   const path = String(config.url || '').replace(/^https?:\/\/[^/]+/i, '').split('?')[0];
   if (/\/api\/(posts|messages)(\/|$)/i.test(path)) return;
   const statusText = status == null ? 'network-error' : `status=${status}`;
-  console.info(`[Perf][API] ${config.method?.toUpperCase() || 'GET'} ${path} ${Date.now() - startedAt}ms ${statusText}`);
+  logPerformance(`[Perf][API] ${config.method?.toUpperCase() || 'GET'} ${path} ${Date.now() - startedAt}ms ${statusText}`);
 };
 
 const stableStringify = value => {
@@ -65,12 +66,19 @@ const persistResponse = async response => {
 };
 
 export const installOfflineApiCache = () => {
-  const onRequest = axios.interceptors.request.use(config => {
+  const onRequest = axios.interceptors.request.use(async config => {
     config.metadata = {
       ...config.metadata,
       performanceStartedAt: Date.now(),
       logDuringStartup: isStartupPerformanceActive(),
     };
+    const url = `${config.baseURL || ''}${config.url || ''}`;
+    if (/\/api(?:\/|$)/i.test(url) && !(await networkStatus.start()).isOnline) {
+      const error = new Error('Network Error');
+      error.code = 'ERR_NETWORK';
+      error.config = config;
+      throw error;
+    }
     return config;
   });
   const onSuccess = axios.interceptors.response.use(response => {

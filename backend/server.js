@@ -18,8 +18,9 @@ const { initCronJobs } = require('./cron');
 
 const app = express();
 const server = http.createServer(app);
+const shouldLogDebug = () => process.env.DEBUG_LOGS === 'true';
 const shouldLogPerformance = () => (
-  process.env.NODE_ENV !== 'production' || process.env.PERF_LOGS === 'true'
+  process.env.PERF_LOGS === 'true'
 );
 
 // ---------- Seed admin user ----------
@@ -75,14 +76,20 @@ const startServer = async () => {
   try {
     const databaseStartedAt = process.hrtime.bigint();
     await connectDB();
-    console.info(`[Perf][Startup] database-connected ${(Number(process.hrtime.bigint() - databaseStartedAt) / 1e6).toFixed(1)}ms`);
+    if (shouldLogPerformance()) {
+      console.info(`[Perf][Startup] database-connected ${(Number(process.hrtime.bigint() - databaseStartedAt) / 1e6).toFixed(1)}ms`);
+    }
     const adminSeedStartedAt = process.hrtime.bigint();
     await seedAdmin();
-    console.info(`[Perf][Startup] admin-seeded ${(Number(process.hrtime.bigint() - adminSeedStartedAt) / 1e6).toFixed(1)}ms`);
+    if (shouldLogPerformance()) {
+      console.info(`[Perf][Startup] admin-seeded ${(Number(process.hrtime.bigint() - adminSeedStartedAt) / 1e6).toFixed(1)}ms`);
+    }
     const PORT = process.env.PORT || 5000;
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${PORT}`);
-      console.info(`[Perf][Startup] server-ready ${(Number(process.hrtime.bigint() - startupStartedAt) / 1e6).toFixed(1)}ms`);
+      if (shouldLogPerformance()) {
+        console.info(`[Perf][Startup] server-ready ${(Number(process.hrtime.bigint() - startupStartedAt) / 1e6).toFixed(1)}ms`);
+      }
       initCronJobs({ initialDelayMs: 30000 });
     });
   } catch (error) {
@@ -220,7 +227,9 @@ io.on('connection', (socket) => {
         onlineStore.setOnline(user._id, true);
         io.emit('user-online', { userId: String(user._id), lastSeen: null });
 
-        console.log(`✅ User ${user.username || user._id} connected (socket ${socket.id})`);
+        if (shouldLogDebug()) {
+          console.log(`✅ User ${user.username || user._id} connected (socket ${socket.id})`);
+        }
       }).catch(() => {});
     } catch (err) {
       console.warn('Invalid auth token on socket connection');
@@ -275,8 +284,9 @@ socket.on('disconnect', () => {
       if (!user) return;
       if (user.currentSession) user.currentSession.socketId = '';
       await user.save();
-      console.log(`🔌 Socket ${socket.id} disconnected for user ${user.username || user._id}`);
+      if (shouldLogDebug()) {
+        console.log(`🔌 Socket ${socket.id} disconnected for user ${user.username || user._id}`);
+      }
     }).catch((err) => console.error('Find user on disconnect error:', err));
   });
 });
-

@@ -5,8 +5,16 @@ import axios from 'axios';
 import { getApiUrl } from '../config';
 import { Alert } from 'react-native';
 import { isReelsActive } from '../services/reelActivity';
+import { logPerformance } from '../utils/performanceLogger';
+import { networkStatus } from '../services/networkStatus';
 
 const AuthContext = createContext();
+
+const isAuthFailure = (error) => {
+  const status = error?.response?.status;
+  const message = `${error?.response?.data?.message || ''} ${error?.message || ''}`.toLowerCase();
+  return status === 401 || message.includes('401') || message.includes('unauthorized') || message.includes('signed_in_elsewhere');
+};
 
 export const AuthProvider = ({ children }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -32,9 +40,7 @@ export const AuthProvider = ({ children }) => {
         console.error('Failed to load auth data', error);
       } finally {
         setLoading(false);
-        if (typeof __DEV__ === 'undefined' || __DEV__) {
-          console.info(`[Perf] auth-session-restored ${Date.now() - restoreStartedAt}ms`);
-        }
+        logPerformance(`[Perf] auth-session-restored ${Date.now() - restoreStartedAt}ms`);
       }
     };
     loadStorageData();
@@ -75,7 +81,7 @@ export const AuthProvider = ({ children }) => {
       const token = await AsyncStorage.getItem('userToken');
       if (!token) return;
       pollId = setInterval(async () => {
-        if (isReelsActive()) return;
+        if (isReelsActive() || !networkStatus.get().isOnline) return;
         try {
           const resp = await axios.get(`${getApiUrl()}/api/auth/session`, { headers: { Authorization: `Bearer ${token}` } });
           const serverSessionId = resp.data?.session?.sessionId;
@@ -122,10 +128,8 @@ export const AuthProvider = ({ children }) => {
   const syncFavorites = async (authToken = null) => {
     try {
       const currentToken = authToken || token || await AsyncStorage.getItem('userToken');
-      if (!currentToken) {
-        console.warn('No token available to sync favorites');
-        return false;
-      }
+      if (!currentToken) return false;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
 
       const response = await axios.get(`${getApiUrl()}/api/favorites`, {
         headers: { Authorization: `Bearer ${currentToken}` },
@@ -138,12 +142,12 @@ export const AuthProvider = ({ children }) => {
         await AsyncStorage.setItem('favorites', JSON.stringify(placeIds));
         await AsyncStorage.setItem('favoriteShops', JSON.stringify(shopIds));
         return true;
-      } else {
-        console.warn('Sync favorites failed:', response.data.message);
-        return false;
       }
+      return false;
     } catch (error) {
-      console.error('Sync favorites error:', error);
+      if (!isAuthFailure(error) && !(error?.code === 'ERR_NETWORK' || error?.message === 'Network Error')) {
+        console.error('Sync favorites error:', error);
+      }
       return false;
     }
   };
@@ -225,6 +229,17 @@ export const AuthProvider = ({ children }) => {
         return null;
       }
 
+      if (!(await networkStatus.start()).isOnline) {
+        const storedUserData = await AsyncStorage.getItem('user');
+        const storedUser = storedUserData ? JSON.parse(storedUserData) : user;
+        if (storedUser) {
+          setToken(currentToken);
+          setUser(storedUser);
+          setIsAuthenticated(true);
+        }
+        return storedUser || null;
+      }
+
       const response = await axios.get(`${getApiUrl()}/api/auth/me`, {
         headers: { Authorization: `Bearer ${currentToken}` },
       });
@@ -239,8 +254,10 @@ export const AuthProvider = ({ children }) => {
         return null;
       }
     } catch (error) {
-      console.error('Refresh user error:', error);
-      if (error.response?.status === 401) {
+      if (!isAuthFailure(error) && !(error?.code === 'ERR_NETWORK' || error?.message === 'Network Error')) {
+        console.error('Refresh user error:', error);
+      }
+      if (error.response?.status === 401 || isAuthFailure(error)) {
         await logout();
       }
       return null;

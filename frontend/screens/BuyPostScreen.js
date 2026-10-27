@@ -5,6 +5,7 @@ import {
   Dimensions, Share, Alert, Animated,
   TextInput, RefreshControl, ScrollView, TouchableWithoutFeedback,
   Linking, Platform, LogBox, PanResponder, Modal, useWindowDimensions,
+  AppState,
 } from 'react-native';
 import BlurView from '../components/BlurViewWrapper';
 import { useTheme } from '../context/ThemeContext';
@@ -12,6 +13,7 @@ import { useAuth } from '../context/AuthContext';
 import { showAppAlert } from '../context/MessageSheetContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
+import Svg, { Circle, Path } from 'react-native-svg';
 import { useFocusEffect, useIsFocused, useRoute } from '@react-navigation/native';
 import axios from 'axios';
 import BuyLoginSheet from '../components/BuyLoginSheet';
@@ -45,9 +47,16 @@ const MIN_IMAGE_HEIGHT = 300;
 const MAX_IMAGE_HEIGHT = 700;
 const CARD_BORDER_RADIUS = 0;
 
-// Post media bounds (relative to device height)
-const POST_MEDIA_MIN_RATIO = 0.30; // min height = 30% of screen
-const POST_MEDIA_MAX_RATIO = 0.75; // max height = 75% of screen
+// Silent poll intervals (Videos + Saved tabs)
+const SILENT_REFRESH_MS = 2000;
+
+const EYE_BUTTON_SIZE = 52;
+const EYE_BUTTON_MARGIN = 8;
+const EYE_BUTTON_MIN_TOP = 80;
+const EYE_BUTTON_BOTTOM_PADDING = 100;
+
+const POST_MEDIA_MIN_RATIO = 0.30;
+const POST_MEDIA_MAX_RATIO = 0.75;
 
 let restoredReelIndex = 0;
 
@@ -102,6 +111,8 @@ const translations = {
     pleaseLoginToProfile: 'Please login to view profile',
     pleaseLoginToMessage: 'Please login to message the seller',
     sellerInfoMissing: 'Seller information not available',
+    userInfoMissing: 'Your account information is unavailable. Please try again.',
+    cannotMessageYourself: 'You cannot start a conversation with yourself.',
     titleRequired: 'Title required',
     enterTitle: 'Please enter a title for your update.',
     noDescription: 'No description provided.',
@@ -127,6 +138,7 @@ const translations = {
     sending: 'Sending...',
     messageSent: 'Message sent!',
     messageSentFailed: 'Failed to send message',
+    availableSuggestion: 'Is this %s available?',
   },
   Kinyarwanda: {
     loading: 'Turigutunganya page neza...',
@@ -157,6 +169,8 @@ const translations = {
     pleaseLoginToProfile: 'Nyamuneka Injira kugira ngo urebe porofile',
     pleaseLoginToMessage: 'Nyamuneka Injira kugira ngo wandike ubutumwa',
     sellerInfoMissing: 'Amakuru y\'umugurisha ntiboneka',
+    userInfoMissing: 'Amakuru ya konti yawe ntabonetse. Ongera ugerageze.',
+    cannotMessageYourself: 'Ntushobora gutangiza ikiganiro nawe ubwawe.',
     titleRequired: 'Umutwe urakenewe',
     enterTitle: 'Nyamuneka andika umutwe w\'ikinyabupfura.',
     noDescription: 'Nta bisobanuro byatanzwe.',
@@ -182,6 +196,7 @@ const translations = {
     sending: 'Kohereza...',
     messageSent: 'Ubutumwa bwoherejwe!',
     messageSentFailed: 'Kohereza ubutumwa byanze',
+    availableSuggestion: 'Iyi %s iracyahari ?',
   },
 };
 
@@ -221,12 +236,6 @@ const getImageSize = (source) => {
   return Promise.resolve({ width: CARD_WIDTH, height: MIN_IMAGE_HEIGHT });
 };
 
-/**
- * Fit media into [minHeight, maxHeight]:
- *  - Natural scaled height > maxHeight → crop (`cover`) at maxHeight.
- *  - Natural scaled height < minHeight → ZOOM IN (`cover`) at minHeight.
- *  - Otherwise → use scaled height with `contain`.
- */
 const computeScaledMediaLayout = (naturalWidth, naturalHeight, cardWidth, maxHeight, minHeight = 0) => {
   if (!naturalWidth || !naturalHeight) {
     return { height: Math.max(minHeight, maxHeight), resizeMode: 'contain' };
@@ -238,7 +247,6 @@ const computeScaledMediaLayout = (naturalWidth, naturalHeight, cardWidth, maxHei
   if (scaled > maxHeight) {
     return { height: maxHeight, resizeMode: 'cover' };
   }
-  // Short image → zoom in to fill the min-height area
   if (scaled < minHeight) {
     return { height: minHeight, resizeMode: 'cover' };
   }
@@ -259,13 +267,14 @@ const mapPost = (post) => ({
   contactNumber1: post.contactNumbers?.[0] || '',
   contactNumber2: post.contactNumbers?.[1] || '',
   priceNegotiable: post.priceNegotiable || false,
-  videoUrl: post.videoUrl || post.videoHlsUrl || post.video?.url || '',
-  videoDuration: post.videoDuration || 0,
-  videoThumbnail: post.videoThumbnail || '',
-  videoLink: post.videoLink || '',
-  videoHlsUrl: post.videoHlsUrl || '',
-  videoId: post.videoId || '',
-  userId: post.user?._id || post.user,
+  videoUrl: post.videoUrl || post.videoHlsUrl || post.video?.url || post.video?.mp4 || post.mediaUrl || post.media?.url || post.fileUrl || '',
+  videoDuration: post.videoDuration || post.duration || 0,
+  videoThumbnail: post.videoThumbnail || post.thumbnail || post.poster || '',
+  videoLink: post.videoLink || post.link || '',
+  videoHlsUrl: post.videoHlsUrl || post.hlsUrl || '',
+  videoId: post.videoId || post.id || '',
+  reelId: String(post._id || post.id || post.reelId || post.videoId || post.videoUrl || post.video?.url || ''),
+  userId: post.userId || post.user?._id || post.user,
   status: post.status || 'active',
   featured: post.featured || false,
 });
@@ -276,15 +285,12 @@ const getPostOwnerId = (post) => {
 };
 
 /* ============================================================
-   Video helpers (merged from VideoPost + VideoPlayerControls)
+   Video helpers
    ============================================================ */
 const safePlayerAction = (player, methodName, ...args) => {
   if (!player || typeof player[methodName] !== 'function') return false;
   try { return player[methodName](...args); }
-  catch (_) {
-    if (__DEV__) console.warn(`Video ${methodName} skipped — player released.`);
-    return false;
-  }
+  catch (_) { return false; }
 };
 
 const safePlayerSet = (player, propertyName, value) => {
@@ -302,7 +308,6 @@ const SPEED_STEPS = [
 ];
 const PIXELS_PER_REWIND_SECOND = 10;
 const MAX_REWIND_SECONDS = 45;
-const CHROME_HIDE_DELAY = 4000;
 const DOUBLE_TAP_DELAY = 240;
 const DOUBLE_TAP_SEEK_SECONDS = 10;
 
@@ -371,7 +376,6 @@ const ShaakaVideoPlayer = ({
   const progressBarWidth = useRef(SCREEN_WIDTH * 0.7);
   const wasPlayingBeforeSeek = useRef(false);
   const seekTimeRef = useRef(0);
-  const hideChromeTimeout = useRef(null);
   const gestureIndicatorTimeout = useRef(null);
   const mounted = useRef(true);
   const lastTapRef = useRef(0);
@@ -391,7 +395,6 @@ const ShaakaVideoPlayer = ({
     latestRef.current = { player, duration, currentTime, isPlayingState };
   });
 
-  /* ---------- cover generation ---------- */
   useEffect(() => {
     let alive = true;
     if (!videoUrl) return;
@@ -410,7 +413,6 @@ const ShaakaVideoPlayer = ({
     return () => { alive = false; };
   }, [videoUrl, videoThumbnail, retryTick]);
 
-  /* ---------- mute sync ---------- */
   useEffect(() => {
     if (player) {
       safePlayerSet(player, 'muted', muted);
@@ -418,20 +420,17 @@ const ShaakaVideoPlayer = ({
     }
   }, [player, muted]);
 
-  /* ---------- preloader register ---------- */
   useEffect(() => {
     videoPreloader.registerPlayer(player);
     return () => videoPreloader.unregisterPlayer(player);
   }, [player]);
 
-  /* ---------- autoplay on visibility ---------- */
   useEffect(() => {
     if (!player || !ready) return;
     if (isVisible && manualOverride.current !== false) safePlayerAction(player, 'play');
     else if (!isVisible) safePlayerAction(player, 'pause');
   }, [player, ready, isVisible]);
 
-  /* ---------- player events ---------- */
   useEffect(() => {
     if (!player) return;
     const s1 = player.addListener('statusChange', ({ status }) => {
@@ -459,7 +458,6 @@ const ShaakaVideoPlayer = ({
     return () => { s1.remove(); s2.remove(); s3.remove(); s4.remove(); };
   }, [player, duration, isSeeking, progressAnim]);
 
-  /* ---------- height animation ---------- */
   useEffect(() => {
     if (containerHeight) {
       Animated.timing(videoHeightAnimation, {
@@ -476,12 +474,10 @@ const ShaakaVideoPlayer = ({
     }).start();
   }, [videoSize, containerHeight, videoHeightAnimation]);
 
-  /* ---------- cleanup ---------- */
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      if (hideChromeTimeout.current) clearTimeout(hideChromeTimeout.current);
       if (gestureIndicatorTimeout.current) clearTimeout(gestureIndicatorTimeout.current);
       if (singleTapRef.current) clearTimeout(singleTapRef.current);
       if (player) {
@@ -491,54 +487,17 @@ const ShaakaVideoPlayer = ({
     };
   }, [player]);
 
-  /* ---------- chrome helpers ---------- */
   const animateChrome = to => {
     Animated.timing(chromeOpacity, { toValue: to, duration: 220, useNativeDriver: true }).start();
   };
-  const scheduleChromeHide = () => {
-    if (hideChromeTimeout.current) clearTimeout(hideChromeTimeout.current);
-    if (!isPlayingState || isSeeking) return;
-    hideChromeTimeout.current = setTimeout(() => {
-      hideChromeTimeout.current = null;
-      if (!mounted.current || !latestRef.current.isPlayingState || isSeeking) return;
-      setChromeVisible(false);
-      animateChrome(0);
-    }, CHROME_HIDE_DELAY);
-  };
   const revealChrome = () => {
-    if (hideChromeTimeout.current) {
-      clearTimeout(hideChromeTimeout.current);
-      hideChromeTimeout.current = null;
-    }
     setChromeVisible(true);
     animateChrome(1);
-    scheduleChromeHide();
   };
 
-  // Auto-hide overlay (play/pause + mute) after 4 s while playing
   useEffect(() => {
-    if (!ready || !isPlayingState || hasError || isSeeking) return undefined;
-    if (hideChromeTimeout.current) {
-      clearTimeout(hideChromeTimeout.current);
-      hideChromeTimeout.current = null;
-    }
-    hideChromeTimeout.current = setTimeout(() => {
-      hideChromeTimeout.current = null;
-      if (!mounted.current || !latestRef.current.isPlayingState || isSeeking) return;
-      setChromeVisible(false);
-      Animated.timing(chromeOpacity, {
-        toValue: 0,
-        duration: 220,
-        useNativeDriver: true,
-      }).start();
-    }, CHROME_HIDE_DELAY);
-    return () => {
-      if (hideChromeTimeout.current) {
-        clearTimeout(hideChromeTimeout.current);
-        hideChromeTimeout.current = null;
-      }
-    };
-  }, [isPlayingState, ready, hasError, isSeeking, chromeOpacity]);
+    if (isVisible) revealChrome();
+  }, [isVisible]);
 
   const showGestureIndicator = (payload, hideAfter = 700) => {
     setGestureIndicator(payload);
@@ -549,7 +508,6 @@ const ShaakaVideoPlayer = ({
     }, hideAfter);
   };
 
-  /* ---------- core actions ---------- */
   const togglePlayPause = useCallback(() => {
     if (!player) return;
     const willPlay = !isPlayingState;
@@ -613,14 +571,12 @@ const ShaakaVideoPlayer = ({
     singleTapRef.current = setTimeout(() => {
       singleTapRef.current = null;
       if (!mounted.current) return;
-      // Always reveal controls (unhide when hidden) + toggle playback.
       revealChrome();
       if (onVideoPress) onVideoPress();
       else togglePlayPause();
     }, DOUBLE_TAP_DELAY);
   }, [handleDoubleTapSeek, onVideoPress, togglePlayPause]);
 
-  /* ---------- swipe (right = seek, left = speed) ---------- */
   const swipePanResponder = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => false,
     onStartShouldSetPanResponderCapture: () => false,
@@ -628,7 +584,6 @@ const ShaakaVideoPlayer = ({
     onMoveShouldSetPanResponderCapture: (e, gs) => _isHorizontalSwipe(gs),
     onPanResponderGrant: () => {
       if (gestureIndicatorTimeout.current) { clearTimeout(gestureIndicatorTimeout.current); gestureIndicatorTimeout.current = null; }
-      if (hideChromeTimeout.current) { clearTimeout(hideChromeTimeout.current); hideChromeTimeout.current = null; }
       revealChrome();
       const { currentTime: t } = latestRef.current;
       gestureRef.mode = null;
@@ -696,7 +651,6 @@ const ShaakaVideoPlayer = ({
     },
   })).current;
 
-  /* ---------- progress bar seek ---------- */
   const progressPanResponder = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
@@ -785,21 +739,18 @@ const ShaakaVideoPlayer = ({
           nativeControls={false}
         />
 
-        {/* Gesture + tap layer */}
         <View style={StyleSheet.absoluteFill} {...swipePanResponder.panHandlers}>
           <TouchableWithoutFeedback onPress={handleTap}>
             <View style={StyleSheet.absoluteFill} />
           </TouchableWithoutFeedback>
         </View>
 
-        {/* Loading spinner */}
         {(isBuffering || !ready) && !hasError && (
           <View style={styles.videoOverlayCenter} pointerEvents="none">
             <ActivityIndicator size="large" color="#fff" />
           </View>
         )}
 
-        {/* Center play/pause control (fades with chrome) */}
         {ready && !hasError && !isSeeking && (
           <Animated.View
             style={[
@@ -808,7 +759,7 @@ const ShaakaVideoPlayer = ({
             ]}
             pointerEvents="box-none"
           >
-            {(!isPlayingState || chromeVisible) && (
+            {chromeVisible && (
               <TouchableOpacity
                 onPress={togglePlayPause}
                 style={styles.videoPauseCircle}
@@ -827,7 +778,6 @@ const ShaakaVideoPlayer = ({
           </Animated.View>
         )}
 
-        {/* Error overlay */}
         {hasError && (
           <View style={styles.videoOverlayCenter}>
             <View style={styles.videoErrorBox}>
@@ -841,7 +791,6 @@ const ShaakaVideoPlayer = ({
           </View>
         )}
 
-        {/* Top-right mute — fades with chrome, hidden after 4 s */}
         {showTopMuteResolved && !hasError && (
           <Animated.View
             style={[styles.videoTopMute, { opacity: chromeOpacity }]}
@@ -851,13 +800,25 @@ const ShaakaVideoPlayer = ({
           </Animated.View>
         )}
 
-        {/* Full controls bottom bar */}
         {showPlaybackControls && ready && !hasError && (
           <Animated.View
             style={[styles.videoBottomBar, { opacity: chromeOpacity }]}
             pointerEvents={chromeVisible ? 'box-none' : 'none'}
           >
             {showBottomMute && muteButton(17)}
+            <TouchableOpacity
+              style={styles.videoBarPlayButton}
+              onPress={togglePlayPause}
+              activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel={isPlayingState ? 'Pause video' : 'Resume video'}
+            >
+              <Ionicons
+                name={isPlayingState ? 'pause' : 'play'}
+                size={20}
+                color="#fff"
+              />
+            </TouchableOpacity>
             <View
               style={styles.videoProgressWrap}
               onLayout={e => { progressBarWidth.current = e.nativeEvent.layout.width; }}
@@ -881,7 +842,6 @@ const ShaakaVideoPlayer = ({
           </Animated.View>
         )}
 
-        {/* Thin progress line (minimal mode) */}
         {!showPlaybackControls && ready && !hasError && (
           <View style={styles.videoProgressLineWrap} pointerEvents="none">
             <Animated.View
@@ -890,7 +850,6 @@ const ShaakaVideoPlayer = ({
           </View>
         )}
 
-        {/* Gesture indicator */}
         {gestureIndicator && (
           <View style={styles.videoOverlayCenter} pointerEvents="none">
             <View style={styles.videoGestureBubble}>
@@ -990,11 +949,7 @@ const ImageWithPlaceholder = React.memo(({ source, style, resizeMode, transparen
         >
           <Animated.Image
             source={LOADING_LOGO}
-            style={{
-              width: 46,
-              height: 46,
-              resizeMode: 'contain',
-            }}
+            style={{ width: 46, height: 46, resizeMode: 'contain' }}
           />
         </Animated.View>
       )}
@@ -1147,7 +1102,8 @@ const SuggestionOverlayContent = React.memo(({
   inline = false,
 }) => {
   const productLabel = (house.productName || house.category || house.title || 'item').trim();
-  const suggestionText = productLabel ? productLabel.toLowerCase() : 'item';
+  const availableSuggestion = (t.availableSuggestion || 'Is this %s available?')
+    .replace('%s', productLabel || 'item');
   const shakeAnim = useRef(new Animated.Value(0)).current;
   const logoScaleAnim = useRef(new Animated.Value(1)).current;
   const successOpacity = useRef(new Animated.Value(0)).current;
@@ -1271,10 +1227,9 @@ const SuggestionOverlayContent = React.memo(({
         <TouchableOpacity
           style={styles.suggestionSection}
           activeOpacity={0.7}
-          onPress={() => handleQuickSuggestion(`Is this ${suggestionText} available?`)}
-          disabled={isSendingSuggestion}
+          onPress={() => handleQuickSuggestion(availableSuggestion)}
         >
-          <Text style={styles.suggestionTitle}>Is this {suggestionText} available?</Text>
+          <Text style={styles.suggestionTitle}>{availableSuggestion}</Text>
         </TouchableOpacity>
       </View>
     </Animated.View>
@@ -1746,7 +1701,7 @@ const HouseCard = React.memo(({
 });
 
 /* ============================================================
-   ReelsFeed
+   ReelsFeed  (silent-refresh compatible)
    ============================================================ */
 const ReelsFeed = React.memo(({
   reels,
@@ -1768,6 +1723,7 @@ const ReelsFeed = React.memo(({
   onLoadMore,
   showLoginModal,
   t,
+  targetReelId,
 }) => {
   const isFocused = useIsFocused();
   const listRef = useRef(null);
@@ -1781,6 +1737,9 @@ const ReelsFeed = React.memo(({
   const onLoadMoreRef = useRef(onLoadMore);
   latestReelsRef.current = reels;
   onLoadMoreRef.current = onLoadMore;
+
+  const hasInitialScrolledRef = useRef(false);
+  const lastScrolledReelIdRef = useRef(null);
 
   const handleLayout = useCallback((e) => {
     const h = e.nativeEvent.layout.height;
@@ -1830,12 +1789,26 @@ const ReelsFeed = React.memo(({
 
   useEffect(() => {
     if (!reels.length || containerHeight <= 0) return;
-    const nextIndex = Math.min(restoredReelIndex, reels.length - 1);
+    if (targetReelId && lastScrolledReelIdRef.current === targetReelId) return;
+
+    const targetIndex = targetReelId
+      ? reels.findIndex(reel => String(reel.reelId || reel._id) === targetReelId)
+      : -1;
+    if (targetReelId && targetIndex < 0 && loading) return;
+    if (!targetReelId && hasInitialScrolledRef.current) return;
+
+    hasInitialScrolledRef.current = true;
+    const nextIndex = targetIndex >= 0
+      ? targetIndex
+      : Math.min(restoredReelIndex, reels.length - 1);
+    if (targetReelId && targetIndex >= 0) {
+      lastScrolledReelIdRef.current = targetReelId;
+    }
     setActiveIndex(nextIndex);
     requestAnimationFrame(() => {
       listRef.current?.scrollToIndex({ index: nextIndex, animated: false });
     });
-  }, [reels.length, containerHeight]);
+  }, [reels, containerHeight, targetReelId, loading]);
 
   const handleMore = useCallback((reel) => {
     if (!isLoggedIn) {
@@ -2019,12 +1992,14 @@ const ReelsFeed = React.memo(({
       <FlatList
         ref={listRef}
         data={reels}
-        keyExtractor={(item, index) => `${item._id}_${index}`}
+        keyExtractor={item => String(item.reelId || item._id)}
         renderItem={renderReel}
         pagingEnabled
         decelerationRate="fast"
         showsVerticalScrollIndicator={false}
-        initialScrollIndex={Math.min(restoredReelIndex, Math.max(0, reels.length - 1))}
+        initialScrollIndex={Math.max(0, targetReelId
+          ? reels.findIndex(reel => String(reel.reelId || reel._id) === targetReelId)
+          : Math.min(restoredReelIndex, Math.max(0, reels.length - 1)))}
         getItemLayout={(_, index) => ({
           length: containerHeight,
           offset: containerHeight * index,
@@ -2037,6 +2012,7 @@ const ReelsFeed = React.memo(({
         initialNumToRender={1}
         updateCellsBatchingPeriod={50}
         removeClippedSubviews={false}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         onScrollToIndexFailed={({ index }) => {
           listRef.current?.scrollToOffset({
             offset: containerHeight * index,
@@ -2072,12 +2048,10 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   const [activeTab, setActiveTab] = useState(initialTab);
   const [screenAreaHeight, setScreenAreaHeight] = useState(windowHeight);
 
-  // Max = 75% of screen (or available area)
   const maxPostMediaHeight = Math.max(
     1,
     Math.min(windowHeight * POST_MEDIA_MAX_RATIO, screenAreaHeight - HEADER_HEIGHT)
   );
-  // Min = exactly 30% of screen (clamped to max)
   const minPostMediaHeight = Math.min(
     windowHeight * POST_MEDIA_MIN_RATIO,
     maxPostMediaHeight
@@ -2162,11 +2136,96 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     }
   }, []);
 
-  const [showBackToTop, setShowBackToTop] = useState(false);
+  const [headerVisible, setHeaderVisible] = useState(true);
   const headerHeightAnim = useRef(new Animated.Value(HEADER_HEIGHT)).current;
   const headerOpacityAnim = useRef(new Animated.Value(1)).current;
   const feedListRef = useRef(null);
   const gridListRef = useRef(null);
+  const lastScrollY = useRef(0);
+
+  const eyePosRef = useRef({
+    x: SCREEN_WIDTH - EYE_BUTTON_SIZE - EYE_BUTTON_MARGIN,
+    y: SCREEN_HEIGHT - EYE_BUTTON_SIZE - EYE_BUTTON_BOTTOM_PADDING,
+  });
+  const eyeDragStartRef = useRef({ x: 0, y: 0 });
+  const eyePos = useRef(new Animated.ValueXY(eyePosRef.current)).current;
+  const eyePanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onStartShouldSetPanResponderCapture: () => false,
+      onMoveShouldSetPanResponder: (_, gs) =>
+        Math.abs(gs.dx) > 4 || Math.abs(gs.dy) > 4,
+      onMoveShouldSetPanResponderCapture: (_, gs) =>
+        Math.abs(gs.dx) > 4 || Math.abs(gs.dy) > 4,
+      onPanResponderGrant: () => {
+        eyeDragStartRef.current = { ...eyePosRef.current };
+      },
+      onPanResponderMove: (_, gs) => {
+        const nx = Math.max(
+          0,
+          Math.min(SCREEN_WIDTH - EYE_BUTTON_SIZE, eyeDragStartRef.current.x + gs.dx)
+        );
+        const ny = Math.max(
+          EYE_BUTTON_MIN_TOP,
+          Math.min(
+            SCREEN_HEIGHT - EYE_BUTTON_SIZE - 20,
+            eyeDragStartRef.current.y + gs.dy
+          )
+        );
+        eyePos.setValue({ x: nx, y: ny });
+      },
+      onPanResponderRelease: (_, gs) => {
+        const draggedX = Math.max(
+          0,
+          Math.min(SCREEN_WIDTH - EYE_BUTTON_SIZE, eyeDragStartRef.current.x + gs.dx)
+        );
+        const leftX = EYE_BUTTON_MARGIN;
+        const rightX = Math.max(
+          0,
+          SCREEN_WIDTH - EYE_BUTTON_SIZE - EYE_BUTTON_MARGIN
+        );
+        const nx = draggedX + EYE_BUTTON_SIZE / 2 < SCREEN_WIDTH / 2
+          ? leftX
+          : rightX;
+        const ny = Math.max(
+          EYE_BUTTON_MIN_TOP,
+          Math.min(
+            SCREEN_HEIGHT - EYE_BUTTON_SIZE - 20,
+            eyeDragStartRef.current.y + gs.dy
+          )
+        );
+        eyePosRef.current = { x: nx, y: ny };
+        eyePos.setValue({ x: nx, y: ny });
+      },
+      onPanResponderTerminate: () => {
+        // Keep last pos
+      },
+    })
+  ).current;
+
+  const handleEyePress = useCallback(() => {
+    if (headerVisible) {
+      Animated.parallel([
+        Animated.timing(headerHeightAnim, {
+          toValue: 0, duration: 220, useNativeDriver: false,
+        }),
+        Animated.timing(headerOpacityAnim, {
+          toValue: 0, duration: 220, useNativeDriver: false,
+        }),
+      ]).start();
+      setHeaderVisible(false);
+    } else {
+      Animated.parallel([
+        Animated.timing(headerHeightAnim, {
+          toValue: HEADER_HEIGHT, duration: 220, useNativeDriver: false,
+        }),
+        Animated.timing(headerOpacityAnim, {
+          toValue: 1, duration: 220, useNativeDriver: false,
+        }),
+      ]).start();
+      setHeaderVisible(true);
+    }
+  }, [headerVisible, headerHeightAnim, headerOpacityAnim]);
 
   const [addSheetVisible, setAddSheetVisible] = useState(false);
   const addSheetAnim = useRef(new Animated.Value(BOTTOM_SHEET_HEIGHT)).current;
@@ -2230,23 +2289,17 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
 
   const handleScroll = useCallback((event) => {
     const currentScrollY = event.nativeEvent.contentOffset.y;
-    setShowBackToTop(currentScrollY > 200);
 
     const headerCollapse = Math.min(currentScrollY, HEADER_HEIGHT);
-    headerHeightAnim.setValue(Math.max(HEADER_HEIGHT - headerCollapse, 0));
-    headerOpacityAnim.setValue(Math.max(1 - currentScrollY / (HEADER_HEIGHT + 20), 0));
-  }, [headerHeightAnim, headerOpacityAnim]);
+    const newHeight = Math.max(HEADER_HEIGHT - headerCollapse, 0);
+    const newOpacity = Math.max(1 - currentScrollY / (HEADER_HEIGHT + 20), 0);
 
-  const scrollToTop = useCallback(() => {
-    if (activeTab === 'ushaka' || activeTab === 'videos') {
-      feedListRef.current?.scrollToOffset({ offset: 0, animated: true });
-    } else {
-      gridListRef.current?.scrollToOffset({ offset: 0, animated: true });
-    }
-    headerHeightAnim.setValue(HEADER_HEIGHT);
-    headerOpacityAnim.setValue(1);
-    setShowBackToTop(false);
-  }, [activeTab, headerHeightAnim, headerOpacityAnim]);
+    headerHeightAnim.setValue(newHeight);
+    headerOpacityAnim.setValue(newOpacity);
+    setHeaderVisible(newHeight > 10);
+
+    lastScrollY.current = currentScrollY;
+  }, [headerHeightAnim, headerOpacityAnim]);
 
   const closeVideos = useCallback(() => {
     const feedTabKey = POST_SECTIONS.feed.key;
@@ -2271,7 +2324,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   }, [navigation, route.name]);
 
   useEffect(() => {
-    setShowBackToTop(false);
+    setHeaderVisible(true);
     headerHeightAnim.setValue(HEADER_HEIGHT);
     headerOpacityAnim.setValue(1);
   }, [activeTab, headerHeightAnim, headerOpacityAnim]);
@@ -2338,7 +2391,9 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       }));
       return notes;
     } catch (error) {
-      console.error('Notes fetch failed:', error.message);
+      if (error?.response?.status !== 401 && error?.code !== 'ERR_NETWORK' && error?.message !== 'Network Error') {
+        console.error('Notes fetch failed:', error.message);
+      }
       return [];
     }
   }, [loadViewedTimestamps]);
@@ -2428,7 +2483,9 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         nextCursor: response.data.nextCursor || null,
       };
     } catch (error) {
-      console.error('Public feed fetch failed:', error.message);
+      if (error?.response?.status !== 401 && error?.code !== 'ERR_NETWORK' && error?.message !== 'Network Error') {
+        console.error('Public feed fetch failed:', error.message);
+      }
       const cachedPosts = await cachedPostsPromise;
       if (Array.isArray(cachedPosts)) {
         return {
@@ -2551,7 +2608,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     setRefreshing(true);
     headerHeightAnim.setValue(HEADER_HEIGHT);
     headerOpacityAnim.setValue(1);
-    setShowBackToTop(false);
+    setHeaderVisible(true);
     await loadData(true);
     setRefreshing(false);
   }, [headerHeightAnim, headerOpacityAnim, loadData]);
@@ -2623,6 +2680,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         contactNumbers: house.contactNumbers || [],
         houseImages: house.houseImages || [],
         videoUrl: house.videoUrl || '',
+        videoThumbnail: getVideoCover(house.videoUrl, house.videoThumbnail) || '',
         username: sellerDisplayName,
         userAvatar: house.userAvatar || house.user?.avatar || '',
         ownerId: sellerId,
@@ -2769,46 +2827,37 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       });
       return;
     }
-    const sellerId = house.userId;
+    const sellerId = getPostOwnerId(house);
     if (!sellerId) {
       Alert.alert('Error', t.sellerInfoMissing);
       return;
     }
+    if (!viewerId) {
+      Alert.alert(t.error, t.userInfoMissing);
+      return;
+    }
+    if (String(viewerId) === String(sellerId)) {
+      Alert.alert(t.error, t.cannotMessageYourself);
+      return;
+    }
+
+    const postId = house._id || house.id;
+    if (!postId) {
+      Alert.alert('Error', t.sellerInfoMissing);
+      return;
+    }
+
     const sellerDisplayName = getUserDisplayName(house.user || house, 'Seller');
-    const replyPost = {
-      postId: house._id,
-      contextType: 'post',
-      title: house.productName || house.title || 'Product',
-      description: house.description || '',
-      image: (house.houseImages && house.houseImages.length > 0)
-        ? (typeof house.houseImages[0] === 'string' ? house.houseImages[0] : house.houseImages[0]?.uri || house.houseImages[0])
-        : null,
-      price: house.price ?? null,
-      amount: house.amount || '',
-      location: house.location || '',
-      category: house.category || '',
-      bedrooms: house.bedrooms ?? null,
-      bathrooms: house.bathrooms ?? null,
-      size: house.size ?? null,
-      priceNegotiable: !!house.priceNegotiable,
-      contactNumbers: house.contactNumbers || [],
-      houseImages: house.houseImages || [],
-      videoUrl: house.videoUrl || '',
-      username: sellerDisplayName,
-      userAvatar: house.userAvatar || house.user?.avatar || '',
-      ownerId: sellerId,
-      timestamp: house.createdAt || new Date().toISOString(),
-    };
+    const productName = house.productName || house.title || 'Product';
     navigation.navigate('Chat', {
-      sellerId: sellerId,
+      sellerId: String(sellerId),
       sellerName: sellerDisplayName,
-      sellerAvatar: house.userAvatar || '',
+      sellerAvatar: house.userAvatar || house.user?.avatar || '',
       sellerPhone: house.contactNumber1 || house.contactNumber2 || '',
-      postId: house._id,
-      postTitle: house.productName || 'Product',
-      replyPost: replyPost,
+      postId: String(postId),
+      postTitle: productName,
     });
-  }, [isLoggedIn, t, navigation]);
+  }, [isLoggedIn, t, navigation, viewerId, showBottomSheet]);
 
   const handleReport = useCallback(async (post, reason) => {
     try {
@@ -2916,6 +2965,25 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     return activeTab === 'utanga' ? posts : posts.filter(post => !isOwnPost(post));
   }, [activeTab, browseFeedPosts, isLoggedIn, isOwnPost, myPosts, savedPosts]);
 
+  const targetReelId = String(route.params?.reelId || '');
+  const targetReelPost = route.params?.reelPost;
+  const displayedReels = useMemo(() => {
+    const reels = getDisplayedPosts();
+    if (!targetReelId || reels.some(reel => String(reel.reelId || reel._id) === targetReelId)) {
+      return reels;
+    }
+
+    if (!targetReelPost || typeof targetReelPost !== 'object') return reels;
+    const targetReel = mapPost(targetReelPost);
+    if (!targetReel.videoUrl) return reels;
+
+    return [{
+      ...targetReel,
+      _id: String(targetReel._id || targetReel.id || targetReelId),
+      reelId: targetReelId,
+    }, ...reels];
+  }, [getDisplayedPosts, targetReelId, targetReelPost]);
+
   const loopedFeedData = useMemo(() => {
     if (activeTab !== 'ushaka' || !browseFeedPosts || browseFeedPosts.length === 0) return [];
     return Array.from({ length: feedLoopCount }, () => browseFeedPosts).flat();
@@ -3015,6 +3083,104 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     videoPreloader.clearAll();
   }, []));
 
+  /* ============================================================
+     SILENT AUTO-REFRESH
+     - Only runs on the Videos tab and the Saved tab
+     - Never touches `loading` / `refreshing` / `isAppendingFeed`
+     - Never shows a spinner, alert, or console log
+     - Skips the poll while the app is in the background
+     - Only writes state when the data actually changed
+     ============================================================ */
+  const silentRefreshInFlightRef = useRef(false);
+  const feedPostsRef = useRef(feedPosts);
+  const savedPostsRef = useRef(savedPosts);
+  const activeTabRef = useRef(activeTab);
+  const appStateRef = useRef(AppState.currentState);
+
+  useEffect(() => { feedPostsRef.current = feedPosts; }, [feedPosts]);
+  useEffect(() => { savedPostsRef.current = savedPosts; }, [savedPosts]);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', state => {
+      appStateRef.current = state;
+    });
+    return () => sub?.remove?.();
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'videos' && activeTab !== 'saved') return undefined;
+    if (activeTab === 'saved' && !isLoggedIn) return undefined;
+
+    let cancelled = false;
+    let intervalId = null;
+
+    const runSilentRefresh = async () => {
+      if (cancelled) return;
+      if (silentRefreshInFlightRef.current) return;
+      if (appStateRef.current !== 'active') return;
+      silentRefreshInFlightRef.current = true;
+      try {
+        if (activeTabRef.current === 'videos') {
+          const response = await axios.get(`${BASE_URL}/api/posts`, {
+            params: { pagination: 'cursor', limit: 20 },
+          });
+          if (cancelled) return;
+          const fresh = (response.data.posts || [])
+            .map(mapPost)
+            .filter(post => post.status !== 'stopped' && post.videoUrl);
+          if (fresh.length === 0) return;
+
+          const currentPosts = feedPostsRef.current || [];
+          const currentIds = new Set(currentPosts.map(p => String(p._id)));
+
+          const additions = fresh.filter(p => !currentIds.has(String(p._id)));
+          if (additions.length === 0) return;
+
+          setFeedPosts(prev => {
+            const prevIds = new Set(prev.map(p => String(p._id)));
+            const newOnes = additions.filter(p => !prevIds.has(String(p._id)));
+            if (newOnes.length === 0) return prev;
+            return sortFeedPosts([...newOnes, ...prev], false);
+          });
+        } else if (activeTabRef.current === 'saved') {
+          const token = await getToken();
+          if (!token || cancelled) return;
+          const response = await axios.get(`${BASE_URL}/api/posts/saved`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (cancelled) return;
+          const fresh = (response.data.posts || [])
+            .map(mapPost)
+            .filter(post => post.status !== 'stopped');
+
+          const currentPosts = savedPostsRef.current || [];
+          const freshIds = fresh.map(p => String(p._id));
+          const currentIds = currentPosts.map(p => String(p._id));
+          const freshSet = new Set(freshIds);
+          const currentSet = new Set(currentIds);
+          const same = freshSet.size === currentSet.size &&
+            [...freshSet].every(id => currentSet.has(id));
+          if (same) return;
+
+          setSavedPosts(fresh);
+          setSavedPostIds(freshIds);
+        }
+      } catch (_) {
+        // Deliberately silent – no console log, no Alert, no tracking.
+      } finally {
+        silentRefreshInFlightRef.current = false;
+      }
+    };
+
+    intervalId = setInterval(runSilentRefresh, SILENT_REFRESH_MS);
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [activeTab, isLoggedIn, getToken, sortFeedPosts]);
+
   const renderGridPostItem = useCallback(({ item }) => {
     const isSavedTab = activeTab === 'saved';
     const showDelete = isLoggedIn && !isSavedTab;
@@ -3031,8 +3197,14 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
             </View>
           )}
           {isSavedTab && (
-            <TouchableOpacity style={styles.unsaveButton} onPress={() => toggleSave(item)}>
-              <Ionicons name="bookmark" size={24} color="#fff" />
+            <TouchableOpacity
+              style={[styles.unsaveButton, { backgroundColor: isDarkMode ? '#111' : '#dddd' }]}
+              onPress={event => {
+                event?.stopPropagation?.();
+                toggleSave(item);
+              }}
+            >
+              <Ionicons name="bookmark" size={22} color="#fff" />
             </TouchableOpacity>
           )}
         </TouchableOpacity>
@@ -3042,9 +3214,9 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
             onPress={() => confirmDeletePost(item._id)}
           >
             <View style={styles.gridMenuIconWrapper}>
-              <View style={[styles.gridMenuIconLine, styles.gridMenuIconLineShort, { backgroundColor: '#47ae87' }]} />
-              <View style={[styles.gridMenuIconLine, styles.gridMenuIconLineLong, { backgroundColor: '#47ae87' }]} />
-              <View style={[styles.gridMenuIconLine, styles.gridMenuIconLineMid, { backgroundColor: '#47ae87' }]} />
+              <View style={[styles.gridMenuIconLine, styles.gridMenuIconLineTop, { backgroundColor: '#47ae87' }]} />
+              <View style={[styles.gridMenuIconLine, styles.gridMenuIconLineMiddle, { backgroundColor: '#47ae87' }]} />
+              <View style={[styles.gridMenuIconLine, styles.gridMenuIconLineBottom, { backgroundColor: '#47ae87' }]} />
             </View>
           </TouchableOpacity>
         )}
@@ -3258,9 +3430,10 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
 
       {activeTab === 'videos' ? (
         <ReelsFeed
-          reels={getDisplayedPosts()}
+          reels={displayedReels}
           loading={loading}
           navigation={navigation}
+          targetReelId={targetReelId}
           onCloseVideos={closeVideos}
           theme={theme}
           isDarkMode={isDarkMode}
@@ -3340,20 +3513,53 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         </Animated.View>
       )}
 
-      {showBackToTop && (
-        <TouchableOpacity
-          style={[styles.showHeaderButton, { backgroundColor: theme.login }]}
-          onPress={scrollToTop}
-          activeOpacity={0.9}
+      {/* Eye toggle:
+            – hidden on the Videos (Reels) tab
+            – hidden while the update detail sheet is open
+            – hidden while the "add update" sheet is open */}
+      {activeTab !== 'videos' && !detailSheetVisible && !addSheetVisible && (
+        <Animated.View
+          pointerEvents="box-none"
+          style={[
+            styles.floatingEyeButton,
+            {
+              transform: eyePos.getTranslateTransform(),
+              backgroundColor: isDarkMode ? '#111' : '#dddd',
+            },
+          ]}
+          {...eyePanResponder.panHandlers}
         >
-          <Ionicons name="chevron-up-circle" size={30} color="#fff" />
-        </TouchableOpacity>
-      )}
-
-      {activeTab === 'utanga' && isLoggedIn && (
-        <TouchableOpacity style={[styles.fab, { backgroundColor: theme.accent }]} onPress={() => navigation.navigate('AddPost')}>
-          <Ionicons name="add" size={28} color="#fff" />
-        </TouchableOpacity>
+          <TouchableOpacity
+            onPress={handleEyePress}
+            activeOpacity={0.85}
+            style={styles.floatingEyeButtonInner}
+            accessibilityRole="button"
+            accessibilityLabel={headerVisible ? 'Hide top bar (Unsee)' : 'Show top bar (See)'}
+          >
+            <Svg
+              width={24}
+              height={24}
+              viewBox="0 0 24 24"
+              style={{ transform: [{ rotate: headerVisible ? '0deg' : '180deg' }] }}
+            >
+              <Path
+                d="M2 14C4.2 7.7 8 4 12 4s7.8 3.7 10 10"
+                fill="none"
+                stroke={theme.textSecondary}
+                strokeWidth={2.5}
+                strokeLinecap="round"
+              />
+              <Circle
+                cx={12}
+                cy={13}
+                r={4}
+                fill="none"
+                stroke={theme.textSecondary}
+                strokeWidth={2.5}
+              />
+            </Svg>
+          </TouchableOpacity>
+        </Animated.View>
       )}
 
       <BuyLoginSheet
@@ -3428,7 +3634,6 @@ const styles = StyleSheet.create({
   tabCircleLabel: { fontSize: 11, textAlign: 'center' },
   tabSeparator: { width: 1, height: 30, marginHorizontal: 8, alignSelf: 'center' },
 
-  /* ---------- Horizontal trending strip ---------- */
   productStrip: {
     height: 194,
     paddingTop: 8,
@@ -3545,7 +3750,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  /* ---------- Reels ---------- */
   reelsContainer: {
     flex: 1,
   },
@@ -3726,7 +3930,6 @@ const styles = StyleSheet.create({
   listContent: { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 0 },
   postsGrid: { paddingHorizontal: 8, paddingTop: 0, paddingBottom: 0 },
 
-  /* ---------- Card ---------- */
   card: {
     width: CARD_WIDTH,
     alignSelf: 'stretch',
@@ -3892,7 +4095,6 @@ const styles = StyleSheet.create({
     textShadowRadius: 1.5,
   },
 
-  /* ---------- Description (below image) ---------- */
   descriptionSection: {
     paddingHorizontal: 12,
     paddingTop: 10,
@@ -3930,7 +4132,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
 
-  /* ---------- Suggestion overlay ---------- */
   suggestionOverlay: {
     position: 'absolute',
     bottom: 80,
@@ -4034,7 +4235,6 @@ const styles = StyleSheet.create({
   suggestionStatusText: { fontSize: 10, fontWeight: '700', marginLeft: 8 },
   suggestionSentText: { fontSize: 10, marginLeft: 8, fontStyle: 'italic', maxWidth: '60%' },
 
-  /* ---------- Slider ---------- */
   sliderContainer: {
     position: 'relative',
     width: '100%',
@@ -4050,7 +4250,6 @@ const styles = StyleSheet.create({
   dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.5)' },
   activeDot: { backgroundColor: '#ffffff', width: 12, height: 8 },
 
-  /* ---------- Legacy ---------- */
   postDetails: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 4 },
   price: { fontSize: 18, fontWeight: 'bold', marginBottom: 6 },
   description: { fontSize: 14, lineHeight: 20 },
@@ -4059,45 +4258,47 @@ const styles = StyleSheet.create({
   actionBtn: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, paddingHorizontal: 12, borderRadius: 20, gap: 6 },
   actionText: { fontSize: 14 },
 
-  /* ---------- Empty / loading / fab ---------- */
   emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 100 },
   emptyText: { textAlign: 'center', fontSize: 16, marginBottom: 12 },
   loadingLogo: { width: 64, height: 64, borderRadius: 16 },
   loginEmptyButton: { paddingVertical: 10, paddingHorizontal: 30, borderRadius: 8, marginTop: 8 },
   loginEmptyButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  fab: { position: 'absolute', bottom: 20, right: 20, width: 56, height: 56, borderRadius: 28, justifyContent: 'center', alignItems: 'center', elevation: 5 },
 
-  showHeaderButton: {
+  floatingEyeButton: {
     position: 'absolute',
-    right: 18,
-    bottom: 40,
+    top: 0,
+    left: 0,
+    width: EYE_BUTTON_SIZE,
+    height: EYE_BUTTON_SIZE,
+    borderRadius: EYE_BUTTON_SIZE / 2,
     zIndex: 200,
-    padding: 8,
-    borderRadius: 30,
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
+    elevation: 12,
+    shadowColor: '#00000004',
+    shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.3,
-    shadowRadius: 4,
-    justifyContent: 'center',
+    shadowRadius: 6,
+  },
+  floatingEyeButtonInner: {
+    width: '100%',
+    height: '100%',
     alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: EYE_BUTTON_SIZE / 2,
   },
 
-  /* ---------- Grid ---------- */
   gridRow: { justifyContent: 'space-between', marginBottom: 8 },
   gridPostItem: { width: (SCREEN_WIDTH - 32) / 2, aspectRatio: 1, marginBottom: 8, position: 'relative' },
   gridPostImageContainer: { width: '100%', height: '100%', borderRadius: 6, overflow: 'hidden' },
   gridPostImage: { width: '100%', height: '100%', resizeMode: 'cover' },
   deleteButton: { position: 'absolute', top: 4, right: 4, borderRadius: 12, padding: 2 },
-  gridMenuIconWrapper: { width: 18, height: 18, justifyContent: 'center', alignItems: 'center' },
-  gridMenuIconLine: { borderRadius: 999, height: 2, marginVertical: 1.5 },
-  gridMenuIconLineShort: { width: '42%' },
-  gridMenuIconLineMid: { width: '72%' },
-  gridMenuIconLineLong: { width: '100%' },
-  unsaveButton: { position: 'absolute', bottom: 8, right: 8, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 20, padding: 6 },
+  gridMenuIconWrapper: { width: 20, height: 16, justifyContent: 'space-between', alignItems: 'stretch' },
+  gridMenuIconLine: { height: 2, borderRadius: 999, backgroundColor: '#47ae87' },
+  gridMenuIconLineTop: { width: '60%', alignSelf: 'flex-start' },
+  gridMenuIconLineMiddle: { width: '100%' },
+  gridMenuIconLineBottom: { width: '70%', alignSelf: 'flex-end' },
+  unsaveButton: { position: 'absolute', bottom: 0, right: 0, borderTopLeftRadius: 12, padding: 5, zIndex: 5 },
   videoCoverBadge: { position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: 15, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'center', alignItems: 'center' },
 
-  /* ---------- Sheets ---------- */
   sheetOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.4)', zIndex: 100 },
   bottomSheet: { position: 'absolute', bottom: 0, left: 0, right: 0, height: BOTTOM_SHEET_HEIGHT, zIndex: 101, paddingHorizontal: 20, paddingTop: 16, paddingBottom: 30, borderTopLeftRadius: 20, borderTopRightRadius: 20 },
   topSheet: {
@@ -4149,7 +4350,6 @@ const styles = StyleSheet.create({
   socialIconSmall: { alignItems: 'center' },
   socialIconCircleSmall: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
 
-  /* ---------- Modals ---------- */
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.03)', justifyContent: 'center', alignItems: 'center' },
   modalContainer: { width: '85%', borderRadius: 16, padding: 20 },
   modalTitle: { fontSize: 20, fontWeight: 'bold' },
@@ -4200,7 +4400,6 @@ const styles = StyleSheet.create({
   reportCancelButton: { minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
   reportCancelText: { fontSize: 15, fontWeight: '600' },
 
-  /* ---------- Inline video player ---------- */
   videoContainer: {
     width: '100%',
     backgroundColor: 'transparent',
@@ -4318,6 +4517,12 @@ const styles = StyleSheet.create({
     borderBottomWidth: 0,
     borderColor: 'rgba(255, 255, 255, 0)',
     zIndex: 8,
+  },
+  videoBarPlayButton: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   videoProgressWrap: {
     flex: 1,

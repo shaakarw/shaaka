@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const shouldLogPerformance = () => (
-  process.env.NODE_ENV !== 'production' || process.env.PERF_LOGS === 'true'
+  process.env.PERF_LOGS === 'true'
 );
 
 mongoose.plugin(schema => {

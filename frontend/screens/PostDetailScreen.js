@@ -52,6 +52,7 @@ const getImageSource = (img) => {
 };
 const normalizePost = (post) => ({
   ...post,
+  reelId: String(post._id || post.id || post.reelId || post.videoId || post.videoUrl || post.video?.url || ''),
   amount: post.amount || `RWF ${post.price?.toLocaleString()}`,
   productName: post.productName || post.category || 'Product',
   username: post.username || post.user?.username || 'User',
@@ -66,6 +67,11 @@ const translations = {
   English: {
     loading: 'Getting things ready…',
     contactSeller: 'Contact Seller',
+    productOwner: 'Product Owner',
+    contactTab: 'Contact',
+    descriptionTab: 'Description',
+    callLabel: 'Call:',
+    seller: 'Seller',
     message: 'Message',
     save: 'Save',
     saved: 'Saved',
@@ -97,11 +103,19 @@ const translations = {
     saveFailed: 'Could not save image. Please try again.',
     permissionRequired: 'Permission Required',
     allowPhotos: 'Please allow access to photos to save images.',
+    video: 'Video',
+    buffering: 'Buffering...',
+    previewVideo: 'Preview video',
     shakarole:'Shaaka only connect buyer and seller',
   },
   Kinyarwanda: {
     loading: 'Turigutunganya page neza...',
     contactSeller: 'Vugana n\'umugurisha',
+    productOwner: 'Nyir\'igicuruzwa',
+    contactTab: 'Vugana',
+    descriptionTab: 'Ibisobanuro',
+    callLabel: 'Hamagara:',
+    seller: 'Umugurisha',
     message: 'Ubutumwa',
     save: 'Bika',
     saved: 'IByabitswe',
@@ -133,12 +147,15 @@ const translations = {
     saveFailed: 'Ntibyashobotse kubika amashusho. Ongera ugerageze.',
     permissionRequired: 'Uruhusha rurakenewe',
     allowPhotos: 'Nyamuneka emera uburenganzira bwo kubika amashusho.',
+    video: 'Video',
+    buffering: 'Video iri gufunguka...',
+    previewVideo: 'Reba video',
     shakarole:'Shaaka ihuza ugura nu gurisha gusa',
   },
 };
 
 // --- VIDEO PREVIEW MODAL (Different from Image Preview) ---
-const VideoPreviewModal = ({ visible, videoUrl, onClose, theme, productName }) => {
+const VideoPreviewModal = ({ visible, videoUrl, onClose, theme, productName, t = translations.English }) => {
   const videoRef = useRef(null);
   const controlsTimeout = useRef(null);
   const seekTrackWidth = useRef(0);
@@ -373,7 +390,7 @@ const VideoPreviewModal = ({ visible, videoUrl, onClose, theme, productName }) =
                     style={styles.videoPlayIcon}
                   />
                 </TouchableOpacity>
-                {isBuffering && <Text style={styles.bufferingText}>Buffering...</Text>}
+                {isBuffering && <Text style={styles.bufferingText}>{t.buffering}</Text>}
               </View>
 
               <View style={styles.videoBottomBar}>
@@ -480,19 +497,8 @@ const AutoSlidingImageSlider = ({ images, navigation, title, description, listin
         keyExtractor={(_, idx) => idx.toString()}
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
-        renderItem={({ item, index }) => (
-          <TouchableOpacity
-            activeOpacity={0.95}
-            onPress={() => navigation.navigate('Preview', {
-              images,
-              initialIndex: index,
-              title,
-              description,
-              listing,
-            })}
-          >
-            <Image source={getImageSource(item)} style={styles.houseImage} resizeMode="cover" />
-          </TouchableOpacity>
+        renderItem={({ item }) => (
+          <Image source={getImageSource(item)} style={styles.houseImage} resizeMode="cover" />
         )}
       />
       {images.length > 1 && (
@@ -507,7 +513,7 @@ const AutoSlidingImageSlider = ({ images, navigation, title, description, listin
 };
 
 // --- VIDEO PREVIEW THUMBNAIL (for inline display) ---
-const VideoPreviewThumbnail = ({ videoUrl, onPress }) => {
+const VideoPreviewThumbnail = ({ videoUrl, onPress, t }) => {
   const [thumbnailUri, setThumbnailUri] = useState(null);
 
   useEffect(() => {
@@ -534,7 +540,7 @@ const VideoPreviewThumbnail = ({ videoUrl, onPress }) => {
       activeOpacity={0.9}
       onPress={() => onPress(thumbnailUri)}
       accessibilityRole="button"
-      accessibilityLabel="Preview video"
+      accessibilityLabel={t.previewVideo}
       style={styles.videoThumbnailContainer}
     >
       {thumbnailUri ? (
@@ -548,16 +554,17 @@ const VideoPreviewThumbnail = ({ videoUrl, onPress }) => {
       {/* Video duration badge */}
       <View style={styles.videoDurationBadge}>
         <Ionicons name="time-outline" size={12} color="#FFFFFF" />
-        <Text style={styles.videoDurationText}>Video</Text>
+        <Text style={styles.videoDurationText}>{t.video}</Text>
       </View>
     </TouchableOpacity>
   );
 };
 
 // --- MAIN COMPONENT ---
-const PostDetailScreen = ({ route, navigation }) => {
+const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
   const params = route.params || {};
-  const { house: initialHouse, language = 'English', postId: paramPostId } = params;
+  const { house: initialHouse, postId: paramPostId } = params;
+  const language = appLanguage || params.language || 'English';
   const { theme, isDarkMode } = useTheme();
   const { user: authUser } = useAuth();
   const t = translations[language] || translations.English;
@@ -786,7 +793,7 @@ const PostDetailScreen = ({ route, navigation }) => {
 
   const price = house.amount || `${house.price?.toLocaleString()} RWF`;
   const productName = house.productName || 'Product';
-  const sellerName = house.username || 'User';
+  const sellerName = house.username || t.seller;
   const sellerAvatar = house.userAvatar;
   const location = house.location;
   const description = house.description;
@@ -809,16 +816,15 @@ const PostDetailScreen = ({ route, navigation }) => {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['bottom']}>
       <View style={{ flex: 1 }}>
-        {/* Inline video thumbnail opens the shared full-screen preview. */}
+        {/* Open the matching item in the reels feed. */}
         {house.videoUrl && (
           <VideoPreviewThumbnail
             videoUrl={house.videoUrl}
-            onPress={thumbnailUri => navigation.navigate('Preview', {
-              imageUri: house.videoUrl,
-              videoThumbnail: thumbnailUri || house.videoThumbnail,
-              title: productName,
-              description,
-              listing: previewListing,
+            t={t}
+            onPress={() => navigation.navigate('BuyPost', {
+              activeTab: 'videos',
+              reelId: house.reelId || String(house._id || house.id || house.videoId || house.videoUrl),
+              reelPost: house,
             })}
           />
         )}
@@ -868,7 +874,7 @@ const PostDetailScreen = ({ route, navigation }) => {
             <Image source={getImageSource(sellerAvatar)} style={styles.ownerAvatar} />
             <View>
               <Text style={[styles.ownerName, { color: theme.text }]}>{sellerName}</Text>
-              <Text style={[styles.ownerLabel, { color: theme.textSecondary }]}>Product Owner</Text>
+              <Text style={[styles.ownerLabel, { color: theme.textSecondary }]}>{t.productOwner}</Text>
             </View>
           </View>
 
@@ -878,13 +884,13 @@ const PostDetailScreen = ({ route, navigation }) => {
               style={[styles.tabItem, activeTab === 'Contact' && styles.activeTabItem, { borderBottomColor: theme.text }]}
               onPress={() => setActiveTab('Contact')}
             >
-              <Text style={[styles.tabText, activeTab === 'Contact' ? styles.activeTabText : {}, { color: activeTab === 'Contact' ? theme.text : theme.textSecondary }]}>Contact</Text>
+              <Text style={[styles.tabText, activeTab === 'Contact' ? styles.activeTabText : {}, { color: activeTab === 'Contact' ? theme.text : theme.textSecondary }]}>{t.contactTab}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.tabItem, activeTab === 'Description' && styles.activeTabItem, { borderBottomColor: theme.text }]}
               onPress={() => setActiveTab('Description')}
             >
-              <Text style={[styles.tabText, activeTab === 'Description' ? styles.activeTabText : {}, { color: activeTab === 'Description' ? theme.text : theme.textSecondary }]}>Description</Text>
+              <Text style={[styles.tabText, activeTab === 'Description' ? styles.activeTabText : {}, { color: activeTab === 'Description' ? theme.text : theme.textSecondary }]}>{t.descriptionTab}</Text>
             </TouchableOpacity>
           </View>
 
@@ -894,7 +900,7 @@ const PostDetailScreen = ({ route, navigation }) => {
               <View style={[styles.contactBox, { backgroundColor: theme.background, borderColor: theme.border }]}>
                 <View style={styles.contactLinkRow}>
                   <Ionicons name="call-outline" size={18} color={theme.accent} />
-                  <Text style={[styles.contactText, { color: theme.text }]}>Call:</Text>
+                  <Text style={[styles.contactText, { color: theme.text }]}>{t.callLabel}</Text>
                   <TouchableOpacity onPress={handleCall}>
                     <Text style={[styles.contactLinkText, { color: theme.accent, fontWeight: '600' }]}>{callNumber || t.notProvided}</Text>
                   </TouchableOpacity>
@@ -944,6 +950,7 @@ const PostDetailScreen = ({ route, navigation }) => {
                   contactNumbers: house.contactNumbers || [],
                   houseImages: house.houseImages || [],
                   videoUrl: house.videoUrl || '',
+                  videoThumbnail: house.videoThumbnail || '',
                   username: house.username || '',
                   userAvatar: house.userAvatar || house.user?.avatar || '',
                 ownerId: sellerId,

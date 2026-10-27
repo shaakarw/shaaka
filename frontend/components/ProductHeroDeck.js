@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext'; // 👈 adjust path if needed
+import { logPerformance } from '../utils/performanceLogger';
 
 // ⏱️ Auto-slide interval (milliseconds) — each product shows for 8s
 const SLIDE_DURATION = 8000;
@@ -126,11 +127,9 @@ const ProductDeckCard = ({
           }}
           onLoad={() => {
             if (imageLoadStartedAt.current == null) return;
-            if (typeof __DEV__ === 'undefined' || __DEV__) {
-              console.info(
-                `[Perf] home-product-image ${Date.now() - imageLoadStartedAt.current}ms`
-              );
-            }
+            logPerformance(
+              `[Perf] home-product-image ${Date.now() - imageLoadStartedAt.current}ms`
+            );
             imageLoadStartedAt.current = null;
           }}
         >

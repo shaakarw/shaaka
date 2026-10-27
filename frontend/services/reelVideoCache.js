@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { isOfflineStorageEnabled, offlineDatabase } from './offlineDatabase';
 import { networkStatus } from './networkStatus';
+import { logPerformance } from '../utils/performanceLogger';
 
 const COLLECTION = 'reel-video-cache';
 const DIRECTORY = `${FileSystem.documentDirectory}reel-videos/`;
@@ -153,7 +154,7 @@ export const reelVideoCache = {
         return;
       }
       await pruneCache(activeIndex);
-      console.info(`[Perf] reel-preloaded ${id} ${file.size} bytes`);
+      logPerformance(`[Perf] reel-preloaded ${id} ${file.size} bytes`);
     } catch (error) {
       await FileSystem.deleteAsync(destination, { idempotent: true });
       if (requestedVideoId === id) {

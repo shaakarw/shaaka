@@ -20,6 +20,7 @@ import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import { networkStatus } from '../services/networkStatus';
 import { finishStartupPerformance } from '../services/startupPerformance';
+import { logPerformance } from '../utils/performanceLogger';
 import { offlineDatabase } from '../services/offlineDatabase';
 import { mediaCache } from '../services/mediaCache';
 import { BASE_URL } from '../constants';
@@ -154,9 +155,9 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
     textSecondary: isDarkMode ? '#b0b0b0' : '#555555',
     textTertiary: isDarkMode ? '#888' : '#999',
     accent: isDarkMode ? '#dddddd' : '#333333',
-    activeCardBg: isDarkMode ? '#444' : '#222',
+    activeCardBg: isDarkMode ? '#222' : '#222',
     activeText: isDarkMode ? '#fff' : '#fff',
-    inactiveCardBg: isDarkMode ? '#2a2a2a' : '#f0f0f0',
+    inactiveCardBg: isDarkMode ? '#606060' : '#f0f0f0',
     curveBg: isDarkMode ? '#222' : '#eaeaea',
     shadowColor: isDarkMode ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.08)',
     authButtonBg: isDarkMode ? '#3a3a3a' : '#e8e8e8',
@@ -241,9 +242,7 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
   useEffect(() => {
     if (!allPosts.length || firstProductsLogged.current) return;
     firstProductsLogged.current = true;
-    if (typeof __DEV__ === 'undefined' || __DEV__) {
-      console.info(`[Perf] home-first-products ${Date.now() - homeStartedAt.current}ms count=${allPosts.length}`);
-    }
+    logPerformance(`[Perf] home-first-products ${Date.now() - homeStartedAt.current}ms count=${allPosts.length}`);
   }, [allPosts]);
 
   useEffect(() => {
@@ -278,13 +277,19 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
         setUnreadNotifications(0);
         return;
       }
+      if (!networkStatus.get().isOnline) {
+        setUnreadNotifications(0);
+        return;
+      }
 
       const response = await axios.get(`${BASE_URL}/api/notifications`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setUnreadNotifications(response.data.unreadCount || 0);
     } catch (error) {
-      console.error('Home unread notifications check error:', error);
+      if (!(error?.response?.status === 401 || error?.code === 'ERR_NETWORK' || error?.message === 'Network Error')) {
+        console.error('Home unread notifications check error:', error);
+      }
       setUnreadNotifications(0);
     }
   }, []);
@@ -331,8 +336,8 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
         if (firstUsableLogged.current) return;
         firstUsableLogged.current = true;
         finishStartupPerformance();
-        if ((typeof __DEV__ === 'undefined' || __DEV__) && launchStartedAt) {
-          console.info(`[Perf] launch-to-home-layout ${Date.now() - launchStartedAt}ms`);
+        if (launchStartedAt) {
+          logPerformance(`[Perf] launch-to-home-layout ${Date.now() - launchStartedAt}ms`);
         }
       }}
       style={[styles.safeArea, { backgroundColor: colors.background }]}
@@ -614,7 +619,7 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     justifyContent: 'center',
     gap: 4,
-    shadowColor: '#000',
+    shadowColor: '#828282',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.1,
     shadowRadius: 3,
