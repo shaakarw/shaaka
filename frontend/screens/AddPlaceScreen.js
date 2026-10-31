@@ -1,5 +1,6 @@
+
 // screens/AddPlaceScreen.js
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -26,18 +27,26 @@ import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-ico
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import ArrowUploadLoader from '../components/ArrowUploadLoader';
 import { normalizeRwandaPhone, isValidRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
 import { compressImageForUpload } from '../utils/imageCompressor';
+import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
+import useScreenTutorial from '../hooks/useScreenTutorial';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width, height } = Dimensions.get('window');
 const MAP_HEIGHT = height * 0.35;
 const CATEGORY_ICON_SIZE = 28;
 const BOTTOM_SHEET_HEIGHT = height * 0.75;
+
+// ---------- Tutorial constants ----------
+const ADDPLACE_TUTORIAL_ID = 'add-place-screen';
+const ADDPLACE_TUTORIAL_DELAY_MS = 700;
 
 // ---------- Translations ----------
 const translations = {
@@ -122,6 +131,30 @@ const translations = {
     pleaseWait: 'Locating your position... Please wait...',
     geocodingFailed: 'Geocoding failed.',
     noPlacesFound: 'No places found in Rwanda for: ',
+
+    // ----- Tutorial (per step) -----
+    tStep1MapTitle: 'Choose on the map',
+    tStep1MapBody: 'Tap anywhere on the map or drag it so the pin sits exactly on your business location.',
+    tStep1SearchTitle: 'Search a place',
+    tStep1SearchBody: 'Type a place name and press search to jump straight to that area on the map.',
+    tStep1LocateTitle: 'Find my position',
+    tStep1LocateBody: 'Tap here to use your current GPS location as the place location.',
+    tStep2CategoryTitle: 'Choose a category',
+    tStep2CategoryBody: 'Pick the category that best describes your business. This helps customers find you easily.',
+    tStep3NameTitle: 'Business name',
+    tStep3NameBody: 'Enter the name of your business or place. This field is required.',
+    tStep3DescTitle: 'Description',
+    tStep3DescBody: 'Describe your place so customers know what to expect (max 500 characters).',
+    tStep3PhoneTitle: 'Contact phone',
+    tStep3PhoneBody: 'Add a Rwanda phone number starting with 07 so customers can call you.',
+    tStep4ImageTitle: 'Street image',
+    tStep4ImageBody: 'Upload a clear photo of your street or place. This image is required.',
+    tStep4ProductsTitle: 'Add products',
+    tStep4ProductsBody: 'Optionally list the products you sell, each with a name, price and photos.',
+    tStep5PreviewTitle: 'Preview',
+    tStep5PreviewBody: 'Tap here to see how your place will look before publishing.',
+    tStep5PublishTitle: 'Publish',
+    tStep5PublishBody: 'Once everything looks good, tap here to publish your place to Shaaka.',
   },
   Kinyarwanda: {
     addPlace: 'Ongeraho ahantu',
@@ -204,6 +237,30 @@ const translations = {
     pleaseWait: 'Turashakisha ahantu... Nyamuneka tegereza...',
     geocodingFailed: 'Gushakisha byanze.',
     noPlacesFound: 'Nta hantu habonetse mu Rwanda hita: ',
+
+    // ----- Tutorial (per step) -----
+    tStep1MapTitle: 'Hitamo ku ikarita',
+    tStep1MapBody: 'Kanda ahantu ku ikarita cyangwa uyikurure kugira ngo akamenyetso kabe aho ubucuruzi bwawe buri.',
+    tStep1SearchTitle: 'Shakisha ahantu',
+    tStep1SearchBody: 'Andika izina ry\'ahantu hanyuma ukande shakisha kugira ngo ujye aho hantu ku ikarita.',
+    tStep1LocateTitle: 'Menya aho ndi',
+    tStep1LocateBody: 'Kanda hano kugirango ukoreshe aho uri ubu ukoresheje GPS.',
+    tStep2CategoryTitle: 'Hitamo icyiciro',
+    tStep2CategoryBody: 'Hitamo icyiciro gisobanura neza ubucuruzi bwawe. Ibi bifasha abakiriya kukubona byoroshye.',
+    tStep3NameTitle: 'Izina ry\'ubucuruzi',
+    tStep3NameBody: 'Andika izina ry\'ubucuruzi cyangwa ahantu hawe. Ibi birasabwa.',
+    tStep3DescTitle: 'Ibisobanuro',
+    tStep3DescBody: 'Sobanura ahantu hawe kugira ngo abakiriya bamenye ibyo kwitega (inyuguti 500 ntarengwa).',
+    tStep3PhoneTitle: 'Numero ya telefone',
+    tStep3PhoneBody: 'Shyiraho numero ya telefone yo mu Rwanda itangira na 07 kugira ngo abakiriya baguhamagare.',
+    tStep4ImageTitle: 'Ifoto y\'umuhanda',
+    tStep4ImageBody: 'Shyira ifoto igaragara neza y\'umuhanda cyangwa ahantu hawe. Iyi foto irasabwa.',
+    tStep4ProductsTitle: 'Ongeraho ibicuruzwa',
+    tStep4ProductsBody: 'Ushobora gushyira ku rutonde ibicuruzwa ugurisha, buri kimwe gifite izina, igiciro n\'ifoto.',
+    tStep5PreviewTitle: 'Reba mbere',
+    tStep5PreviewBody: 'Kanda hano kugira ngo ubone uko ahantu hawe hazagaragara mbere yo gutangaza.',
+    tStep5PublishTitle: 'Tangaza',
+    tStep5PublishBody: 'Iyo byose bigaragara neza, kanda hano utangaze ahantu hawe kuri Shaaka.',
   },
 };
 
@@ -291,10 +348,12 @@ const USER_CATEGORY_IDS = [
 
 export default function AddPlaceScreen({ navigation, route, language = 'English' }) {
   const { theme, isDarkMode } = useTheme();
+  const isFocused = useIsFocused();
   const { showBottomSheet } = useBottomSheet();
   const { refreshUser } = useAuth();
   const adminLimits = useUserLimits();
   const t = translations[language] || translations.English;
+
   const showMapMessage = (title, message, type = 'info', buttonAction) => {
     showBottomSheet({
       type,
@@ -371,6 +430,27 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
 
   const isShoppingMall = selectedCategory === 'shoppingmall';
   const [visibleCategories, setVisibleCategories] = useState([]);
+
+  // ----- Tutorial refs -----
+  const mapWrapperRef = useRef(null);
+  const searchContainerRef = useRef(null);
+  const locateButtonRef = useRef(null);
+  const categoryGridRef = useRef(null);
+  const nameFieldRef = useRef(null);
+  const descriptionFieldRef = useRef(null);
+  const phoneFieldRef = useRef(null);
+  const streetImageRef = useRef(null);
+  const productFormRef = useRef(null);
+  const previewButtonRef = useRef(null);
+  const publishButtonRef = useRef(null);
+
+  // ----- Screen Tutorial hook (step-aware) -----
+  const [showTutorial, finishTutorial] = useScreenTutorial(
+    ADDPLACE_TUTORIAL_ID,
+    isFocused && !loadingUser,
+    ADDPLACE_TUTORIAL_DELAY_MS,
+    step
+  );
 
   // ----- PanResponder for bottom sheet -----
   const panResponder = useRef(
@@ -835,7 +915,6 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
       const token = await AsyncStorage.getItem('userToken');
       if (!token) { showMapMessage(t.error, t.loginRequired, 'error'); setPublishing(false); return; }
       
-      // One-type-only check: verify user does not already have a shopping mall shop
       const mallShopsRes = await axios.get(`${BASE_URL}/api/mall-shops/mine`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -856,6 +935,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
       if (userPlaces.length > 0) { showMapMessage(t.limitReached, t.limitMessage, 'info'); setPublishing(false); return; }
 
       let streetImageUrl = null;
+      let streetImageVariant = null;
       if (streetImage) {
         const compressedImage = await compressImageForUpload(streetImage, 'street.jpg');
         const formData = new FormData();
@@ -863,22 +943,34 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
         const uploadRes = await axios.post(`${BASE_URL}/api/places/upload`, formData, {
           headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
         });
-        if (uploadRes.data.success) streetImageUrl = uploadRes.data.url;
+        if (uploadRes.data.success) {
+          streetImageUrl = uploadRes.data.url;
+          streetImageVariant = uploadRes.data.imageVariants;
+        } else {
+          throw new Error(uploadRes.data.message || 'Place image upload failed');
+        }
       }
 
       let uploadedProducts = [];
       if (!isShoppingMall && products.length > 0) {
         uploadedProducts = await Promise.all(products.map(async (product) => {
-          const productImagesUrls = await Promise.all(product.images.map(async (img) => {
+          const uploadedImages = await Promise.all(product.images.map(async (img) => {
             const compressedImage = await compressImageForUpload(img.uri, img.name || 'product.jpg');
             const formData = new FormData();
             formData.append('image', compressedImage);
             const res = await axios.post(`${BASE_URL}/api/places/upload`, formData, {
               headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` },
             });
-            return res.data.url;
+            if (!res.data.success) throw new Error(res.data.message || 'Product image upload failed');
+            return { url: res.data.url, imageVariants: res.data.imageVariants };
           }));
-          return { name: product.name, price: parseFloat(product.price), description: product.description || '', images: productImagesUrls };
+          return {
+            name: product.name,
+            price: parseFloat(product.price),
+            description: product.description || '',
+            images: uploadedImages.map(image => image.url),
+            imageVariants: uploadedImages.map(image => image.imageVariants).filter(Boolean),
+          };
         }));
       }
 
@@ -892,7 +984,9 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
         },
         openingTime: form.openingTime, closingTime: form.closingTime,
         streetName: form.streetName, buildingNumber: form.buildingNumber,
-        images: { street: streetImageUrl }, products: uploadedProducts,
+        images: { street: streetImageUrl },
+        imageVariants: streetImageVariant ? [streetImageVariant] : [],
+        products: uploadedProducts,
         extras, contactButtons, socialLinks,
       };
 
@@ -914,6 +1008,84 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
       setProgress(0);
     }
   };
+
+  // ----- Tutorial steps (per step) -----
+  const tutorialSteps = useMemo(() => {
+    if (loadingUser) return [];
+    const steps = [];
+
+    if (step === 1) {
+      steps.push(
+        {
+          getTarget: () => mapWrapperRef.current,
+          title: t.tStep1MapTitle,
+          body: t.tStep1MapBody,
+        },
+        {
+          getTarget: () => searchContainerRef.current,
+          title: t.tStep1SearchTitle,
+          body: t.tStep1SearchBody,
+        },
+        {
+          getTarget: () => locateButtonRef.current,
+          title: t.tStep1LocateTitle,
+          body: t.tStep1LocateBody,
+        }
+      );
+    } else if (step === 2) {
+      steps.push({
+        getTarget: () => categoryGridRef.current,
+        title: t.tStep2CategoryTitle,
+        body: t.tStep2CategoryBody,
+      });
+    } else if (step === 3) {
+      steps.push(
+        {
+          getTarget: () => nameFieldRef.current,
+          title: t.tStep3NameTitle,
+          body: t.tStep3NameBody,
+        },
+        {
+          getTarget: () => descriptionFieldRef.current,
+          title: t.tStep3DescTitle,
+          body: t.tStep3DescBody,
+        },
+        {
+          getTarget: () => phoneFieldRef.current,
+          title: t.tStep3PhoneTitle,
+          body: t.tStep3PhoneBody,
+        }
+      );
+    } else if (step === 4) {
+      steps.push({
+        getTarget: () => streetImageRef.current,
+        title: t.tStep4ImageTitle,
+        body: t.tStep4ImageBody,
+      });
+      if (!isShoppingMall) {
+        steps.push({
+          getTarget: () => productFormRef.current,
+          title: t.tStep4ProductsTitle,
+          body: t.tStep4ProductsBody,
+        });
+      }
+    } else if (step === 5) {
+      steps.push(
+        {
+          getTarget: () => previewButtonRef.current,
+          title: t.tStep5PreviewTitle,
+          body: t.tStep5PreviewBody,
+        },
+        {
+          getTarget: () => publishButtonRef.current,
+          title: t.tStep5PublishTitle,
+          body: t.tStep5PublishBody,
+        }
+      );
+    }
+
+    return steps;
+  }, [step, t, loadingUser, isShoppingMall, language]);
 
   // ----- Render step indicator -----
   const renderStepIndicator = () => (
@@ -938,7 +1110,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
             <Text style={[styles.stepTitle, { color: textColor }]}>{t.step1}</Text>
             <Text style={[styles.stepSubtitle, { color: secondaryText }]}>{t.step1Sub}</Text>
 
-            <View style={styles.mapWrapper}>
+            <View ref={mapWrapperRef} collapsable={false} style={styles.mapWrapper}>
               <WebView
                 ref={webViewRef}
                 originWhitelist={['*']}
@@ -957,6 +1129,8 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
               <View style={styles.mapControlsOverlay}>
                 <View style={styles.mapControlsColumn}>
                   <TouchableOpacity
+                    ref={locateButtonRef}
+                    collapsable={false}
                     style={[styles.mapControlBtn, { backgroundColor: isDarkMode ? 'rgba(0,0,0,0.8)' : 'rgba(255,255,255,0.8)' }]}
                     onPress={locateUser}
                     disabled={isLocating}
@@ -996,7 +1170,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
             </View>
 
             <View style={styles.mapControls}>
-              <View style={[styles.searchContainer, { backgroundColor: inputBg, borderColor }]}>
+              <View ref={searchContainerRef} collapsable={false} style={[styles.searchContainer, { backgroundColor: inputBg, borderColor }]}>
                 <Ionicons name="search" size={20} color={secondaryText} />
                 <TextInput
                   style={[styles.searchInput, { color: textColor }]}
@@ -1050,29 +1224,31 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
           <View style={styles.stepContainer}>
             <Text style={[styles.stepTitle, { color: textColor }]}>{t.step2}</Text>
             <Text style={[styles.stepSubtitle, { color: secondaryText }]}>{t.step2Sub}</Text>
-            <FlatList
-              data={visibleCategories}
-              renderItem={({ item }) => {
-                const isSelected = selectedCategory === item.id;
-                return (
-                  <TouchableOpacity
-                    style={[styles.categoryCard, {
-                      backgroundColor: isSelected ? accentColor : (isDarkMode ? theme.cardBackground : '#f0f0f0'),
-                      borderColor: isSelected ? accentColor : borderColor,
-                    }]}
-                    onPress={() => setSelectedCategory(isSelected ? null : item.id)}
-                    activeOpacity={0.8}
-                  >
-                    <MaterialCommunityIcons name={item.icon} size={CATEGORY_ICON_SIZE} color={isSelected ? '#fff' : textColor} />
-                    <Text style={[styles.categoryLabel, { color: isSelected ? '#fff' : textColor }]}>{item.label}</Text>
-                  </TouchableOpacity>
-                );
-              }}
-              keyExtractor={item => item.id}
-              numColumns={3}
-              columnWrapperStyle={styles.categoryRow}
-              scrollEnabled={false}
-            />
+            <View ref={categoryGridRef} collapsable={false}>
+              <FlatList
+                data={visibleCategories}
+                renderItem={({ item }) => {
+                  const isSelected = selectedCategory === item.id;
+                  return (
+                    <TouchableOpacity
+                      style={[styles.categoryCard, {
+                        backgroundColor: isSelected ? accentColor : (isDarkMode ? theme.cardBackground : '#f0f0f0'),
+                        borderColor: isSelected ? accentColor : borderColor,
+                      }]}
+                      onPress={() => setSelectedCategory(isSelected ? null : item.id)}
+                      activeOpacity={0.8}
+                    >
+                      <MaterialCommunityIcons name={item.icon} size={CATEGORY_ICON_SIZE} color={isSelected ? '#fff' : textColor} />
+                      <Text style={[styles.categoryLabel, { color: isSelected ? '#fff' : textColor }]}>{item.label}</Text>
+                    </TouchableOpacity>
+                  );
+                }}
+                keyExtractor={item => item.id}
+                numColumns={3}
+                columnWrapperStyle={styles.categoryRow}
+                scrollEnabled={false}
+              />
+            </View>
           </View>
         );
 
@@ -1084,6 +1260,16 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
             {['name', 'description', 'phone', 'whatsapp', 'email', 'website'].map((field) => (
               <TextInput
                 key={field}
+                ref={
+                  field === 'name'
+                    ? nameFieldRef
+                    : field === 'description'
+                    ? descriptionFieldRef
+                    : field === 'phone'
+                    ? phoneFieldRef
+                    : null
+                }
+                collapsable={false}
                 style={[styles.input, field === 'description' && styles.textArea, { backgroundColor: inputBg, color: textColor, borderColor }]}
                 placeholder={t[field]}
                 placeholderTextColor={secondaryText}
@@ -1126,9 +1312,14 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
             <Text style={[styles.stepTitle, { color: textColor }]}>{t.step4}</Text>
             <Text style={[styles.stepSubtitle, { color: secondaryText }]}>{t.step4Sub}</Text>
             <Text style={[styles.imageLabel, { color: textColor }]}>{t.streetImage}</Text>
-            <TouchableOpacity style={[styles.imageUploadBox, { borderColor }]} onPress={pickStreetImage}>
+            <TouchableOpacity
+              ref={streetImageRef}
+              collapsable={false}
+              style={[styles.imageUploadBox, { borderColor }]}
+              onPress={pickStreetImage}
+            >
               {streetImage ? (
-                <Image source={{ uri: streetImage }} style={styles.imagePreview} />
+                <Image source={normalizeImageSource({ uri: streetImage })} style={styles.imagePreview} />
               ) : (
                 <View style={styles.imagePlaceholder}>
                   <Ionicons name="camera" size={40} color={secondaryText} />
@@ -1139,7 +1330,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
             {!isShoppingMall && (
               <>
                 <Text style={[styles.productSectionTitle, { color: textColor, marginTop: 16 }]}>{t.products}</Text>
-                <View style={[styles.productForm, { borderColor }]}>
+                <View ref={productFormRef} collapsable={false} style={[styles.productForm, { borderColor }]}>
                   <TextInput
                     style={[styles.input, { backgroundColor: inputBg, color: textColor, borderColor }]}
                     placeholder={t.productName} placeholderTextColor={secondaryText}
@@ -1162,7 +1353,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
                     <ScrollView horizontal style={styles.productImagePreviewList}>
                       {currentProduct.images.map((img, idx) => (
                         <View key={idx} style={styles.productImageWrapper}>
-                          <Image source={{ uri: img.uri }} style={styles.productImagePreview} />
+                          <Image source={normalizeImageSource({ uri: img.uri })} style={styles.productImagePreview} />
                           <TouchableOpacity style={styles.removeProductImageBtn} onPress={() => removeProductImage(idx)}>
                             <Ionicons name="close-circle" size={20} color="#ff3b30" />
                           </TouchableOpacity>
@@ -1212,7 +1403,12 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
           <View style={styles.stepContainer}>
             <Text style={[styles.stepTitle, { color: textColor }]}>{t.step5}</Text>
             <Text style={[styles.stepSubtitle, { color: secondaryText }]}>{t.step5Sub}</Text>
-            <TouchableOpacity style={[styles.previewButton, { backgroundColor: accentColor }]} onPress={openPreview}>
+            <TouchableOpacity
+              ref={previewButtonRef}
+              collapsable={false}
+              style={[styles.previewButton, { backgroundColor: accentColor }]}
+              onPress={openPreview}
+            >
               <Text style={styles.previewButtonText}>{t.previewButton}</Text>
             </TouchableOpacity>
           </View>
@@ -1233,7 +1429,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
           {renderStepIndicator()}
           <View style={styles.content}>{renderStepContent()}</View>
           
-          {/* Bottom Buttons Row - Preview button only in step 5, otherwise Back/Next */}
+          {/* Bottom Buttons Row */}
           <View style={styles.buttonRow}>
             {step > 1 && (
               <TouchableOpacity style={[styles.button, styles.backButton, { borderColor: accentColor }]} onPress={prevStep} disabled={publishing}>
@@ -1245,7 +1441,13 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
                 <Text style={styles.nextButtonText}>{t.next}</Text>
               </TouchableOpacity>
             ) : (
-              <TouchableOpacity style={[styles.button, styles.publishButtonFinal, { backgroundColor: accentColor }]} onPress={publishPlace} disabled={publishing}>
+              <TouchableOpacity
+                ref={publishButtonRef}
+                collapsable={false}
+                style={[styles.button, styles.publishButtonFinal, { backgroundColor: accentColor }]}
+                onPress={publishPlace}
+                disabled={publishing}
+              >
                 {publishing ? (
                   <View style={styles.publishProgress}>
                     <ArrowUploadLoader color="#fff" size={34} />
@@ -1268,14 +1470,14 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
           </TouchableWithoutFeedback>
           <Animated.View
             style={[
-               styles.previewBottomSheet,
-    {
-      backgroundColor: theme.background, // 👈 Use main background
-      borderTopColor: borderColor,
-      borderTopLeftRadius: 24, // 👈 Already set in styles
-      borderTopRightRadius: 24, // 👈 Already set in styles
-      transform: [{ translateY: slideAnim }],
-    },
+              styles.previewBottomSheet,
+              {
+                backgroundColor: theme.background,
+                borderTopColor: borderColor,
+                borderTopLeftRadius: 24,
+                borderTopRightRadius: 24,
+                transform: [{ translateY: slideAnim }],
+              },
             ]}
             {...panResponder.panHandlers}
           >
@@ -1287,7 +1489,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
               </TouchableOpacity>
             </View>
             <ScrollView showsVerticalScrollIndicator={false}>
-              {streetImage && <Image source={{ uri: streetImage }} style={styles.previewImage} />}
+              {streetImage && <Image source={normalizeImageSource({ uri: streetImage })} style={styles.previewImage} />}
               <View style={styles.previewInfo}>
                 <Text style={[styles.previewName, { color: textColor }]}>{form.name || t.previewName}</Text>
                 {selectedCategory && (
@@ -1309,7 +1511,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
                     <Text style={[styles.previewOwnerTitle, { color: textColor }]}>{t.previewOwner}</Text>
                     <View style={styles.previewOwnerRow}>
                       {currentUser.avatar ? (
-                        <Image source={{ uri: currentUser.avatar }} style={styles.previewOwnerAvatar} />
+                        <Image source={normalizeImageSource({ uri: currentUser.avatar })} style={styles.previewOwnerAvatar} />
                       ) : (
                         <View style={[styles.previewOwnerAvatarPlaceholder, { backgroundColor: accentColor }]}>
                           <Text style={styles.previewOwnerAvatarInitials}>
@@ -1357,6 +1559,17 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
           </Animated.View>
         </>
       )}
+
+      {/* ============ ADDPLACE STEP TUTORIAL ============ */}
+      <ScreenTutorialOverlay
+        visible={showTutorial}
+        steps={tutorialSteps}
+        isDarkMode={isDarkMode}
+        language={language}
+        onFinish={finishTutorial}
+        padding={5}
+        dimOpacity={0}
+      />
     </SafeAreaView>
   );
 }
@@ -1436,7 +1649,6 @@ const styles = StyleSheet.create({
   previewButton: { paddingVertical: 16, borderRadius: 24, alignItems: 'center' },
   previewButtonText: { color: '#fff', fontWeight: '600', fontSize: 16 },
   
-  // Preview Bottom Sheet Styles
   sheetOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.4)', zIndex: 100 },
   previewBottomSheet: {
     position: 'absolute',

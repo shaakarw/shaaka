@@ -7,6 +7,7 @@ const Place = require('../models/Place');
 const Message = require('../models/Message'); // 🔥 ADDED
 const fs = require('fs');
 const storageService = require('../services/storage/storageService');
+const { uploadImageWithVariants } = require('../services/imageUpload');
 const { setOnline, isOnline } = require('../utils/onlineStore');
 const { computeAggregatedLimits, getActiveSubscriptions } = require('../utils/subscriptionHelpers_clean');
 const { notifyUser } = require('../services/notificationService');
@@ -134,43 +135,54 @@ exports.getMe = async (req, res) => {
 
 // @route   POST /api/user/avatar
 exports.uploadAvatar = async (req, res) => {
-  let uploadedStorageKey = '';
+  let uploadedStorageKeys = [];
   try {
     if (!req.user || !req.user.id) {
       return res.status(401).json({ success: false, message: 'No user context' });
     }
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
-    const currentUser = await User.findById(req.user.id).select('avatarStorageKey');
+    const currentUser = await User.findById(req.user.id).select('avatarStorageKey avatarVariants');
     if (!currentUser) return res.status(404).json({ success: false, message: 'User not found' });
     const previousStorageKey = currentUser.avatarStorageKey;
 
-    const result = await storageService.uploadMedia({
+    const uploaded = await uploadImageWithVariants({
       buffer: req.file.buffer,
       mimeType: req.file.mimetype,
       folder: `users/${req.user.id}/profile`,
       maxBytes: 10 * 1024 * 1024,
-    });
-    uploadedStorageKey = result.storageKey;
-    const avatarUrl = storageService.getMediaUrl(result.storageKey, {
       origin: storageService.getRequestOrigin(req),
     });
+    uploadedStorageKeys = uploaded.storageKeys;
+    const avatarUrl = uploaded.originalUrl;
 
     const user = await User.findByIdAndUpdate(
       req.user.id,
-      { avatar: avatarUrl, avatarStorageKey: result.storageKey, storageProvider: 'b2' },
+      {
+        avatar: avatarUrl,
+        avatarStorageKey: uploaded.original.storageKey,
+        avatarVariants: [uploaded.imageVariants],
+        storageProvider: 'b2',
+      },
       { new: true }
     ).select('-password');
-    uploadedStorageKey = '';
+    uploadedStorageKeys = [];
 
-    if (previousStorageKey && previousStorageKey !== result.storageKey) {
-      await storageService.deleteMedia(previousStorageKey).catch(error => {
-        console.error('[Storage] Replaced avatar cleanup failed:', error.code || 'B2_OPERATION_FAILED');
-      });
-    }
+    const previousKeys = [
+      previousStorageKey,
+      ...(currentUser.avatarVariants || []).flatMap(image => [
+        image.originalStorageKey,
+        ...Object.values(image.variants || {}).map(variant => variant.storageKey),
+      ]),
+    ].filter(key => key && key !== uploaded.original.storageKey);
+    await Promise.all([...new Set(previousKeys)].map(key => storageService.deleteMedia(key).catch(error => {
+      console.error('[Storage] Replaced avatar cleanup failed:', error.code || 'B2_OPERATION_FAILED');
+    })));
 
     res.json({ success: true, avatarUrl, user });
   } catch (error) {
-    if (uploadedStorageKey) await storageService.deleteMedia(uploadedStorageKey).catch(() => {});
+    await Promise.all(uploadedStorageKeys.map(key => storageService.deleteMedia(key).catch(error => {
+      console.error('[Storage] Failed to clean up an unsaved avatar image:', error.code || 'B2_OPERATION_FAILED');
+    })));
     console.error('uploadAvatar error:', error.code || error.message || 'Unknown error');
     res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Upload failed' });
   }
@@ -552,17 +564,24 @@ exports.deleteAvatar = async (req, res) => {
     if (!req.user || !req.user.id) {
       return res.status(401).json({ success: false, message: 'Authentication required' });
     }
-    const currentUser = await User.findById(req.user.id).select('avatarStorageKey');
+    const currentUser = await User.findById(req.user.id).select('avatarStorageKey avatarVariants');
     if (!currentUser) return res.status(404).json({ success: false, message: 'User not found' });
     const storageKey = currentUser.avatarStorageKey;
     const user = await User.findByIdAndUpdate(
       req.user.id,
-      { $set: { avatar: '', avatarStorageKey: '' } },
+      { $set: { avatar: '', avatarStorageKey: '', avatarVariants: [] } },
       { new: true }
     ).select('-password');
-    if (storageKey) await storageService.deleteMedia(storageKey).catch(error => {
+    const keys = [
+      storageKey,
+      ...(currentUser.avatarVariants || []).flatMap(image => [
+        image.originalStorageKey,
+        ...Object.values(image.variants || {}).map(variant => variant.storageKey),
+      ]),
+    ].filter(Boolean);
+    await Promise.all([...new Set(keys)].map(key => storageService.deleteMedia(key).catch(error => {
       console.error('[Storage] Avatar deletion failed:', error.code || 'B2_OPERATION_FAILED');
-    });
+    })));
     res.json({ success: true, user });
   } catch (error) {
     console.error('deleteAvatar error:', error);
@@ -574,7 +593,7 @@ exports.deleteAvatar = async (req, res) => {
 exports.getUserById = async (req, res) => {
   try {
     const user = await User.findById(req.params.userId)
-      .select('username avatar name bio location socialLinks followers following');
+      .select('username avatar avatarVariants name bio location socialLinks followers following');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -615,6 +634,28 @@ exports.getOnlineStatus = async (req, res) => {
     res.json({ success: true, isOnline: status.isOnline, lastSeen: status.lastSeen });
   } catch (error) {
     console.error('getOnlineStatus error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+exports.getBatchOnlineStatus = async (req, res) => {
+  try {
+    const { userIds } = req.body || {};
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.json({ success: true, statuses: {} });
+    }
+
+    const statuses = {};
+    const uniqueIds = [...new Set(userIds.map(id => String(id)).filter(Boolean))];
+
+    for (const userId of uniqueIds) {
+      const status = isOnline(userId);
+      statuses[userId] = Boolean(status.isOnline);
+    }
+
+    res.json({ success: true, statuses });
+  } catch (error) {
+    console.error('getBatchOnlineStatus error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

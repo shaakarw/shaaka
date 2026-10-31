@@ -1,3 +1,5 @@
+
+
 // screens/AdminLoginScreen.js
 import React, { useState, useEffect } from 'react';
 import {
@@ -6,7 +8,6 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  Alert,
   ActivityIndicator,
   Image,
   KeyboardAvoidingView,
@@ -22,6 +23,9 @@ import { BASE_URL } from '../constants';
 import { Ionicons } from '@expo/vector-icons';
 import Logo from '../assets/logos.png';
 import MessageBackground from '../assets/message.png';   // ✅ same as MessageScreen
+import { showAdminFeedback } from '../utils/adminFeedback';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const translations = {
   English: {
@@ -88,7 +92,7 @@ const AdminLoginScreen = ({ navigation, language }) => {
     const trimmedPassword = password.trim();
 
     if (!trimmedPhone || !trimmedPassword) {
-      Alert.alert(t.adminLogin, 'Phone and password are required.');
+      showAdminFeedback(t.adminLogin, 'Phone and password are required.', 'error');
       return;
     }
 
@@ -105,12 +109,12 @@ const AdminLoginScreen = ({ navigation, language }) => {
         await AsyncStorage.setItem('adminToken', token);
         navigation.replace('AdminDashboard', { language });
       } else {
-        Alert.alert(t.adminLogin, message || t.invalidCredentials);
+        showAdminFeedback(t.adminLogin, message || t.invalidCredentials, 'error');
       }
     } catch (error) {
       console.error('Admin login error:', error.response?.data || error.message);
       const msg = error.response?.data?.message || t.serverError;
-      Alert.alert(t.adminLogin, msg);
+      showAdminFeedback(t.adminLogin, msg, 'error');
     } finally {
       setLoading(false);
     }
@@ -118,21 +122,21 @@ const AdminLoginScreen = ({ navigation, language }) => {
 
   return (
     <ImageBackground
-      source={MessageBackground}
+      source={normalizeImageSource(MessageBackground)}
       style={[styles.container, { backgroundColor: theme.image }]}
       resizeMode="cover"
     >
       {/* Overlay – same as MessageScreen */}
       <View style={[styles.overlay, { backgroundColor: theme.background, opacity: 0.88 }]} />
 
-      <SafeAreaView style={{ flex: 1, backgroundColor: 'transparent' }}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: 'transparent' }} edges={['left', 'right', 'bottom']}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={{ flex: 1 }}
         >
           <ScrollView contentContainerStyle={styles.scrollContainer}>
             {/* Logo */}
-            <Image source={Logo} style={styles.logo} resizeMode="contain" />
+            <Image source={normalizeImageSource(Logo)} style={styles.logo} resizeMode="contain" />
 
             {/* Header */}
             <View style={styles.header}>

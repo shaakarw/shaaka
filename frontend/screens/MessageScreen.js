@@ -1,5 +1,7 @@
+
+
 // screens/MessageScreen.js
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -28,72 +30,21 @@ import { io } from 'socket.io-client';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import { isReelsActive } from '../services/reelActivity';
 import { logDebug, warnDebug } from '../utils/debugLogger';
+import { showAdminFeedback } from '../utils/adminFeedback';
+import { useContactInfo, useContactLinks } from '../services/contactInfo';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const DEFAULT_AVATAR = require('../assets/profile1.png');
 const loadingLogo = require('../assets/logos.png');
 const MessageBackground = require('../assets/message.png');
 
-// Height of the top sections combined (header + search + updates)
-const HEADER_SECTION_HEIGHT = 60;
-const SEARCH_SECTION_HEIGHT = 56;
-const UPDATES_SECTION_HEIGHT = 110;
-const TOTAL_TOP_HEIGHT = HEADER_SECTION_HEIGHT + SEARCH_SECTION_HEIGHT + UPDATES_SECTION_HEIGHT;
-const SCROLL_THRESHOLD = 20;
-
-// ---------- Social Media Data ----------
-const socialLinks = [
-  {
-    name: 'Instagram',
-    icon: 'logo-instagram',
-    color: '#E4405F',
-    url: 'instagram://user?username=shaaka_rw',
-    fallbackUrl: 'https://www.instagram.com/shaaka_rw/',
-  },
-  {
-    name: 'YouTube',
-    icon: 'logo-youtube',
-    color: '#FF0000',
-    url: 'youtube://www.youtube.com/@shaaka-rw',
-    fallbackUrl: 'https://www.youtube.com/@shaaka-rw',
-  },
-  {
-    name: 'X',
-    icon: 'logo-x',
-    color: '#000000',
-    url: 'https://x.com/shaaka_rw',
-    fallbackUrl: 'https://x.com/shaaka_rw',
-  },
-  {
-    name: 'Facebook',
-    icon: 'logo-facebook',
-    color: '#1877F2',
-    url: 'fb://profile/61592686307072',
-    fallbackUrl: 'https://www.facebook.com/profile.php?id=61592686307072',
-  },
-  {
-    name: 'Email',
-    icon: 'mail-outline',
-    color: '#D44638',
-    url: 'mailto:shaakarw@gmail.com',
-    fallbackUrl: null,
-  },
-  {
-    name: 'WhatsApp',
-    icon: 'logo-whatsapp',
-    color: '#47ae87',
-    url: 'whatsapp://send?phone=+250799882580',
-    fallbackUrl: 'https://wa.me/250799882580',
-  },
-];
-
 // ---------- Translations ----------
 const translations = {
   English: {
     messages: 'Messages',
     search: 'Search',
-    noMessages: 'No messages yet',
-    startConversation: 'Start a conversation from a listing',
     loginPromptTitle: 'Messages',
     loginPromptText: 'Log in to see your messages',
     login: 'Log In',
@@ -110,8 +61,6 @@ const translations = {
   Kinyarwanda: {
     messages: 'Ubutumwa',
     search: 'Shakisha',
-    noMessages: 'Nta butumwa',
-    startConversation: 'Tangira ikiganiro uhereye ku gicuruzwa',
     loginPromptTitle: 'Ubutumwa',
     loginPromptText: 'Injira kugira ngo ubone ubutumwa',
     login: 'Kwinjira',
@@ -199,11 +148,10 @@ const UpdatesRow = React.memo(({ updates, onUpdatePress, theme }) => {
 });
 
 // ---------- Conversation Row ----------
-const ConversationRow = ({ conversation, onPress, theme, currentUserId, isOnline, isTyping, t }) => {
+const ConversationRow = React.forwardRef(({ conversation, onPress, theme, currentUserId, isOnline, isTyping, t }, ref) => {
   const lastMsg = conversation.lastMessage;
   const isSentByMe = lastMsg?.senderId === currentUserId;
 
-  // Show the typing indicator in place of the last message preview
   const typingLabel = t?.typing || 'Typing...';
   const youPrefix = t?.youPrefix || 'You: ';
 
@@ -211,22 +159,21 @@ const ConversationRow = ({ conversation, onPress, theme, currentUserId, isOnline
   if (isTyping) {
     displayMessage = typingLabel;
   } else {
-    displayMessage = lastMsg?.text || 'No messages yet';
+    displayMessage = lastMsg?.text || '';
   }
 
   return (
     <TouchableOpacity
+      ref={ref}
       style={[styles.conversationRow, { backgroundColor: theme.buttons }]}
       onPress={onPress}
       activeOpacity={0.7}
     >
       <View style={styles.avatarContainer}>
         <Image
-          source={
-            conversation.otherUserAvatar
+          source={normalizeImageSource(conversation.otherUserAvatar
               ? { uri: conversation.otherUserAvatar }
-              : DEFAULT_AVATAR
-          }
+              : DEFAULT_AVATAR)}
           style={styles.avatarImage}
         />
         {isOnline && <View style={styles.onlineDot} />}
@@ -271,11 +218,13 @@ const ConversationRow = ({ conversation, onPress, theme, currentUserId, isOnline
       </View>
     </TouchableOpacity>
   );
-};
+});
 
 // ---------- Main Screen ----------
 const MessageScreen = ({ navigation, language, adminMode = false }) => {
   const { theme, isDarkMode } = useTheme();
+  const contactInfo = useContactInfo();
+  const socialLinks = useContactLinks(contactInfo);
   const t = translations[language] || translations.English;
 
   const DETAIL_SHEET_HEIGHT = SCREEN_HEIGHT * 0.65;
@@ -295,8 +244,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
   const typingClearTimersRef = useRef({});
 
   const [notes, setNotes] = useState([]);
-  const [showBackToTop, setShowBackToTop] = useState(false);
-  const flatListRef = useRef(null);
 
   const [detailSheetVisible, setDetailSheetVisible] = useState(false);
   const detailSheetAnim = useRef(new Animated.Value(DETAIL_SHEET_HEIGHT)).current;
@@ -305,14 +252,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
   const [statusModalVisible, setStatusModalVisible] = useState(false);
   const [statusModalTitle, setStatusModalTitle] = useState('');
   const [statusModalMessage, setStatusModalMessage] = useState('');
-
-  // Header animation state and refs
-  const [headerVisible, setHeaderVisible] = useState(true);
-  const headerHeightAnim = useRef(new Animated.Value(TOTAL_TOP_HEIGHT)).current;
-  const headerOpacityAnim = useRef(new Animated.Value(1)).current;
-  const lastScrollY = useRef(0);
-  const scrollAccumulator = useRef(0);
-  const isAnimatingHeader = useRef(false);
 
   // ---------- Auto‑refresh interval ----------
   const autoRefreshInterval = useRef(null);
@@ -343,48 +282,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       spinAnim.setValue(0);
     }
   }, [refreshing]);
-
-  // ---------- Header animation helpers (whole container) ----------
-  const animateHeaderHide = () => {
-    if (isAnimatingHeader.current) return;
-    isAnimatingHeader.current = true;
-    setHeaderVisible(false);
-    Animated.parallel([
-      Animated.timing(headerHeightAnim, {
-        toValue: 0,
-        duration: 250,
-        useNativeDriver: false,
-      }),
-      Animated.timing(headerOpacityAnim, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: false,
-      }),
-    ]).start(() => {
-      isAnimatingHeader.current = false;
-    });
-  };
-
-  const animateHeaderShow = () => {
-    if (isAnimatingHeader.current) return;
-    isAnimatingHeader.current = true;
-    setHeaderVisible(true);
-    Animated.parallel([
-      Animated.spring(headerHeightAnim, {
-        toValue: TOTAL_TOP_HEIGHT,
-        tension: 100,
-        friction: 10,
-        useNativeDriver: false,
-      }),
-      Animated.timing(headerOpacityAnim, {
-        toValue: 1,
-        duration: 200,
-        useNativeDriver: false,
-      }),
-    ]).start(() => {
-      isAnimatingHeader.current = false;
-    });
-  };
 
   const getToken = async () => adminMode
     ? AsyncStorage.getItem('adminToken')
@@ -456,17 +353,14 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       if (uid) setOnlineUsers((prev) => ({ ...prev, [String(uid)]: false }));
     });
 
-    // ---- Lenient typing handler with auto-clear ----
     const handleTyping = (payload, eventName) => {
       logDebug('[MsgScreen Socket] typing event:', eventName, payload);
 
-      // Support multiple possible field names from the server
       const uid = String(
         payload?.senderId ?? payload?.userId ?? payload?.from ?? payload?.sender ?? ''
       );
       if (!uid) return;
 
-      // Never show our own typing in the list
       if (String(currentUser?._id) === uid) return;
 
       let isTyping;
@@ -476,7 +370,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       else if (eventName === 'user-typing') isTyping = true;
       else return;
 
-      // Clear any existing timer for this user
       if (typingClearTimersRef.current[uid]) {
         clearTimeout(typingClearTimersRef.current[uid]);
         typingClearTimersRef.current[uid] = null;
@@ -484,7 +377,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
 
       if (isTyping) {
         setTypingUsers((prev) => ({ ...prev, [uid]: true }));
-        // Auto-clear after 4s in case the stop event is lost (mobile networks)
         typingClearTimersRef.current[uid] = setTimeout(() => {
           setTypingUsers((prev) => {
             const next = { ...prev };
@@ -507,7 +399,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
 
     socket.on('disconnect', (reason) => {
       logDebug('[MsgScreen Socket] disconnected:', reason);
-      // Reset typing on disconnect — the state is stale
       setTypingUsers({});
     });
 
@@ -519,7 +410,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
   useEffect(() => {
     connectPresenceSocket();
     return () => {
-      // Clear all typing auto-clear timers
       Object.values(typingClearTimersRef.current || {}).forEach((timer) => {
         if (timer) clearTimeout(timer);
       });
@@ -536,7 +426,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     };
   }, [connectPresenceSocket]);
 
-  // ---------- Load viewed timestamps from AsyncStorage ----------
+  // ---------- Load viewed timestamps ----------
   const loadViewedTimestamps = useCallback(async () => {
     try {
       const stored = await AsyncStorage.getItem('updateViewedTimestamps');
@@ -550,7 +440,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     }
   }, []);
 
-  // ---------- Save viewed timestamp to AsyncStorage ----------
+  // ---------- Save viewed timestamp ----------
   const saveViewedTimestamp = useCallback(async (updateId) => {
     try {
       const timestamps = await loadViewedTimestamps();
@@ -601,9 +491,9 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       });
 
       if (response.data.success) {
-        const convs = Array.isArray(response.data.conversations)
+        const convs = (Array.isArray(response.data.conversations)
           ? response.data.conversations
-          : [];
+          : []).filter(conversation => conversation?.lastMessage);
         const map = new Map();
         convs.forEach((c) => {
           const id = c.otherUserId;
@@ -720,7 +610,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    if (!headerVisible) animateHeaderShow();
     await refreshAll();
     setRefreshing(false);
   };
@@ -745,7 +634,8 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
   // ---------- Navigate to Chat ----------
   const openChat = (userId, userName, userAvatar, userPhone, conversation) => {
     if (!userId) {
-      Alert.alert('Error', 'User information is missing.');
+      if (adminMode) showAdminFeedback('Error', 'User information is missing.', 'error');
+      else Alert.alert('Error', 'User information is missing.');
       return;
     }
     const sellerPhone = userPhone || userId;
@@ -760,7 +650,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     });
   };
 
-  // ---------- Mark update as read and save timestamp ----------
+  // ---------- Mark update as read ----------
   const markUpdateAsRead = useCallback(async (updateId) => {
     await saveViewedTimestamp(updateId);
 
@@ -771,7 +661,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     ));
   }, [saveViewedTimestamp]);
 
-  // ---------- Detail Sheet (marks as read before opening) ----------
+  // ---------- Detail Sheet ----------
   const openDetailSheet = (note) => {
     const updateId = note._id || note.id;
     markUpdateAsRead(updateId);
@@ -801,13 +691,15 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       } else if (fallbackUrl) {
         await Linking.openURL(fallbackUrl);
       } else {
-        Alert.alert('Error', 'Unable to open link');
+        if (adminMode) showAdminFeedback('Error', 'Unable to open link', 'error');
+        else Alert.alert('Error', 'Unable to open link');
       }
     } catch (error) {
       if (fallbackUrl) {
         await Linking.openURL(fallbackUrl);
       } else {
-        Alert.alert('Error', 'Unable to open link');
+        if (adminMode) showAdminFeedback('Error', 'Unable to open link', 'error');
+        else Alert.alert('Error', 'Unable to open link');
       }
     }
   };
@@ -856,43 +748,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     </Modal>
   );
 
-  const scrollToTop = useCallback(async () => {
-    flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
-
-    setRefreshing(true);
-    try {
-      await refreshAll();
-    } finally {
-      setRefreshing(false);
-    }
-  }, [refreshAll]);
-
-  // ---------- Scroll handler (whole container) ----------
-  const handleScroll = useCallback((event) => {
-    const currentScrollY = event.nativeEvent.contentOffset.y;
-    setShowBackToTop(currentScrollY > 200);
-
-    const headerCollapse = Math.min(currentScrollY, TOTAL_TOP_HEIGHT);
-    headerHeightAnim.setValue(Math.max(TOTAL_TOP_HEIGHT - headerCollapse, 0));
-    headerOpacityAnim.setValue(Math.max(1 - currentScrollY / (TOTAL_TOP_HEIGHT + 20), 0));
-
-    if (currentScrollY <= 0) {
-      lastScrollY.current = 0;
-      scrollAccumulator.current = 0;
-      return;
-    }
-
-    const scrollDiff = currentScrollY - lastScrollY.current;
-
-    if ((scrollDiff > 0 && scrollAccumulator.current < 0) ||
-        (scrollDiff < 0 && scrollAccumulator.current > 0)) {
-      scrollAccumulator.current = 0;
-    }
-
-    scrollAccumulator.current += scrollDiff;
-    lastScrollY.current = currentScrollY;
-  }, [headerHeightAnim, headerOpacityAnim]);
-
   // ---------- Login required ----------
   if (!isLoggedIn) {
     return (
@@ -919,76 +774,68 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
   // ---------- Main render ----------
   return (
     <ImageBackground
-      source={MessageBackground}
+      source={normalizeImageSource(MessageBackground)}
       style={styles.container}
       resizeMode="cover"
     >
       <View style={[styles.overlay, { backgroundColor: theme.background, opacity: 0.92 }]} />
 
       <View style={{ flex: 1, backgroundColor: 'transparent' }}>
-        <Animated.View
-          style={{
-            height: headerHeightAnim,
-            opacity: headerOpacityAnim,
-            overflow: 'hidden',
-          }}
-        >
-          <View style={styles.headerContainer}>
-            <Text style={[styles.headerTitle, { color: theme.text }]}>{t.messages}</Text>
+        <View style={styles.headerContainer}>
+          <Text style={[styles.headerTitle, { color: theme.text }]}>{t.messages}</Text>
+        </View>
+
+        <View style={styles.searchRow}>
+          <View
+            style={[
+              styles.searchWrapper,
+              { backgroundColor: isDarkMode ? '#171717' : '#cfcfcf' },
+            ]}
+          >
+            <Ionicons
+              name="search"
+              size={18}
+              color={theme.textSecondary}
+              style={styles.searchIcon}
+            />
+            <TextInput
+              style={[styles.searchInput, { color: theme.text }]}
+              placeholder={t.search}
+              placeholderTextColor={theme.textSecondary}
+              value={searchQuery}
+              onChangeText={handleSearch}
+            />
+            {searchQuery !== '' && (
+              <TouchableOpacity onPress={() => handleSearch('')}>
+                <Ionicons name="close-circle" size={18} color={theme.textSecondary} />
+              </TouchableOpacity>
+            )}
           </View>
 
-          <View style={styles.searchRow}>
-            <View
-              style={[
-                styles.searchWrapper,
-                { backgroundColor: isDarkMode ? '#171717' : '#cfcfcf' },
-              ]}
-            >
-              <Ionicons
-                name="search"
-                size={18}
-                color={theme.textSecondary}
-                style={styles.searchIcon}
-              />
-              <TextInput
-                style={[styles.searchInput, { color: theme.text }]}
-                placeholder={t.search}
-                placeholderTextColor={theme.textSecondary}
-                value={searchQuery}
-                onChangeText={handleSearch}
-              />
-              {searchQuery !== '' && (
-                <TouchableOpacity onPress={() => handleSearch('')}>
-                  <Ionicons name="close-circle" size={18} color={theme.textSecondary} />
-                </TouchableOpacity>
-              )}
-            </View>
-
-            <TouchableOpacity
-              style={styles.refreshButton}
-              onPress={onRefresh}
-              disabled={refreshing}
-              activeOpacity={0.7}
-            >
-              <Animated.View style={{ transform: [{ rotate: spin }] }}>
-                <Ionicons name="sync" size={24} color={theme.text} />
-              </Animated.View>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.updatesSectionWrapper}>
-            <Text style={[styles.updatesSectionTitle, { color: theme.textSecondary }]}>
-              {t.updates}
-            </Text>
-            <UpdatesRow updates={notes} onUpdatePress={openDetailSheet} theme={theme} />
-          </View>
-        </Animated.View>
+          <TouchableOpacity
+            style={styles.refreshButton}
+            onPress={onRefresh}
+            disabled={refreshing}
+            activeOpacity={0.7}
+          >
+            <Animated.View style={{ transform: [{ rotate: spin }] }}>
+              <Ionicons name="sync" size={24} color={theme.text} />
+            </Animated.View>
+          </TouchableOpacity>
+        </View>
 
         <FlatList
-          ref={flatListRef}
           data={filtered}
           keyExtractor={(item) => String(item.otherUserId || item._id || Math.random())}
-          renderItem={({ item }) => (
+          ListHeaderComponent={
+            <View style={styles.updatesSectionWrapper}>
+              <Text style={[styles.updatesSectionTitle, { color: theme.textSecondary }]}>
+                {t.updates}
+              </Text>
+              <UpdatesRow updates={notes} onUpdatePress={openDetailSheet} theme={theme} />
+            </View>
+          }
+          renderItem={({ item, index }) => (
             <ConversationRow
               conversation={item}
               onPress={() => openChat(
@@ -1010,31 +857,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.accent} />
           }
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Ionicons name="chatbubble-outline" size={60} color={theme.textSecondary} />
-              <Text style={[styles.emptyText, { color: theme.textSecondary }]}>{t.noMessages}</Text>
-              <Text style={[styles.emptySubtext, { color: theme.textSecondary }]}>
-                {t.startConversation}
-              </Text>
-            </View>
-          }
-          onScroll={handleScroll}
-          scrollEventThrottle={16}
         />
-
-        {showBackToTop && (
-          <TouchableOpacity
-            style={[
-              styles.showHeaderButton,
-              { bottom: 20, backgroundColor: theme.accent }
-            ]}
-            onPress={scrollToTop}
-            activeOpacity={0.9}
-          >
-            <Ionicons name="chevron-up-circle" size={30} color="#fff" />
-          </TouchableOpacity>
-        )}
 
         {detailSheetVisible && (
           <TouchableWithoutFeedback onPress={closeDetailSheet}>
@@ -1055,7 +878,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
             <View style={styles.sheetHandle} />
             <View style={[styles.detailTitleContainer, { borderBottomColor: theme.border }]}>
               <Image
-                source={require('../assets/logos.png')}
+                source={normalizeImageSource(require('../assets/logos.png'))}
                 style={{ width: 70, height: 70, marginRight: 10, borderRadius: 15 }}
                 resizeMode="contain"
               />
@@ -1088,6 +911,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
         )}
 
         {renderStatusModal()}
+
       </View>
     </ImageBackground>
   );
@@ -1243,10 +1067,6 @@ const styles = StyleSheet.create({
   lastMessage: { fontSize: 14, flex: 1 },
 
   list: { paddingBottom: 20 },
-  emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', marginTop: 100 },
-  emptyText: { marginTop: 12, fontSize: 18, fontWeight: '500' },
-  emptySubtext: { marginTop: 4, fontSize: 14 },
-
   loginPromptContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -1336,8 +1156,9 @@ const styles = StyleSheet.create({
   },
   socialIconsRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     justifyContent: 'center',
-    gap: 16,
+    gap: 10,
   },
   socialIconSmall: {
     alignItems: 'center',
@@ -1363,20 +1184,6 @@ const styles = StyleSheet.create({
   modalButton: { paddingVertical: 12, borderRadius: 8, alignItems: 'center' },
   modalButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
 
-  showHeaderButton: {
-    position: 'absolute',
-    right: 10,
-    zIndex: 200,
-    padding: 8,
-    borderRadius: 30,
-    elevation: 1,
-    shadowColor: '#0000002b',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
 });
 
 export default MessageScreen;

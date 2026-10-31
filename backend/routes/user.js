@@ -28,6 +28,7 @@ const {
   markStoryViewed,
   updateOnlineStatusInMemory,
   getOnlineStatus,
+  getBatchOnlineStatus,
   upgradePlan,
 } = require('../controllers/userController');
 
@@ -122,6 +123,7 @@ router.post('/upgrade', upgradePlan);
 
 // ---------- Online status endpoints (in-memory) ----------
 router.post('/online', updateOnlineStatusInMemory);
+router.post('/batch-online', getBatchOnlineStatus);
 router.get('/:userId/online', getOnlineStatus);
 
 // ---------- Profile & avatar ----------

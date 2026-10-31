@@ -1,3 +1,4 @@
+
 // screens/BuyPostScreen.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
@@ -13,15 +14,19 @@ import { useAuth } from '../context/AuthContext';
 import { showAppAlert } from '../context/MessageSheetContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
-import Svg, { Circle, Path } from 'react-native-svg';
+import Svg, { Path, Polygon } from 'react-native-svg';
 import { useFocusEffect, useIsFocused, useRoute } from '@react-navigation/native';
 import axios from 'axios';
 import BuyLoginSheet from '../components/BuyLoginSheet';
 import { useBottomSheet } from '../context/BottomSheetContext';
 import { BASE_URL } from '../constants';
+import { io } from 'socket.io-client';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
+import VideoBackground from '../components/VideoBackground';
 import { getUserDisplayName } from '../utils/userIdentity';
+import { getImageUri, normalizeImageSource } from '../utils/imageUrl';
+import { getPostCoverUri, getPostImages } from '../utils/postMedia';
 import { videoPreloader } from '../components/VideoPreloader';
 import { POST_SECTIONS, POST_SECTION_KEYS, getPostsForSection } from './postSectionConfig';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
@@ -30,6 +35,8 @@ import { mediaCache } from '../services/mediaCache';
 import { networkStatus } from '../services/networkStatus';
 import { setReelsActive } from '../services/reelActivity';
 import { reelVideoCache } from '../services/reelVideoCache';
+import { requestVideoBackground } from '../services/videoBackgroundService';
+import { useContactInfo, useContactLinks } from '../services/contactInfo';
 
 LogBox.ignoreLogs([
   'The native view manager for module(ExpoBlur)',
@@ -51,6 +58,7 @@ const CARD_BORDER_RADIUS = 0;
 const SILENT_REFRESH_MS = 2000;
 
 const EYE_BUTTON_SIZE = 52;
+const EYE_BACKGROUND_SIZE = (EYE_BUTTON_SIZE + 10) / 1.1;
 const EYE_BUTTON_MARGIN = 8;
 const EYE_BUTTON_MIN_TOP = 80;
 const EYE_BUTTON_BOTTOM_PADDING = 100;
@@ -71,15 +79,6 @@ const shuffleArray = (array) => {
   }
   return copy;
 };
-
-const socialLinks = [
-  { name: 'Instagram', icon: 'logo-instagram', color: '#E4405F', url: 'instagram://user?username=shaaka_rw', fallbackUrl: 'https://www.instagram.com/shaaka_rw/' },
-  { name: 'YouTube', icon: 'logo-youtube', color: '#FF0000', url: 'youtube://www.youtube.com/@shaaka-rw', fallbackUrl: 'https://www.youtube.com/@shaaka-rw' },
-  { name: 'X', icon: 'logo-x', color: '#000000', url: 'https://x.com/shaaka_rw', fallbackUrl: 'https://x.com/shaaka_rw' },
-  { name: 'Facebook', icon: 'logo-facebook', color: '#1877F2', url: 'fb://profile/61592686307072', fallbackUrl: 'https://www.facebook.com/profile.php?id=61592686307072' },
-  { name: 'Email', icon: 'mail-outline', color: '#D44638', url: 'mailto:shaakarw@gmail.com', fallbackUrl: null },
-  { name: 'WhatsApp', icon: 'logo-whatsapp', color: '#58bc76', url: 'whatsapp://send?phone=+250799882580', fallbackUrl: 'https://wa.me/250799882580' },
-];
 
 const translations = {
   English: {
@@ -202,20 +201,14 @@ const translations = {
 
 const getImageSource = (img) => {
   if (!img) return DEFAULT_AVATAR;
-  if (typeof img === 'string') return { uri: img };
-  if (typeof img === 'object' && img.uri) return img;
+  if (typeof img === 'number') return img;
+  const uri = getImageUri(img);
+  if (uri) return typeof img === 'object' ? { ...img, uri } : { uri };
   return DEFAULT_AVATAR;
 };
 
 const getVideoCover = (videoUrl, videoThumbnail) => {
-  if (videoThumbnail) return videoThumbnail;
-  if (!videoUrl || !videoUrl.includes('res.cloudinary.com')) return null;
-  const [urlWithoutQuery] = videoUrl.split('?');
-  const uploadMarker = '/video/upload/';
-  if (!urlWithoutQuery.includes(uploadMarker)) return null;
-  return urlWithoutQuery
-    .replace(uploadMarker, '/video/upload/so_5/')
-    .replace(/\.[^/.]+$/, '.jpg');
+  return getPostCoverUri({ videoUrl, videoThumbnail });
 };
 
 const getImageSize = (source) => {
@@ -258,12 +251,13 @@ const mapPost = (post) => ({
   _id: post._id, id: post._id,
   username: getUserDisplayName(post.user || post, 'User'),
   userAvatar: post.userAvatar || post.user?.avatar,
+  userAvatarVariants: post.userAvatarVariants || post.user?.avatarVariants || [],
   amount: post.amount || `RWF ${post.price?.toLocaleString()}`,
   price: post.price,
   location: post.location,
   description: post.description,
   productName: post.productName || 'Product',
-  houseImages: post.houseImages || [],
+  houseImages: getPostImages(post),
   contactNumber1: post.contactNumbers?.[0] || '',
   contactNumber2: post.contactNumbers?.[1] || '',
   priceNegotiable: post.priceNegotiable || false,
@@ -282,6 +276,43 @@ const mapPost = (post) => ({
 const getPostOwnerId = (post) => {
   const owner = post?.userId || post?.user;
   return owner?._id || owner?.id || owner;
+};
+
+const buildChatReplyPost = (house) => {
+  const sellerId = getPostOwnerId(house) || house?.user?._id || house?.user;
+  const imageList = Array.isArray(house?.houseImages) ? house.houseImages : [];
+  const firstImage = imageList.length
+    ? (typeof imageList[0] === 'string' ? imageList[0] : imageList[0]?.uri || imageList[0]?.url || imageList[0]?.src || '')
+    : (typeof house?.image === 'string' ? house.image : house?.image?.uri || house?.image?.url || house?.image?.src || '');
+  const contactNumbers = [
+    house?.contactNumber1,
+    house?.contactNumber2,
+    ...(Array.isArray(house?.contactNumbers) ? house.contactNumbers : []),
+  ].filter(Boolean);
+
+  return {
+    postId: String(house?._id || house?.id || ''),
+    contextType: 'post',
+    title: house?.productName || house?.title || 'Product',
+    description: house?.description || '',
+    image: firstImage,
+    price: house?.price ?? null,
+    amount: house?.amount || '',
+    location: house?.location || '',
+    category: house?.category || '',
+    bedrooms: house?.bedrooms ?? null,
+    bathrooms: house?.bathrooms ?? null,
+    size: house?.size ?? null,
+    priceNegotiable: !!house?.priceNegotiable,
+    contactNumbers,
+    houseImages: imageList.length ? imageList : (Array.isArray(house?.images) ? house.images : []),
+    videoUrl: house?.videoUrl || '',
+    videoThumbnail: house?.videoThumbnail || house?.thumbnail || '',
+    username: house?.username || house?.user?.username || '',
+    userAvatar: house?.userAvatar || house?.user?.avatar || '',
+    ownerId: sellerId,
+    timestamp: house?.createdAt || new Date().toISOString(),
+  };
 };
 
 /* ============================================================
@@ -333,9 +364,11 @@ const _formatTime = s => {
    ============================================================ */
 const ShaakaVideoPlayer = ({
   videoUrl,
+  videoId,
   videoThumbnail,
   videoLink,
   videoDuration = 0,
+  videoSizeBytes = 0,
   theme,
   containerHeight = null,
   isVisible = false,
@@ -353,6 +386,7 @@ const ShaakaVideoPlayer = ({
   const [ready, setReady] = useState(false);
   const [coverImage, setCoverImage] = useState(videoThumbnail || null);
   const [videoSize, setVideoSize] = useState({ width: 9, height: 16 });
+  const [background, setBackground] = useState(null);
   const [isPlayingState, setIsPlayingState] = useState(false);
   const [isMutedState, setIsMutedState] = useState(Boolean(muted));
   const [currentTime, setCurrentTime] = useState(0);
@@ -412,6 +446,28 @@ const ShaakaVideoPlayer = ({
     })();
     return () => { alive = false; };
   }, [videoUrl, videoThumbnail, retryTick]);
+
+  useEffect(() => {
+    let active = true;
+    setBackground(null);
+    if (!videoUrl || !isVisible || duration <= 0) return () => { active = false; };
+
+    requestVideoBackground({
+      uri: videoUrl,
+      cacheKey: videoId,
+      duration,
+      width: videoSize.width,
+      height: videoSize.height,
+      size: videoSizeBytes,
+      thumbnailUri: videoThumbnail,
+    }).then(result => {
+      if (active) setBackground(result);
+    }).catch(error => {
+      console.warn('Could not prepare the video background:', error.name || 'Unknown error');
+    });
+
+    return () => { active = false; };
+  }, [videoUrl, videoId, videoThumbnail, duration, videoSize, videoSizeBytes, isVisible]);
 
   useEffect(() => {
     if (player) {
@@ -728,13 +784,19 @@ const ShaakaVideoPlayer = ({
       ) : null}
 
       <View style={[styles.videoPlayerFrame, { backgroundColor: theme?.mediaLoadingBackground }]}>
+        <VideoBackground
+          frameUri={background?.frameUri || coverImage}
+          duration={background?.duration}
+          active={isVisible && isPlayingState}
+        />
+
         {!ready && coverImage ? (
-          <Image source={{ uri: coverImage }} style={styles.videoCover} resizeMode="cover" />
+          <Image source={normalizeImageSource({ uri: coverImage })} style={styles.videoCover} resizeMode="cover" />
         ) : null}
 
         <VideoView
           player={player}
-          style={styles.videoView}
+          style={[styles.videoView, background?.frameUri ? { opacity: 0.96 } : null]}
           contentFit={contentFit}
           nativeControls={false}
         />
@@ -883,7 +945,7 @@ const ShaakaVideoPlayer = ({
 /* ============================================================
    Shared UI helpers
    ============================================================ */
-const ImageWithPlaceholder = React.memo(({ source, style, resizeMode, transparentBackground }) => {
+const ImageWithPlaceholder = React.memo(({ source, style, resizeMode, transparentBackground, variants }) => {
   const { theme } = useTheme();
   const [loaded, setLoaded] = useState(false);
   const scaleAnim = useRef(new Animated.Value(1)).current;
@@ -953,17 +1015,29 @@ const ImageWithPlaceholder = React.memo(({ source, style, resizeMode, transparen
           />
         </Animated.View>
       )}
-      <Animated.Image
-        source={getImageSource(source)}
-        style={[style, { opacity: loaded ? 1 : 0 }]}
-        resizeMode={resizeMode || 'cover'}
-        onLoad={onLoad}
-      />
+      <Animated.View style={[StyleSheet.absoluteFillObject, { opacity: loaded ? 1 : 0 }]}>
+        <Image
+          source={normalizeImageSource(getImageSource(source))}
+
+          style={[StyleSheet.absoluteFillObject, style]}
+
+          onLoad={onLoad}
+          onError={() => setLoaded(false)}
+          resizeMode={resizeMode || 'cover'}
+        />
+      </Animated.View>
     </Animated.View>
   );
 });
 
-const ImageSlider = React.memo(({ images, isDarkMode, height, width = CARD_WIDTH, resizeMode = 'contain', loadingBackground }) => {
+const ImageSlider = React.memo(({
+  images,
+  isDarkMode,
+  height,
+  width = CARD_WIDTH,
+  resizeMode = 'contain',
+  loadingBackground,
+}) => {
   const [currentIndex, setCurrentIndex] = useState(0);
   const flatListRef = useRef(null);
   const containerHeight = height || MAX_IMAGE_HEIGHT;
@@ -981,7 +1055,8 @@ const ImageSlider = React.memo(({ images, isDarkMode, height, width = CARD_WIDTH
   return (
     <View style={[styles.sliderContainer, { height: containerHeight, backgroundColor: loadingBackground }]}>
       <Image
-        source={getImageSource(currentImage)}
+        source={normalizeImageSource(getImageSource(currentImage))}
+
         style={[StyleSheet.absoluteFillObject, { width: '100%', height: '100%' }]}
         resizeMode={resizeMode}
       />
@@ -1014,9 +1089,19 @@ const ImageSlider = React.memo(({ images, isDarkMode, height, width = CARD_WIDTH
   );
 });
 
-const FeedProductStrip = React.memo(({ products, onPress, onUserPress, title, isDarkMode, tileHeight = 180, tileWidth = 132 }) => {
+const FeedProductStrip = React.memo(({
+  products,
+  onPress,
+  onVideoPress,
+  onUserPress,
+  title,
+  isDarkMode,
+  tileHeight = 180,
+  tileWidth = 132,
+  onlineUsers = {},
+}) => {
   const visibleProducts = products
-    .filter(product => product.houseImages?.length || product.videoUrl)
+    .filter(product => getPostCoverUri(product))
     .slice(0, 10);
 
   if (visibleProducts.length === 0) return null;
@@ -1032,27 +1117,37 @@ const FeedProductStrip = React.memo(({ products, onPress, onUserPress, title, is
         contentContainerStyle={styles.productStripContent}
       >
         {visibleProducts.map(product => {
-          const videoCover = product.videoUrl
-            ? getVideoCover(product.videoUrl, product.videoThumbnail)
-            : null;
-          const image = product.houseImages?.[0] || videoCover;
+          const image = getPostCoverUri(product);
           const label = product.productName || product.category || 'Product';
           const amountText = product.amount
             || (product.price != null ? `RWF ${product.price.toLocaleString()}` : '');
 
           return (
-            <TouchableOpacity
+            <View
               key={product._id}
               style={[styles.productTile, { width: tileWidth, height: tileHeight }]}
-              onPress={() => onPress(product)}
-              activeOpacity={0.9}
             >
-              <Image source={getImageSource(image)} style={styles.productTileImage} />
-              <View style={styles.productTileShade} />
+              <TouchableOpacity
+                style={StyleSheet.absoluteFill}
+                onPress={() => product.videoUrl ? onVideoPress?.(product) : onPress(product)}
+                activeOpacity={0.9}
+                accessibilityRole="button"
+                accessibilityLabel={product.videoUrl ? 'Open video Reel' : `Open ${label} details`}
+              >
+                <Image
+                  source={normalizeImageSource(getImageSource(image))}
+                  style={styles.productTileImage}
+                />
+                <View style={styles.productTileShade} pointerEvents="none" />
+              </TouchableOpacity>
 
-              <Text style={styles.productTileLabel} numberOfLines={2}>
-                {label}
-              </Text>
+              <TouchableOpacity
+                style={styles.productTileLabelButton}
+                onPress={() => onPress(product)}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.productTileLabel} numberOfLines={2}>{label}</Text>
+              </TouchableOpacity>
 
               {product.videoUrl && (
                 <View style={styles.productTileVideoBadge}>
@@ -1061,28 +1156,38 @@ const FeedProductStrip = React.memo(({ products, onPress, onUserPress, title, is
               )}
 
               <View style={styles.productTileUserRow}>
-                <TouchableOpacity
-                  onPress={event => {
-                    event.stopPropagation();
-                    onUserPress(product.userId, product.username);
-                  }}
-                  activeOpacity={0.85}
-                  accessibilityRole="button"
-                  accessibilityLabel={`View ${product.username || 'user'} profile`}
-                >
-                  <Image
-                    source={getImageSource(product.userAvatar)}
-                    style={styles.productTileOwnerAvatar}
-                  />
-                </TouchableOpacity>
+                <View style={styles.avatarContainerRelative}>
+                  <TouchableOpacity
+                    onPress={event => {
+                      event.stopPropagation();
+                      onUserPress(product.userId, product.username);
+                    }}
+                    activeOpacity={0.85}
+                    accessibilityRole="button"
+                    accessibilityLabel={`View ${product.username || 'user'} profile`}
+                  >
+                    <Image
+                      source={normalizeImageSource(getImageSource(product.userAvatar))}
+
+                      style={styles.productTileOwnerAvatar}
+                    />
+                  </TouchableOpacity>
+                  {Boolean(product.userId && onlineUsers[String(product.userId)]) && (
+                    <View style={styles.onlineDotSmall} />
+                  )}
+                </View>
               </View>
 
               {!!amountText && (
-                <Text style={styles.productTilePrice} numberOfLines={1}>
-                  {amountText}
-                </Text>
+                <TouchableOpacity
+                  style={styles.productTilePriceButton}
+                  onPress={() => onPress(product)}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.productTilePrice} numberOfLines={1}>{amountText}</Text>
+                </TouchableOpacity>
               )}
-            </TouchableOpacity>
+            </View>
           );
         })}
       </ScrollView>
@@ -1310,6 +1415,7 @@ const ReelVideo = React.memo(({
     return (
       <ShaakaVideoPlayer
         videoUrl={sourceUri}
+        videoId={reel._id}
         videoThumbnail={reel.videoThumbnail}
         videoLink={reel.videoLink}
         videoDuration={reel.videoDuration}
@@ -1330,7 +1436,7 @@ const ReelVideo = React.memo(({
     <View style={[styles.reelSourcePlaceholder, { height, backgroundColor: theme.reel }]}>
       {!!reel.videoThumbnail && (
         <Image
-          source={{ uri: reel.videoThumbnail }}
+          source={normalizeImageSource({ uri: reel.videoThumbnail })}
           style={StyleSheet.absoluteFillObject}
           resizeMode="cover"
         />
@@ -1362,11 +1468,11 @@ const ReelVideo = React.memo(({
    HouseCard
    ============================================================ */
 const HouseCard = React.memo(({
-  house, theme, isDarkMode, onPress, onShare, isSaved, onToggleSave,
+  house, theme, isDarkMode, onPress, onVideoPress, onShare, isSaved, onToggleSave,
   isLoggedIn, showLoginModal, isMyPost, onUserPress, onReport,
   onMessagePress, t, onQuickSuggestion, isSendingSuggestion,
   suggestionState, videoKey, isVideoVisible, isMuted, onMuteChange,
-  maxMediaHeight, minMediaHeight, screenWidth,
+  maxMediaHeight, minMediaHeight, screenWidth, onlineUsers = {},
 }) => {
   const [showFullDesc, setShowFullDesc] = useState(false);
   const [reportSheetVisible, setReportSheetVisible] = useState(false);
@@ -1491,6 +1597,7 @@ const HouseCard = React.memo(({
   const productName = house.productName || house.category || '';
   const amountText = house.amount || (house.price != null ? `RWF ${house.price.toLocaleString()}` : '');
   const hasAmount = !!amountText;
+  const ownerId = getPostOwnerId(house);
 
   return (
     <View style={[styles.card, { width: screenWidth, backgroundColor: theme.background }]}>
@@ -1516,6 +1623,7 @@ const HouseCard = React.memo(({
         {hasVideo ? (
           <ShaakaVideoPlayer
             videoUrl={house.videoUrl}
+            videoId={house._id}
             videoThumbnail={house.videoThumbnail}
             videoLink={house.videoLink}
             videoDuration={house.videoDuration}
@@ -1527,6 +1635,7 @@ const HouseCard = React.memo(({
             onMuteChange={onMuteChange}
             showPlaybackControls={false}
             showTopMute={true}
+            onVideoPress={() => onVideoPress?.(house)}
           />
         ) : (
           <TouchableOpacity
@@ -1599,10 +1708,16 @@ const HouseCard = React.memo(({
               activeOpacity={0.85}
               style={styles.bottomUserRow}
             >
-              <Image
-                source={getImageSource(house.userAvatar)}
-                style={styles.bottomUserAvatar}
-              />
+              <View style={styles.avatarContainerRelative}>
+                <Image
+                  source={normalizeImageSource(getImageSource(house.userAvatar))}
+
+                  style={styles.bottomUserAvatar}
+                />
+                {Boolean(ownerId && onlineUsers[String(ownerId)]) && (
+                  <View style={styles.onlineDotSmall} />
+                )}
+              </View>
               <Text style={styles.bottomUserName} numberOfLines={1}>
                 {getUserDisplayName(house.user || house, 'User')}
               </Text>
@@ -1857,7 +1972,8 @@ const ReelsFeed = React.memo(({
             accessibilityLabel={`View ${item.username || 'user'} profile`}
           >
             <Image
-              source={getImageSource(item.userAvatar)}
+              source={normalizeImageSource(getImageSource(item.userAvatar))}
+
               style={styles.reelAvatarSmall}
             />
             <Text style={styles.reelUsername} numberOfLines={1}>
@@ -2040,10 +2156,15 @@ const ReelsFeed = React.memo(({
 const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const { theme, isDarkMode } = useTheme();
+  const contactInfo = useContactInfo();
+  const socialLinks = useContactLinks(contactInfo);
   const { user: authUser } = useAuth();
   const { showBottomSheet } = useBottomSheet();
   const route = useRoute();
   const t = translations[language] || translations.English;
+
+  const [onlineUsers, setOnlineUsers] = useState({});
+  const presenceSocketRef = useRef(null);
 
   const [activeTab, setActiveTab] = useState(initialTab);
   const [screenAreaHeight, setScreenAreaHeight] = useState(windowHeight);
@@ -2349,6 +2470,82 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   }, [authUser]);
 
   const getToken = useCallback(async () => await AsyncStorage.getItem('userToken'), []);
+
+  const fetchOnlineStatuses = useCallback(async (userIds) => {
+    if (!userIds || userIds.length === 0) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const response = await axios.post(
+        `${BASE_URL}/api/user/batch-online`,
+        { userIds },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (response.data.success) {
+        const statuses = response.data.statuses || {};
+        setOnlineUsers(prev => ({ ...prev, ...Object.fromEntries(Object.entries(statuses).map(([id, value]) => [String(id), Boolean(value)])) }));
+      }
+    } catch (error) {
+      if (error?.response?.status !== 404) {
+        console.warn('Failed to fetch buy-post online statuses:', error?.message || error);
+      }
+    }
+  }, [getToken]);
+
+  const connectPresenceSocket = useCallback(async () => {
+    if (!isLoggedIn || !currentUser?._id) return;
+    if (presenceSocketRef.current) return;
+
+    const token = await getToken();
+    if (!token) return;
+
+    const socket = io(BASE_URL.replace('/api', ''), {
+      transports: ['websocket'],
+      auth: { token },
+      autoConnect: true,
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
+    });
+
+    presenceSocketRef.current = socket;
+
+    socket.on('user-online', (payload) => {
+      const uid = payload?.userId;
+      if (uid) setOnlineUsers(prev => ({ ...prev, [String(uid)]: true }));
+    });
+
+    socket.on('user-offline', (payload) => {
+      const uid = payload?.userId;
+      if (uid) setOnlineUsers(prev => ({ ...prev, [String(uid)]: false }));
+    });
+
+    socket.on('connect', () => {
+      if (currentUser?._id) {
+        socket.emit('join-chat', { sellerId: currentUser._id });
+      }
+    });
+
+    socket.on('disconnect', () => {
+      // presence state is refreshed on next fetch
+    });
+  }, [currentUser, getToken, isLoggedIn]);
+
+  useEffect(() => {
+    if (!isLoggedIn || !currentUser?._id) return;
+    connectPresenceSocket();
+  }, [isLoggedIn, currentUser?._id, connectPresenceSocket]);
+
+  useEffect(() => {
+    const ids = Array.from(new Set(
+      [...feedPosts, ...myPosts, ...savedPosts]
+        .map(post => getPostOwnerId(post))
+        .filter(Boolean)
+    ));
+    if (ids.length) fetchOnlineStatuses(ids);
+  }, [feedPosts, myPosts, savedPosts, fetchOnlineStatuses]);
 
   const checkLoginStatus = useCallback(async () => {
     const loggedIn = await AsyncStorage.getItem('isLoggedIn');
@@ -2662,30 +2859,9 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       setIsSendingSuggestion(true);
       updateSuggestionState(house._id, { status: 'sending', message: t.sending, sentText: text });
       const sellerDisplayName = getUserDisplayName(house.user || house, 'User');
-      const replyPost = {
-        postId: house._id,
-        title: house.productName || house.title || 'Product',
-        description: house.description || '',
-        image: (house.houseImages && house.houseImages.length > 0)
-          ? (typeof house.houseImages[0] === 'string' ? house.houseImages[0] : house.houseImages[0]?.uri || house.houseImages[0])
-          : null,
-        price: house.price ?? null,
-        amount: house.amount || '',
-        location: house.location || '',
-        category: house.category || '',
-        bedrooms: house.bedrooms ?? null,
-        bathrooms: house.bathrooms ?? null,
-        size: house.size ?? null,
-        priceNegotiable: !!house.priceNegotiable,
-        contactNumbers: house.contactNumbers || [],
-        houseImages: house.houseImages || [],
-        videoUrl: house.videoUrl || '',
-        videoThumbnail: getVideoCover(house.videoUrl, house.videoThumbnail) || '',
-        username: sellerDisplayName,
-        userAvatar: house.userAvatar || house.user?.avatar || '',
-        ownerId: sellerId,
-        timestamp: house.createdAt || new Date().toISOString(),
-      };
+      const replyPost = buildChatReplyPost(house);
+      replyPost.username = sellerDisplayName;
+      replyPost.videoThumbnail = getVideoCover(house.videoUrl, house.videoThumbnail) || replyPost.videoThumbnail || '';
       const messageData = {
         postId: house._id,
         postTitle: house.productName || house.title || '',
@@ -2800,6 +2976,16 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     navigation.navigate('PostDetail', { house: post, language });
   }, [activeTab, isOwnPost, isLoggedIn, t, navigation, language, showBottomSheet]);
 
+  const handleReelPress = useCallback((post) => {
+    const videoUrl = post?.videoUrl || post?.videoHlsUrl || post?.video?.url || '';
+    if (!videoUrl) return;
+    navigation.navigate('BuyPost', {
+      activeTab: 'videos',
+      reelId: String(post.reelId || post._id || post.id || post.videoId || videoUrl),
+      reelPost: { ...post, videoUrl },
+    });
+  }, [navigation]);
+
   const handleUserPress = useCallback((userId, username) => {
     if (!isLoggedIn) {
       showBottomSheet({
@@ -2856,6 +3042,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       sellerPhone: house.contactNumber1 || house.contactNumber2 || '',
       postId: String(postId),
       postTitle: productName,
+      replyPost: buildChatReplyPost(house),
     });
   }, [isLoggedIn, t, navigation, viewerId, showBottomSheet]);
 
@@ -2942,7 +3129,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         ))}
       </View>
     </View>
-  ), [theme.textSecondary, t.followUs, openSocialLink]);
+  ), [theme.textSecondary, t.followUs, openSocialLink, socialLinks]);
 
   const browseFeedPosts = useMemo(
     () => feedPosts.filter(post => !isOwnPost(post)),
@@ -3190,7 +3377,11 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     return (
       <View style={[styles.gridPostItem, { width: (windowWidth - 32) / 2 }]}>
         <TouchableOpacity style={styles.gridPostImageContainer} onPress={() => handlePostPress(item)}>
-          <Image source={{ uri: imageUri || item.houseImages?.[0] || 'https://via.placeholder.com/150' }} style={styles.gridPostImage} />
+          <Image
+            source={normalizeImageSource({ uri: imageUri || item.houseImages?.[0] || 'https://via.placeholder.com/150' })}
+
+            style={styles.gridPostImage}
+          />
           {item.videoUrl && (
             <View style={styles.videoCoverBadge}>
               <Ionicons name="play" size={16} color="#fff" />
@@ -3198,19 +3389,19 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
           )}
           {isSavedTab && (
             <TouchableOpacity
-              style={[styles.unsaveButton, { backgroundColor: isDarkMode ? '#111' : '#dddd' }]}
+              style={[styles.unsaveButton, { backgroundColor: isDarkMode ? '#111' : '#dddddd' }]}
               onPress={event => {
                 event?.stopPropagation?.();
                 toggleSave(item);
               }}
             >
-              <Ionicons name="bookmark" size={22} color="#fff" />
+              <Ionicons name="bookmark" size={22} color={isDarkMode ? '#cecdcd' : '#888888'} />
             </TouchableOpacity>
           )}
         </TouchableOpacity>
         {showDelete && (
           <TouchableOpacity
-            style={[styles.deleteButton, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.6)' }]}
+            style={[styles.deleteButton, { backgroundColor: isDarkMode ? '#111' : '#dddddd' }]}
             onPress={() => confirmDeletePost(item._id)}
           >
             <View style={styles.gridMenuIconWrapper}>
@@ -3276,6 +3467,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         theme={theme}
         isDarkMode={isDarkMode}
         onPress={handlePostPress}
+        onVideoPress={handleReelPress}
         onShare={handleShare}
         isSaved={savedPostIds.includes(item._id)}
         onToggleSave={toggleSave}
@@ -3305,9 +3497,10 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         maxMediaHeight={maxPostMediaHeight}
         minMediaHeight={minPostMediaHeight}
         screenWidth={windowWidth}
+        onlineUsers={onlineUsers}
       />
     );
-  }, [theme, isDarkMode, handlePostPress, handleShare, savedPostIds, toggleSave, isLoggedIn, handleUserPress, handleReport, handleMessagePress, t, sendQuickSuggestion, isSendingSuggestion, getSuggestionState, activeVideoKey, isMuted, handleMuteChange, showBottomSheet, navigation, maxPostMediaHeight, minPostMediaHeight, windowWidth]);
+  }, [theme, isDarkMode, handlePostPress, handleReelPress, handleShare, savedPostIds, toggleSave, isLoggedIn, handleUserPress, handleReport, handleMessagePress, t, sendQuickSuggestion, isSendingSuggestion, getSuggestionState, activeVideoKey, isMuted, handleMuteChange, showBottomSheet, navigation, maxPostMediaHeight, minPostMediaHeight, windowWidth]);
 
   const renderFeedItem = useCallback(({ item, index }) => {
     if (item.isFeedProductStrip) {
@@ -3316,15 +3509,17 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
           title={t.trending}
           products={item.products}
           onPress={handlePostPress}
+          onVideoPress={handleReelPress}
           onUserPress={handleUserPress}
           isDarkMode={isDarkMode}
           tileHeight={productTileHeight}
           tileWidth={productTileWidth}
+          onlineUsers={onlineUsers}
         />
       );
     }
     return renderHouseCard({ item, index });
-  }, [handlePostPress, handleUserPress, renderHouseCard, t.trending, isDarkMode, productTileHeight, productTileWidth]);
+  }, [handlePostPress, handleReelPress, handleUserPress, renderHouseCard, t.trending, isDarkMode, productTileHeight, productTileWidth]);
 
   const shouldShowUnread = useCallback((update) => {
     if (!update.lastViewedAt) return true;
@@ -3467,18 +3662,24 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
             renderItem={renderFeedItem}
             ListHeaderComponent={
               <View>
-                <FeedProductStrip
-                  title={t.trending}
-                  products={trendingPosts}
-                  onPress={handlePostPress}
-                  onUserPress={handleUserPress}
-                  isDarkMode={isDarkMode}
-                  tileHeight={productTileHeight}
-                  tileWidth={productTileWidth}
-                />
-                <Text style={[styles.newPostsTitle, { color: isDarkMode ? '#dddddd' : '#111111' }]}>
-                  {t.newPosts}
-                </Text>
+                <View>
+                  <FeedProductStrip
+                    title={t.trending}
+                    products={trendingPosts}
+                    onPress={handlePostPress}
+                    onVideoPress={handleReelPress}
+                    onUserPress={handleUserPress}
+                    isDarkMode={isDarkMode}
+                    tileHeight={productTileHeight}
+                    tileWidth={productTileWidth}
+                    onlineUsers={onlineUsers}
+                  />
+                </View>
+                <View>
+                  <Text style={[styles.newPostsTitle, { color: isDarkMode ? '#dddddd' : '#111111' }]}>
+                    {t.newPosts}
+                  </Text>
+                </View>
               </View>
             }
             contentContainerStyle={styles.listContent}
@@ -3513,7 +3714,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         </Animated.View>
       )}
 
-      {/* Eye toggle:
+      {/* Header visibility toggle:
             – hidden on the Videos (Reels) tab
             – hidden while the update detail sheet is open
             – hidden while the "add update" sheet is open */}
@@ -3524,11 +3725,37 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
             styles.floatingEyeButton,
             {
               transform: eyePos.getTranslateTransform(),
-              backgroundColor: isDarkMode ? '#111' : '#dddd',
             },
           ]}
           {...eyePanResponder.panHandlers}
         >
+          <Svg
+            width={EYE_BACKGROUND_SIZE}
+            height={EYE_BACKGROUND_SIZE}
+            viewBox="0 0 64 64"
+            style={styles.floatingEyeButtonBackground}
+            pointerEvents="none"
+          >
+            <Polygon
+              points="32,2 55.5,13.3 61.2,38.7 45,59 19,59 2.8,38.7 8.5,13.3"
+              fill={isDarkMode ? '#47ae87' : '#47ae87'}
+              opacity={0.16}
+            />
+            <Polygon
+              points="32,4 53.9,14.5 59.3,38.2 44.2,57.2 19.8,57.2 4.7,38.2 10.1,14.5"
+              fill={isDarkMode ? '#47ae87' : '#47ae87'}
+              opacity={0.22}
+            />
+            <Polygon
+              points="32,6 52.3,15.8 57.4,37.8 43.3,55.4 20.7,55.4 6.6,37.8 11.7,15.8"
+              fill={isDarkMode ? '#47ae87' : '#47ae87'}
+              opacity={0.28}
+            />
+            <Polygon
+              points="32,8 50.8,17 55.4,37.3 42.4,53.6 21.6,53.6 8.6,37.3 13.2,17"
+              fill={isDarkMode ? '#111' : '#dddddd'}
+            />
+          </Svg>
           <TouchableOpacity
             onPress={handleEyePress}
             activeOpacity={0.85}
@@ -3537,25 +3764,17 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
             accessibilityLabel={headerVisible ? 'Hide top bar (Unsee)' : 'Show top bar (See)'}
           >
             <Svg
-              width={24}
-              height={24}
+              width={20}
+              height={20}
               viewBox="0 0 24 24"
-              style={{ transform: [{ rotate: headerVisible ? '0deg' : '180deg' }] }}
             >
               <Path
-                d="M2 14C4.2 7.7 8 4 12 4s7.8 3.7 10 10"
+                d={headerVisible ? 'M4 3l8 7 8-7M4 13l8 7 8-7' : 'M4 11l8-7 8 7M4 21l8-7 8 7'}
                 fill="none"
                 stroke={theme.textSecondary}
-                strokeWidth={2.5}
+                strokeWidth={2.8}
                 strokeLinecap="round"
-              />
-              <Circle
-                cx={12}
-                cy={13}
-                r={4}
-                fill="none"
-                stroke={theme.textSecondary}
-                strokeWidth={2.5}
+                strokeLinejoin="round"
               />
             </Svg>
           </TouchableOpacity>
@@ -3595,7 +3814,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         <Animated.View style={[styles.detailSheet, { backgroundColor: theme.background, borderTopColor: theme.border, transform: [{ translateY: detailSheetAnim }] }]}>
           <View style={styles.sheetHandle} />
           <View style={[styles.detailTitleContainer, { borderBottomColor: theme.border }]}>
-            <Image source={require('../assets/logos.png')} style={{ width: 70, height: 70, marginRight: 10, borderRadius: 15 }} resizeMode="contain" />
+            <Image source={normalizeImageSource(require('../assets/logos.png'))} style={{ width: 70, height: 70, marginRight: 10, borderRadius: 15 }} resizeMode="contain" />
             <Text style={[styles.detailTitle, { color: theme.text }]} numberOfLines={1}>{selectedUpdate.title}</Text>
             <TouchableOpacity onPress={closeDetailSheet}><Ionicons name="close" size={28} color={theme.text} /></TouchableOpacity>
           </View>
@@ -3611,6 +3830,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
           {renderSocialIcons()}
         </Animated.View>
       )}
+
     </View>
   );
 };
@@ -3677,11 +3897,13 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.22)',
   },
-  productTileLabel: {
+  productTileLabelButton: {
     position: 'absolute',
     top: 10,
     left: 10,
     right: 36,
+  },
+  productTileLabel: {
     color: '#fff',
     fontSize: 11,
     fontWeight: '800',
@@ -3707,6 +3929,25 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
+  avatarContainerRelative: {
+    position: 'relative',
+  },
+  onlineDotSmall: {
+    position: 'absolute',
+    right: -2,
+    bottom: -2,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#47ae87',
+    borderWidth: 2,
+    borderColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3,
+    elevation: 3,
+  },
   productTileOwnerAvatar: {
     width: 30,
     height: 30,
@@ -3715,11 +3956,13 @@ const styles = StyleSheet.create({
     borderColor: '#fff',
     backgroundColor: '#333',
   },
-  productTilePrice: {
+  productTilePriceButton: {
     position: 'absolute',
     right: 10,
     bottom: 16,
     maxWidth: 80,
+  },
+  productTilePrice: {
     color: '#fff',
     fontSize: 11,
     fontWeight: '800',
@@ -4270,27 +4513,25 @@ const styles = StyleSheet.create({
     left: 0,
     width: EYE_BUTTON_SIZE,
     height: EYE_BUTTON_SIZE,
-    borderRadius: EYE_BUTTON_SIZE / 2,
     zIndex: 200,
-    elevation: 12,
-    shadowColor: '#00000004',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
+  },
+  floatingEyeButtonBackground: {
+    position: 'absolute',
+    top: (EYE_BUTTON_SIZE - EYE_BACKGROUND_SIZE) / 2,
+    left: (EYE_BUTTON_SIZE - EYE_BACKGROUND_SIZE) / 2,
   },
   floatingEyeButtonInner: {
     width: '100%',
     height: '100%',
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: EYE_BUTTON_SIZE / 2,
   },
 
   gridRow: { justifyContent: 'space-between', marginBottom: 8 },
   gridPostItem: { width: (SCREEN_WIDTH - 32) / 2, aspectRatio: 1, marginBottom: 8, position: 'relative' },
   gridPostImageContainer: { width: '100%', height: '100%', borderRadius: 6, overflow: 'hidden' },
   gridPostImage: { width: '100%', height: '100%', resizeMode: 'cover' },
-  deleteButton: { position: 'absolute', top: 4, right: 4, borderRadius: 12, padding: 2 },
+  deleteButton: { position: 'absolute', top: 0, right: 0, borderBottomLeftRadius: 12, padding: 6 },
   gridMenuIconWrapper: { width: 20, height: 16, justifyContent: 'space-between', alignItems: 'stretch' },
   gridMenuIconLine: { height: 2, borderRadius: 999, backgroundColor: '#47ae87' },
   gridMenuIconLineTop: { width: '60%', alignSelf: 'flex-start' },
@@ -4346,7 +4587,7 @@ const styles = StyleSheet.create({
   detailLinkText: { marginLeft: 8, fontSize: 14, flex: 1 },
   socialIconsFooter: { marginTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#ccc', paddingTop: 12 },
   followText: { fontSize: 14, fontWeight: '500', textAlign: 'center', marginBottom: 12 },
-  socialIconsRow: { flexDirection: 'row', justifyContent: 'center', gap: 16 },
+  socialIconsRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 10 },
   socialIconSmall: { alignItems: 'center' },
   socialIconCircleSmall: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
 
@@ -4549,7 +4790,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   videoTimeText: {
-    minWidth: 88,
+    width: 88,
+    flexShrink: 0,
     color: '#fff',
     fontSize: 10,
     fontWeight: '700',

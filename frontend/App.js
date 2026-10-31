@@ -22,10 +22,10 @@ import { BASE_URL } from './constants';
 import AddUpdateScreen from './screens/AddUpdateScreen';
 import AdminLoginScreen from './screens/AdminLoginScreen';
 import AdminDashboardScreen from './screens/AdminDashboardScreen';
+import AdminContactInfoScreen from './screens/AdminContactInfoScreen';
 
 // Import Screens
 import HomeScreen from './screens/HomeScreen';
-import EditScreen from './screens/EditScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import SearchScreen from './screens/SearchScreen';
 import MessageScreen from './screens/MessageScreen';
@@ -51,6 +51,8 @@ import AdminReportsScreen from './screens/AdminReportsScreen';
 import AdminShopsScreen from './screens/AdminShopsScreen';
 import AdminBusinessAddScreen from './screens/AdminBusinessAddScreen';
 import BusinessIdeasAdminScreen from './screens/BusinessIdeasAdminScreen';
+import TutorialScreen from './screens/TutorialScreen';
+import AdminTutorialScreen from './screens/AdminTutorialScreen';
 import AddPostScreen from './screens/AddPostScreen';
 import ViewPlaceScreen from './screens/ViewPlaceScreen';
 import ViewShopScreen from './screens/ViewShopScreen';
@@ -68,6 +70,8 @@ import { networkStatus } from './services/networkStatus';
 import { syncManager } from './services/syncManager';
 import { startupPrefetch } from './services/startupPrefetch';
 import { installOfflineApiCache } from './services/offlineApiCache';
+import RouteTutorialGuide from './components/RouteTutorialGuide';
+import StartupScreen from './screens/StartupScreen';
 
 installOfflineApiCache();
 
@@ -296,22 +300,10 @@ const CustomTabBar = ({ state, navigation, theme }) => {
   const insets = useSafeAreaInsets();
 
   const currentRoute = state.routes[state.index];
-  const currentBuyPostTab =
-    currentRoute?.name === 'BuyPost'
-      ? currentRoute?.params?.activeTab || 'ushaka'
-      : null;
 
   // --- Visibility rules -------------------------------------------------
   // 1. Only show on the whitelisted screens.
   if (!currentRoute || !BAR_ROUTES.includes(currentRoute.name)) return null;
-  // 2. BuyPost only shows the bar on the feed (ushaka) and videos tabs.
-  const allowedBuyPostTabs = ['ushaka', 'videos'];
-  if (
-    currentRoute.name === 'BuyPost' &&
-    !allowedBuyPostTabs.includes(currentBuyPostTab)
-  ) {
-    return null;
-  }
   // ----------------------------------------------------------------------
 
   // Which tabs are visible (same logic as before, driven by TabModeContext)
@@ -435,7 +427,14 @@ const CustomTabBar = ({ state, navigation, theme }) => {
 */
 
 // ==================== MAIN TABS ====================
-const MainTabs = ({ language, toggleLanguage, theme, route, isLoading }) => {
+const MainTabs = ({
+  language,
+  toggleLanguage,
+  theme,
+  route,
+  isLoading,
+  onWelcomeHomeReady,
+}) => {
   const refreshKey = route?.params?.refreshKey || 0;
 
   return (
@@ -456,7 +455,12 @@ const MainTabs = ({ language, toggleLanguage, theme, route, isLoading }) => {
                 textColor={theme.text}
               />
             ) : (
-              <WelcomeHomeScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+              <WelcomeHomeScreen
+                {...props}
+                language={language}
+                toggleLanguage={toggleLanguage}
+                onInitialLoadComplete={onWelcomeHomeReady}
+              />
             )}
           </>
         )}
@@ -516,6 +520,8 @@ const MainTabs = ({ language, toggleLanguage, theme, route, isLoading }) => {
 // ==================== APP CONTENT ====================
 function AppContent() {
   const { theme, isDarkMode, isLoading } = useTheme();
+  const [showStartupAnimation, setShowStartupAnimation] = useState(true);
+  const [isWelcomeHomeReady, setIsWelcomeHomeReady] = useState(false);
   const baseNavigationTheme = isDarkMode ? DarkTheme : DefaultTheme;
   const navigationTheme = {
     ...baseNavigationTheme,
@@ -525,10 +531,13 @@ function AppContent() {
       card: theme.background,
     },
   };
-  const navigationRef = useNavigationContainerRef();
   const [language, setLanguage] = useState('Kinyarwanda'); // default language
   const [showMobileNavigation, setShowMobileNavigation] = useState(false);
+  const [activeRouteName, setActiveRouteName] = useState(null);
+  const navigationRef = useNavigationContainerRef();
   const toggleLanguage = () => setLanguage(prev => prev === 'English' ? 'Kinyarwanda' : 'English');
+  const finishStartupAnimation = useCallback(() => setShowStartupAnimation(false), []);
+  const markWelcomeHomeReady = useCallback(() => setIsWelcomeHomeReady(true), []);
 
   useEffect(() => {
     let previousOnline = false;
@@ -591,18 +600,27 @@ function AppContent() {
   // ---------- END ONLINE STATUS ----------
 
   return (
-    <>
-      <StatusBar style={isDarkMode ? 'light' : 'dark'} hidden={false} translucent={false} />
+    <View style={styles.appContainer}>
+      <StatusBar
+        style={showStartupAnimation || isDarkMode ? 'light' : 'dark'}
+        backgroundColor={showStartupAnimation ? '#080808' : theme.background}
+        hidden={showStartupAnimation}
+        translucent={showStartupAnimation}
+      />
       <TabModeProvider>
         <NavigationContainer
           ref={navigationRef}
           theme={navigationTheme}
+          onReady={() => setActiveRouteName(navigationRef.getCurrentRoute()?.name || null)}
           onStateChange={state => {
             const activeRoute = state?.routes?.[state.index];
+            setActiveRouteName(navigationRef.getCurrentRoute()?.name || null);
             setShowMobileNavigation(
               activeRoute?.name !== 'Main' &&
               activeRoute?.name !== 'AddPost' &&
-              activeRoute?.name !== 'EditScreen'
+              activeRoute?.name !== 'Tutorial' &&
+              activeRoute?.name !== 'AdminTutorial' &&
+              activeRoute?.name !== 'AdminContactInfo'
             );
           }}
         >
@@ -610,7 +628,16 @@ function AppContent() {
           
           <Stack.Navigator initialRouteName="Main" screenOptions={{ headerShown: false }}>
             <Stack.Screen name="Main">
-              {props => <MainTabs {...props} language={language} toggleLanguage={toggleLanguage} theme={theme} isLoading={isLoading} />}
+              {props => (
+                <MainTabs
+                  {...props}
+                  language={language}
+                  toggleLanguage={toggleLanguage}
+                  theme={theme}
+                  isLoading={isLoading}
+                  onWelcomeHomeReady={markWelcomeHomeReady}
+                />
+              )}
             </Stack.Screen>
             <Stack.Screen name="BuyPost">
               {props => (
@@ -632,30 +659,33 @@ function AppContent() {
               )}
             </Stack.Screen>
 
+            <Stack.Screen name="Tutorial">
+              {props => <TutorialScreen {...props} language={language} />}
+            </Stack.Screen>
+
+            <Stack.Screen name="AdminTutorial" options={{ headerShown: false }}>
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <AdminTutorialScreen {...props} language={language} />
+                </>
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="AdminContactInfo" options={{ headerShown: false }}>
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <AdminContactInfoScreen {...props} language={language} />
+                </>
+              )}
+            </Stack.Screen>
+
             {/* ---------- Business Ideas Screen ---------- */}
             <Stack.Screen name="BusinessIdeas">
               {props => (
                 <>
                   <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton={true} />
                   <BusinessIdeasScreen {...props} language={language} toggleLanguage={toggleLanguage} />
-                </>
-              )}
-            </Stack.Screen>
-
-            <Stack.Screen name="EditScreen">
-              {props => (
-                <>
-                  <TopBar
-                    theme={theme}
-                    language={language}
-                    toggleLanguage={toggleLanguage}
-                    showBackButton={true}
-                  />
-                  <EditScreen
-                    {...props}
-                    language={language}
-                    toggleLanguage={toggleLanguage}
-                  />
                 </>
               )}
             </Stack.Screen>
@@ -681,7 +711,12 @@ function AppContent() {
             </Stack.Screen>
 
             <Stack.Screen name="AdminReports" options={{ headerShown: false }}>
-              {props => <AdminReportsScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <AdminReportsScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
             </Stack.Screen>
 
             <Stack.Screen
@@ -700,23 +735,38 @@ function AppContent() {
                     showBackButton={true}
                   />
                   <ViewPlaceScreen
-                    {...props}
-                    language={language}
-                    toggleLanguage={toggleLanguage}
-                  />
+                      {...props}
+                      language={language}
+                      toggleLanguage={toggleLanguage}
+                    />
                 </>
               )}
             </Stack.Screen>
 
             <Stack.Screen name="AdminShops" options={{ headerShown: false }}>
-              {props => <AdminShopsScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <AdminShopsScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
             </Stack.Screen>
 
             <Stack.Screen name="AdminBusinessAdd" options={{ headerShown: false }}>
-              {props => <AdminBusinessAddScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <AdminBusinessAddScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
             </Stack.Screen>
             <Stack.Screen name="BusinessIdeasAdmin" options={{ headerShown: false }}>
-              {props => <BusinessIdeasAdminScreen {...props} language={language} />}
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <BusinessIdeasAdminScreen {...props} language={language} />
+                </>
+              )}
             </Stack.Screen>
 
             <Stack.Screen name="Notifications">
@@ -765,11 +815,21 @@ function AppContent() {
             </Stack.Screen>
 
             <Stack.Screen name="AdminUser" options={{ headerShown: false }}>
-              {props => <AdminUserScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <AdminUserScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
             </Stack.Screen>
 
             <Stack.Screen name="AdminPosts" options={{ headerShown: false }}>
-              {props => <AdminPostsScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <AdminPostsScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
             </Stack.Screen>
 
             <Stack.Screen name="AddShoppingMallShop">
@@ -795,14 +855,29 @@ function AppContent() {
             </Stack.Screen>
 
             <Stack.Screen name="AdminLogin" options={{ headerShown: false }}>
-              {props => <AdminLoginScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <AdminLoginScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
             </Stack.Screen>
 
             <Stack.Screen name="AdminDashboard" options={{ headerShown: false }}>
-              {props => <AdminDashboardScreen {...props} language={language} toggleLanguage={toggleLanguage} />}
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <AdminDashboardScreen {...props} language={language} toggleLanguage={toggleLanguage} />
+                </>
+              )}
             </Stack.Screen>
             <Stack.Screen name="AdminLiveChat" options={{ headerShown: false }}>
-              {props => <MessageScreen {...props} language={language} adminMode />}
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <MessageScreen {...props} language={language} adminMode />
+                </>
+              )}
             </Stack.Screen>
 
             {/* ---------- Login / Register / ForgotPassword / Profile / PostDetail ---------- */}
@@ -897,9 +972,16 @@ function AppContent() {
 
           </Stack.Navigator>
           <MobileNavigation visible={showMobileNavigation} />
+          <RouteTutorialGuide routeName={activeRouteName} language={language} />
         </NavigationContainer>
       </TabModeProvider>
-    </>
+      {showStartupAnimation && (
+        <StartupScreen
+          onFinish={finishStartupAnimation}
+          isPageReady={isWelcomeHomeReady}
+        />
+      )}
+    </View>
   );
 }
 
@@ -922,6 +1004,9 @@ export default function App() {
 
 // ==================== STYLES ====================
 const styles = StyleSheet.create({
+  appContainer: {
+    flex: 1,
+  },
   offlineInteractionBlocker: {
     backgroundColor: 'transparent',
     zIndex: 10000,

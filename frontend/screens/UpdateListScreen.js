@@ -1,3 +1,4 @@
+
 import React from 'react';
 import {
   View,
@@ -10,7 +11,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import Logo from '../assets/logos.png';   // same logo as RegisterScreen
+import Logo from '../assets/logos.png';
+import { normalizeImageSource } from '../utils/imageUrl';
+   // same logo as RegisterScreen
 
 const { width, height } = Dimensions.get('window');
 
@@ -60,7 +63,7 @@ const UpdateListScreen = ({ navigation, route }) => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <ImageBackground source={Logo} style={styles.background} imageStyle={{ opacity: 0.05 }}>
+      <ImageBackground source={normalizeImageSource(Logo)} style={styles.background} imageStyle={{ opacity: 0.05 }}>
         {/* Glass overlay */}
         <View style={styles.glassOverlay} />
         <FlatList

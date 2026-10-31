@@ -1,3 +1,4 @@
+
 import React, { useCallback, useState } from 'react';
 import {
   ActivityIndicator, FlatList, Image, StyleSheet, Text, TouchableOpacity, View,
@@ -10,6 +11,8 @@ import { useAuth } from '../context/AuthContext';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '../constants';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const fallbackImage = require('../assets/profile1.png');
 
@@ -81,7 +84,7 @@ export default function NotificationsScreen({ navigation, language = 'English' }
 
   const renderItem = ({ item }) => (
     <TouchableOpacity style={[styles.item, { backgroundColor: item.isRead ? theme.background : theme.cardBackground, borderColor: theme.border }]} onPress={() => markRead(item)}>
-      {item.image ? <Image source={{ uri: item.image }} style={styles.image} /> : <View style={[styles.icon, { backgroundColor: theme.accent }]}><Ionicons name={item.type.includes('PASSWORD') ? 'lock-closed-outline' : item.type.includes('NAME') ? 'person-outline' : 'notifications-outline'} size={22} color="#fff" /></View>}
+      {item.image ? <Image source={normalizeImageSource({ uri: item.image })} style={styles.image} /> : <View style={[styles.icon, { backgroundColor: theme.accent }]}><Ionicons name={item.type.includes('PASSWORD') ? 'lock-closed-outline' : item.type.includes('NAME') ? 'person-outline' : 'notifications-outline'} size={22} color="#fff" /></View>}
       <View style={styles.copy}><Text style={[styles.itemTitle, { color: theme.text }]}>{item.title}</Text><Text style={[styles.itemMessage, { color: theme.textSecondary }]}>{item.message}</Text><Text style={[styles.time, { color: theme.textSecondary }]}>{getTime(item.createdAt)}</Text></View>
       {!item.isRead && <View style={styles.unread} />}
     </TouchableOpacity>

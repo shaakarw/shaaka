@@ -7,6 +7,8 @@ const auth = require('../middleware/auth');
 const multer = require('multer');
 const path = require('path');
 const storageService = require('../services/storage/storageService');
+const { uploadImageWithVariants } = require('../services/imageUpload');
+const { resolveStoredImageUrl } = require('../utils/storedImageUrl');
 const { normalizeRwandaPhone, isValidRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
 const { deletePlaceWithCleanup } = require('../utils/deletionCleanup');
@@ -22,6 +24,32 @@ const fileFilter = (req, file, cb) => {
 // Use a dedicated image upload middleware for the single-image upload endpoint
 const imageUpload = multer({ storage, fileFilter }).single('image');
 
+const normalizePlaceImageUrls = place => {
+  const result = typeof place.toObject === 'function' ? place.toObject() : { ...place };
+  result.images = { ...result.images };
+  for (const field of ['streetImage', 'street', 'doorImage']) {
+    result.images[field] = resolveStoredImageUrl(
+      result.images[field],
+      result.imageStorageKeys?.[field],
+      storageService
+    );
+  }
+  result.products = (result.products || []).map(product => {
+    const normalizedProduct = typeof product.toObject === 'function'
+      ? product.toObject()
+      : { ...product };
+    normalizedProduct.images = (normalizedProduct.images || []).map((image, index) => (
+      resolveStoredImageUrl(
+        image,
+        normalizedProduct.imageStorageKeys?.[index],
+        storageService
+      )
+    ));
+    return normalizedProduct;
+  });
+  return result;
+};
+
 // ----- POST /api/places/upload – single image (used by frontend) -----
 router.post('/upload', auth, imageUpload, async (req, res) => {
   try {
@@ -32,16 +60,19 @@ router.post('/upload', auth, imageUpload, async (req, res) => {
     if (!req.file.buffer || req.file.buffer.length > MAX_IMAGE_BYTES) {
       return res.status(400).json({ success: false, message: 'Image exceeds 3 MB size limit' });
     }
-    const result = await storageService.uploadMedia({
+    const uploaded = await uploadImageWithVariants({
       buffer: req.file.buffer,
       mimeType: req.file.mimetype,
       folder: `places/${req.user.id}/images`,
       maxBytes: MAX_IMAGE_BYTES,
-    });
-    const url = storageService.getMediaUrl(result.storageKey, {
       origin: storageService.getRequestOrigin(req),
     });
-    res.json({ success: true, url, ...result });
+    res.json({
+      success: true,
+      url: uploaded.originalUrl,
+      ...uploaded.original,
+      imageVariants: uploaded.imageVariants,
+    });
   } catch (error) {
     console.error('Place image upload error:', error.code || error.message || 'Unknown error');
     res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Image upload failed' });
@@ -52,7 +83,7 @@ router.post('/upload', auth, imageUpload, async (req, res) => {
 // POST add product to an existing place (authenticated, owner-only)
 router.post('/:id/products', auth, async (req, res) => {
   try {
-    const { name, price, description, images } = req.body;
+    const { name, price, description, images, imageVariants } = req.body;
     const place = await Place.findById(req.params.id);
     if (!place) {
       return res.status(404).json({ success: false, message: 'Place not found' });
@@ -84,6 +115,7 @@ router.post('/:id/products', auth, async (req, res) => {
       price: Number(price),
       description: description || '',
       images: Array.isArray(images) ? images : (images ? [images] : []),
+      imageVariants: Array.isArray(imageVariants) ? imageVariants : [],
     };
     if (Number.isNaN(product.price)) {
       return res.status(400).json({ success: false, message: 'Invalid price' });
@@ -106,7 +138,7 @@ router.post('/:id/products', auth, async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const places = await Place.find().sort({ createdAt: -1 });
-    res.json({ success: true, places });
+    res.json({ success: true, places: places.map(normalizePlaceImageUrls) });
   } catch (error) {
     console.error('GET /places error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -120,7 +152,7 @@ router.get('/:id', async (req, res) => {
     if (!place) {
       return res.status(404).json({ success: false, message: 'Place not found' });
     }
-    res.json({ success: true, place });
+    res.json({ success: true, place: normalizePlaceImageUrls(place) });
   } catch (error) {
     console.error('GET /place/:id error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -143,6 +175,7 @@ router.post('/', auth, async (req, res) => {
       buildingNumber,
       images,
       products,
+      imageVariants,
       extras,
       contactButtons,
       socialLinks,
@@ -231,6 +264,7 @@ router.post('/', auth, async (req, res) => {
       streetName,
       buildingNumber,
       images: images || {},
+      imageVariants: Array.isArray(imageVariants) ? imageVariants : [],
       imageStorageKeys: Object.fromEntries(Object.entries(images || {}).map(([name, url]) => [
         name,
         storageService.getStorageKeyFromUrl(url) || '',
@@ -238,6 +272,7 @@ router.post('/', auth, async (req, res) => {
       storageProvider: 'b2',
       products: (products || []).map(product => ({
         ...product,
+        imageVariants: Array.isArray(product.imageVariants) ? product.imageVariants : [],
         imageStorageKeys: storageService.collectStorageKeys
           ? storageService.collectStorageKeys(product.images || [])
           : (product.images || []).map(storageService.getStorageKeyFromUrl).filter(Boolean),

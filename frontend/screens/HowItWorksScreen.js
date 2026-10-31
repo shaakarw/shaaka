@@ -15,49 +15,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useTheme } from '../context/ThemeContext';
 import SharedBottomNav from '../components/SharedBottomNav';
+import { useContactInfo, useContactLinks } from '../services/contactInfo';
 
 
 const { width } = Dimensions.get('window');
-
-// Social media data – same as in SettingsScreen
-const socialLinks = [
-  {
-    name: 'Instagram',
-    icon: 'logo-instagram',
-    color: '#E4405F',
-    url: 'instagram://user?username=shaaka_rw',
-    fallbackUrl: 'https://www.instagram.com/shaaka_rw/',
-  },
-  {
-    name: 'YouTube',
-    icon: 'logo-youtube',
-    color: '#FF0000',
-    url: 'youtube://www.youtube.com/@shaaka-rw',
-    fallbackUrl: 'https://www.youtube.com/@shaaka-rw',
-  },
-  {
-    name: 'X',
-    icon: 'logo-x',
-    color: '#000000',
-    url: 'https://x.com/shaaka_rw',
-    fallbackUrl: 'https://x.com/shaaka_rw',
-  },
- 
-  {
-    name: 'Email',
-    icon: 'mail-outline',
-    color: '#D44638',
-    url: 'mailto:shaakarw@gmail.com',
-    fallbackUrl: null,
-  },
-  {
-    name: 'WhatsApp',
-    icon: 'logo-whatsapp',
-    color: '#25D366',
-    url: 'whatsapp://send?phone=+250799882580',
-    fallbackUrl: 'https://wa.me/250799882580',
-  },
-];
 
 // Translations – same as in Settings
 const translations = {
@@ -75,6 +36,8 @@ const translations = {
 
 export default function HowItWorksScreen({ navigation, language = 'English' }) {
   const { theme, isDarkMode } = useTheme();
+  const contactInfo = useContactInfo();
+  const socialLinks = useContactLinks(contactInfo);
   const t = translations[language] || translations.English;
 
   return (

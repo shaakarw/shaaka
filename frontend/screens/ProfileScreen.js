@@ -1,5 +1,5 @@
 // screens/ProfileScreen.js
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -33,7 +33,12 @@ import { offlineDatabase } from '../services/offlineDatabase';
 import { mediaCache } from '../services/mediaCache';
 import SharedBottomNav from '../components/SharedBottomNav';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
-import PostCoverImage from '../components/PostCoverImage';
+import OnlineStatusDot from '../components/OnlineStatusDot';
+import useOnlineUsers from '../hooks/useOnlineUsers';
+import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
+import useScreenTutorial from '../hooks/useScreenTutorial';
+import { getImageUri, normalizeImageUrl } from '../utils/imageUrl';
+import { getPostCoverUri } from '../utils/postMedia';
 
 const { width, height } = Dimensions.get('window');
 const SIDEBAR_WIDTH = width * 0.5;
@@ -41,7 +46,20 @@ const SIDEBAR_WIDTH = width * 0.5;
 const BOTTOM_SHEET_HEIGHT = height * 0.7;
 const LOGOUT_SHEET_HEIGHT = height * 0.3;
 
-const DEFAULT_AVATAR = require('../assets/profile1.png');
+// ---------- Field length limits ----------
+const MAX_NAME_LENGTH = 15;
+const MAX_USERNAME_LENGTH = 15;
+const MAX_LOCATION_LENGTH = 20;
+const MAX_LINK_LENGTH = 100;
+
+const SHEET_ANIMATION_MS = 220;
+const FOCUS_ACCENT = '#47ae87';  // light blue accent for focused field
+
+// ---- Tutorial config ---------------------------------------------------------
+const PROFILE_TUTORIAL_DELAY_MS = 700;
+const PROFILE_TUTORIAL_ID = 'profile';
+
+// -----------------------------------------------------------------------------
 
 // ---------- Translations ----------
 const translations = {
@@ -52,7 +70,7 @@ const translations = {
     saved: 'Saved',
     noPosts: 'No posts yet',
     noVideos: 'No videos yet',
-    noSavedPosts: 'No saved posts yet',     
+    noSavedPosts: 'No saved posts yet',
     createFirstVideo: 'Create your first video',
     addFirstPost: 'Add your first post/product here',
     saveFirstPost: 'Save your first post/product',
@@ -80,6 +98,24 @@ const translations = {
     login: 'Login',
     profileLoadFailed: 'Could not load this profile',
     retry: 'Retry',
+    name: 'Name',
+    socialLinks: 'Social Links',
+    socialLink: 'Social link',
+    charsRemaining: 'characters remaining',
+    charsRemainingOne: 'character remaining',
+    // Tutorial
+    tAvatarTitle: 'Your profile photo',
+    tAvatarBody: 'Tap your avatar to change it. A good photo helps buyers trust you.',
+    tNameTitle: 'Your name',
+    tNameBody: 'This is how other users see you across Shaaka.',
+    tStatsTitle: 'Your activity',
+    tStatsBody: 'See how many posts, videos, and saved items you have.',
+    tEditTitle: 'Change profile',
+    tEditBody: 'Tap "Edit Profile" to update your name, username, location, and social links.',
+    tMenuTitle: 'Menu',
+    tMenuBody: 'Tap these three lines to open the menu — quick access to Add Post, Map, Search, Messages, Settings, and Logout.',
+    tDeleteTitle: 'Delete or unsave',
+    tDeleteBody: 'Tap these 3 lines on any post to delete it. On saved posts, tap the bookmark icon at the bottom-right to unsave.',
   },
   Kinyarwanda: {
     loading: 'Turigutunganya page neza…',
@@ -116,33 +152,45 @@ const translations = {
     login: 'Kwinjira',
     profileLoadFailed: 'Ntibyashobotse kubona iyi porofile',
     retry: 'Ongera ugerageze',
+    name: 'Amazina',
+    socialLinks: 'Imiyoboro rusange',
+    socialLink: 'Umuyoboro rusange',
+    charsRemaining: 'inyuguti zisigaye',
+    charsRemainingOne: 'inyuguti isigaye',
+    // Tutorial
+    tAvatarTitle: "Ifoto yawe",
+    tAvatarBody: "Kanda ku ifoto yawe kugira ngo uyihindure. Ifoto nziza ifasha abagura kukwizera.",
+    tNameTitle: 'Izina ryawe',
+    tNameBody: "Aya ni amazina abandi bakoresha babona kuri Shaaka.",
+    tStatsTitle: 'Ibyakorwa',
+    tStatsBody: "Reba umubare w'ibicuruzwa, videwo, n'ibyabitswe ufite.",
+    tEditTitle: 'Hindura Ibikuranga',
+    tEditBody: "Kanda 'Hindura Ibikuranga' kugira ngo uhindure amazina, izina rikoreshwa, aho uherereye, n'imiyoboro rusange.",
+    tMenuTitle: 'Menyu',
+    tMenuBody: "Kanda kuri iyi mirongo itatu kugira ngo ufungure menyu — Ongeraho Igicuruzwa, Ikarita, Shakisha, Ubutumwa, Igenamiterere, no Gusohoka.",
+    tDeleteTitle: 'Siba cyangwa ukure ku byabitswe',
+    tDeleteBody: "Kanda kuri iyi mirongo itatu ku gicuruzwa cyose kugira ngo ugisibe. Ku bicuruzwa byabitswe, kanda ku kamenyetso k'igitabo kuri iburyo hasi kugira ngo ugikureho.",
   },
 };
 
 // ---------- Helpers ----------
 const resolvePostImageUri = (post) => {
-  if (!post) return null;
-  return (
-    post.imageUrl ||
-    post.image ||
-    post.thumbnail ||
-    post.thumbnailUrl ||
-    post.coverImage ||
-    post.coverPhoto ||
-    post.bannerImage ||
-    post.mediaUrl ||
-    (Array.isArray(post.houseImages) && post.houseImages.find(Boolean)) ||
-    (Array.isArray(post.images) && post.images.find(Boolean)) ||
-    (Array.isArray(post.imageUrls) && post.imageUrls.find(Boolean)) ||
-    null
-  );
+  return getPostCoverUri(post)
+    || getImageUri(post?.thumbnail)
+    || getImageUri(post?.coverPhoto)
+    || getImageUri(post?.bannerImage)
+    || getImageUri(post?.mediaUrl)
+    || getImageUri(Array.isArray(post?.images) ? post.images.find(Boolean) : null)
+    || getImageUri(Array.isArray(post?.imageUrls) ? post.imageUrls.find(Boolean) : null);
 };
 
 const resolvePostVideoCover = (post) => {
-  if (!post?.videoUrl) return null;
-  if (post.videoThumbnail) return post.videoThumbnail;
-  if (!post.videoUrl.includes('res.cloudinary.com')) return null;
-  const [urlWithoutQuery] = post.videoUrl.split('?');
+  const videoUrl = getImageUri(post?.videoUrl || post?.video?.url || post?.video);
+  if (!videoUrl) return null;
+  const videoThumbnail = getImageUri(post.videoThumbnail);
+  if (videoThumbnail) return videoThumbnail;
+  if (!videoUrl.includes('res.cloudinary.com')) return null;
+  const [urlWithoutQuery] = videoUrl.split('?');
   const uploadMarker = '/video/upload/';
   if (!urlWithoutQuery.includes(uploadMarker)) return null;
   return urlWithoutQuery
@@ -156,20 +204,27 @@ const isVideoPostItem = (post) =>
 const getPostLabel = (post) =>
   post?.productName || post?.title || post?.category || 'Product';
 
-const getPostImageSource = (img) => {
-  if (!img) return DEFAULT_AVATAR;
-  if (typeof img === 'string') return { uri: img };
-  if (typeof img === 'object' && img.uri) return img;
-  return DEFAULT_AVATAR;
-};
+const sanitizeNameField = (text) =>
+  String(text || '')
+    .replace(/[^a-zA-ZÀ-ÿ\s'\-\.]/g, '')
+    .slice(0, MAX_NAME_LENGTH);
+
+const sanitizeUsernameField = (text) =>
+  String(text || '')
+    .replace(/[^a-zA-Z0-9_]/g, '')
+    .slice(0, MAX_USERNAME_LENGTH);
+
+const sanitizeLocationField = (text) =>
+  String(text || '')
+    .replace(/[^a-zA-ZÀ-ÿ0-9\s'\-\.\,]/g, '')
+    .slice(0, MAX_LOCATION_LENGTH);
 
 const cacheProfileUserImages = async (user) => {
   if (!user) return user;
   const cachedUser = { ...user };
   for (const key of ['avatar', 'coverImage', 'coverPhoto', 'bannerImage']) {
-    if (typeof cachedUser[key] === 'string') {
-      cachedUser[key] = await mediaCache.cacheImage(cachedUser[key]);
-    }
+    const imageUri = getImageUri(cachedUser[key]);
+    if (imageUri) cachedUser[key] = await mediaCache.cacheImage(imageUri);
   }
   return cachedUser;
 };
@@ -201,15 +256,12 @@ const cacheProfilePostImages = async (posts) => Promise.all(posts.map(async (pos
   return { ...post, imageUrl: localUri };
 }));
 
-// Normalise any "user id" shape (string, {_id}, {id}, {userId}, nested objects, etc.) into a string.
 const normaliseUserId = (raw) => {
   if (raw == null) return null;
-
   if (typeof raw === 'string' || typeof raw === 'number') {
     const value = String(raw).trim();
     return value ? value : null;
   }
-
   if (Array.isArray(raw)) {
     for (const item of raw) {
       const value = normaliseUserId(item);
@@ -217,20 +269,77 @@ const normaliseUserId = (raw) => {
     }
     return null;
   }
-
   if (typeof raw === 'object') {
     for (const key of ['_id', 'id', 'userId', 'user', 'value']) {
       const value = normaliseUserId(raw[key]);
       if (value) return value;
     }
   }
-
   return null;
 };
 
+// ============================================================
+// FloatingLabelInput — Material 3 outlined field
+// ============================================================
+const FloatingLabelInput = ({
+  label,
+  value,
+  onChangeText,
+  theme,
+  maxLength,
+  helperText,
+  suffix,
+  helperWarning = false,
+  style,
+  ...textInputProps
+}) => {
+  const [focused, setFocused] = useState(false);
+
+  const idleBorderColor = theme.border || '#8e8e93';
+  const borderColor = focused ? FOCUS_ACCENT : idleBorderColor;
+  const labelColor = focused ? FOCUS_ACCENT : theme.textSecondary;
+  const helperColor = helperWarning ? '#d87428' : theme.textSecondary;
+
+  return (
+    <View style={[styles.floatingFieldWrapper, style]}>
+      <View style={[styles.floatingFieldBox, { borderColor }]}>
+        <TextInput
+          style={[styles.floatingInput, { color: theme.text }]}
+          value={value}
+          onChangeText={onChangeText}
+          maxLength={maxLength}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          placeholderTextColor={theme.textSecondary}
+          {...textInputProps}
+        />
+
+        {suffix ? (
+          <Text style={[styles.floatingSuffix, { color: theme.textSecondary }]}>
+            {suffix}
+          </Text>
+        ) : null}
+
+        <View
+          style={[styles.floatingLabelMask, { backgroundColor: theme.background }]}
+          pointerEvents="none"
+        >
+          <Text style={[styles.floatingLabelText, { color: labelColor }]}>
+            {label}
+          </Text>
+        </View>
+      </View>
+
+      {helperText ? (
+        <Text style={[styles.floatingHelper, { color: helperColor }]}>
+          {helperText}
+        </Text>
+      ) : null}
+    </View>
+  );
+};
+
 // ---------- PostCoverTile ----------
-// Full-bleed cover tile. Shows the product name (and video badge).
-// The user avatar and the amount are intentionally omitted.
 const PostCoverTile = ({ post, style, onPress, children }) => {
   const [hasError, setHasError] = useState(false);
 
@@ -253,7 +362,7 @@ const PostCoverTile = ({ post, style, onPress, children }) => {
     >
       {imageUri && !hasError ? (
         <Image
-          source={{ uri: imageUri }}
+          source={{ uri: normalizeImageUrl(imageUri) }}
           style={styles.coverTileImage}
           resizeMode="cover"
           onError={() => setHasError(true)}
@@ -268,17 +377,14 @@ const PostCoverTile = ({ post, style, onPress, children }) => {
         </View>
       )}
 
-      {/* Dark shade for readability */}
       <View style={styles.coverTileShade} pointerEvents="none" />
 
-      {/* Product name */}
       {!!label && (
         <Text style={styles.coverTileLabel} numberOfLines={2}>
           {label}
         </Text>
       )}
 
-      {/* Video badge */}
       {video && (
         <View style={styles.coverTileVideoBadge}>
           <Ionicons name="videocam" size={11} color="#fff" />
@@ -304,6 +410,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [avatarUri, setAvatarUri] = useState(null);
+  const [avatarLoadError, setAvatarLoadError] = useState(false);
   const [username, setUsername] = useState('');
   const [name, setName] = useState('');
   const [socialLinks, setSocialLinks] = useState([]);
@@ -318,21 +425,52 @@ const ProfileScreen = ({ navigation, route, language }) => {
 
   // Edit Profile Bottom Sheet
   const [editSheetVisible, setEditSheetVisible] = useState(false);
+  const [editSheetMounted, setEditSheetMounted] = useState(false);
   const [editName, setEditName] = useState('');
   const [editUsername, setEditUsername] = useState('');
   const [editLocation, setEditLocation] = useState('');
   const [editSocialLinks, setEditSocialLinks] = useState(['', '', '']);
   const slideAnim = useRef(new Animated.Value(BOTTOM_SHEET_HEIGHT)).current;
+  const editSheetUnmountTimer = useRef(null);
 
   // Logout Bottom Sheet
   const [logoutSheetVisible, setLogoutSheetVisible] = useState(false);
+  const [logoutSheetMounted, setLogoutSheetMounted] = useState(false);
   const logoutSlideAnim = useRef(new Animated.Value(LOGOUT_SHEET_HEIGHT)).current;
+  const logoutSheetUnmountTimer = useRef(null);
 
   const [isOwnProfile, setIsOwnProfile] = useState(false);
 
   // Sidebar
   const [sidebarVisible, setSidebarVisible] = useState(false);
+  const [sidebarMounted, setSidebarMounted] = useState(false);
   const sidebarSlideAnim = useRef(new Animated.Value(SIDEBAR_WIDTH)).current;
+  const sidebarUnmountTimer = useRef(null);
+
+  // ---- Tutorial refs ----
+  const profileAvatarRef = useRef(null);
+  const profileNameRef = useRef(null);
+  const profileStatsRef = useRef(null);
+  const profileEditBtnRef = useRef(null);
+  const profileMenuBtnRef = useRef(null);
+  const firstDeleteBtnRef = useRef(null);   // first post's "3-lines" delete button
+  const firstUnsaveBtnRef = useRef(null);   // first saved post's bookmark button
+
+  // ---- Tutorial state ----
+  const [showTutorial, finishTutorial] = useScreenTutorial(
+    PROFILE_TUTORIAL_ID,
+    isFocused && isOwnProfile && !loading && !loadError,
+    PROFILE_TUTORIAL_DELAY_MS
+  );
+
+  const profileUser = viewedUser || currentUser;
+  const profileAvatarUri = avatarUri ? normalizeImageUrl(avatarUri) : null;
+  const profileAvatarSource = profileAvatarUri ? { uri: profileAvatarUri } : null;
+  const profileUserId = normaliseUserId(profileUser?._id || profileUser?.id || profileUser?.userId);
+  const onlineUsers = useOnlineUsers(profileUserId ? [profileUserId] : []);
+  const isViewedUserOnline = Boolean(
+    !isOwnProfile && profileUserId && onlineUsers[profileUserId]
+  );
 
   const sidebarPanResponder = useRef(
     PanResponder.create({
@@ -355,7 +493,10 @@ const ProfileScreen = ({ navigation, route, language }) => {
     })
   ).current;
 
-  // PanResponder for edit bottom sheet
+  useEffect(() => {
+    setAvatarLoadError(false);
+  }, [avatarUri]);
+
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -370,7 +511,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
     })
   ).current;
 
-  // PanResponder for logout bottom sheet
   const logoutPanResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -384,6 +524,12 @@ const ProfileScreen = ({ navigation, route, language }) => {
       },
     })
   ).current;
+
+  // ---- Reset post-card refs when tab or posts change ----
+  useEffect(() => {
+    firstDeleteBtnRef.current = null;
+    firstUnsaveBtnRef.current = null;
+  }, [activeTab, userPosts.length, savedPosts.length]);
 
   useEffect(() => {
     loadData();
@@ -416,7 +562,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
         await offlineDatabase.putRecord('profile-posts', targetUserId, posts, { priority: 'medium' });
         setUserPosts(await cacheProfilePostImages(posts));
       } catch {
-        // Keep the current profile visible when a background refresh fails.
+        // Keep current profile visible if the background refresh fails.
       } finally {
         postsRequestInFlight.current = false;
       }
@@ -426,14 +572,12 @@ const ProfileScreen = ({ navigation, route, language }) => {
     return () => clearInterval(intervalId);
   }, [isFocused, loading, paramUserId, viewedUser, currentUser]);
 
-  // Never allow the 'saved' tab on other people's profiles
   useEffect(() => {
     if (!isOwnProfile && activeTab === 'saved') {
       setActiveTab('posts');
     }
   }, [isOwnProfile, activeTab]);
 
-  // Sidebar animation
   useEffect(() => {
     if (sidebarVisible) {
       Animated.timing(sidebarSlideAnim, { toValue: 0, duration: 250, useNativeDriver: true }).start();
@@ -442,7 +586,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
   }, [sidebarVisible]);
 
-  // Edit sheet animation
   useEffect(() => {
     if (editSheetVisible) {
       Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, speed: 12 }).start();
@@ -451,7 +594,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
   }, [editSheetVisible]);
 
-  // Logout sheet animation
   useEffect(() => {
     if (logoutSheetVisible) {
       Animated.spring(logoutSlideAnim, { toValue: 0, useNativeDriver: true, speed: 12 }).start();
@@ -459,6 +601,12 @@ const ProfileScreen = ({ navigation, route, language }) => {
       Animated.timing(logoutSlideAnim, { toValue: LOGOUT_SHEET_HEIGHT, duration: 200, useNativeDriver: true }).start();
     }
   }, [logoutSheetVisible]);
+
+  useEffect(() => () => {
+    if (sidebarUnmountTimer.current) clearTimeout(sidebarUnmountTimer.current);
+    if (editSheetUnmountTimer.current) clearTimeout(editSheetUnmountTimer.current);
+    if (logoutSheetUnmountTimer.current) clearTimeout(logoutSheetUnmountTimer.current);
+  }, []);
 
   const getToken = async () => await AsyncStorage.getItem('userToken');
 
@@ -472,10 +620,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
   };
 
-  // ---------------------------------------------------------------
-  // loadData — normalises the incoming userId, and each sub-request
-  // is isolated so a single failure doesn't blank the entire screen.
-  // ---------------------------------------------------------------
   const loadData = async () => {
     setLoading(true);
     setLoadError(false);
@@ -489,7 +633,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
     await networkStatus.start();
     const isOnline = networkStatus.get().isOnline;
 
-    // 1. Get current user (required)
     let me = null;
     if (isOnline) {
       try {
@@ -506,7 +649,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
       }
     }
 
-    // Fallback to cached user
     if (!me) {
       try {
         const cached = await AsyncStorage.getItem('user');
@@ -520,7 +662,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
       return;
     }
 
-    // 2. Normalise the target user id (fixes [object Object] → Network Error)
     const normalisedParamUserId = normaliseUserId(paramUserId);
     const myId = normaliseUserId(me._id) || normaliseUserId(me.phone);
     const isOwn = !normalisedParamUserId || String(normalisedParamUserId) === String(myId);
@@ -535,7 +676,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
 
     if (isOwn) {
       const ownUser = await cacheProfileUserImages(me);
-      setAvatarUri(ownUser.avatar || null);
+      setAvatarUri(getImageUri(ownUser.avatar));
       setUsername(ownUser.username || ownUser.phone || '');
       setName(ownUser.name || ownUser.username || '');
       setViewedUser(ownUser);
@@ -566,7 +707,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
         }
       }
       setViewedUser(otherUser);
-      setAvatarUri(otherUser.avatar || null);
+      setAvatarUri(getImageUri(otherUser.avatar));
       setUsername(otherUser.username || otherUser.phone || 'User');
       setName(otherUser.name || otherUser.username || 'User');
       setSocialLinks(Array.isArray(otherUser.socialLinks) ? otherUser.socialLinks.filter(l => typeof l === 'string') : []);
@@ -574,7 +715,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
 
     setIsOwnProfile(isOwn);
 
-    // 4. Posts (non-fatal)
     let cachedPosts = null;
     try {
       cachedPosts = await offlineDatabase.getRecord('profile-posts', targetUserId);
@@ -601,7 +741,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
       setUserPosts([]);
     }
 
-    // 5. Saved (own only, non-fatal)
     if (isOwn) {
       try {
         const savedResponse = await axios.get(`${BASE_URL}/api/user/all-saved`, {
@@ -621,7 +760,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
     setLoading(false);
   };
 
-  // ---------- Avatar upload (own profile only) ----------
+  // ---------- Avatar upload ----------
   const uploadImage = async (uri) => {
     if (!isOwnProfile) return;
     setUploading(true);
@@ -696,15 +835,11 @@ const ProfileScreen = ({ navigation, route, language }) => {
     });
     if (!result.canceled) {
       const compressedUri = await compressImage(result.assets[0].uri);
+      setAvatarUri(compressedUri);
       await uploadImage(compressedUri);
     }
   };
 
-  // ---------------------------------------------------------------
-  // updateProfile — sanitises the payload before handing it to the
-  // AuthContext so axios never tries to serialise an object where a
-  // string is expected (which was the previous "Network Error").
-  // ---------------------------------------------------------------
   const updateProfile = async () => {
     if (!isOwnProfile) return;
 
@@ -717,13 +852,25 @@ const ProfileScreen = ({ navigation, route, language }) => {
     const originalSocialLinks = (Array.isArray(user.socialLinks) ? user.socialLinks : [])
       .filter(l => typeof l === 'string' && l.trim());
 
-    // Sanitised new values
-    const newName = String(editName || '').trim();
-    const newUsername = String(editUsername || '').trim();
-    const newLocation = String(editLocation || '').trim();
+    const newName = String(editName || '').trim().slice(0, MAX_NAME_LENGTH);
+    const newUsername = String(editUsername || '').trim().slice(0, MAX_USERNAME_LENGTH);
+    const newLocation = String(editLocation || '').trim().slice(0, MAX_LOCATION_LENGTH);
     const newSocialLinks = (Array.isArray(editSocialLinks) ? editSocialLinks : [])
       .map(link => (typeof link === 'string' ? link.trim() : ''))
       .filter(Boolean);
+
+    if (
+      newName.length > MAX_NAME_LENGTH ||
+      newUsername.length > MAX_USERNAME_LENGTH ||
+      newLocation.length > MAX_LOCATION_LENGTH ||
+      newSocialLinks.some(link => link.length > MAX_LINK_LENGTH)
+    ) {
+      Alert.alert(
+        'Error',
+        `Name and username must be ${MAX_NAME_LENGTH} characters or less. Location must be ${MAX_LOCATION_LENGTH} characters or less.`
+      );
+      return;
+    }
 
     const nameChanged = newName !== originalName;
     const usernameChanged = newUsername !== originalUsername;
@@ -731,7 +878,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
     const socialLinksChanged = JSON.stringify(newSocialLinks) !== JSON.stringify(originalSocialLinks);
 
     if (!nameChanged && !usernameChanged && !locationChanged && !socialLinksChanged) {
-      setEditSheetVisible(false);
+      closeEditSheet();
       return;
     }
 
@@ -742,7 +889,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
       socialLinks: newSocialLinks,
     };
 
-    // Safety check — never send an object where a string is expected
     if (typeof payload.username !== 'string' || typeof payload.location !== 'string') {
       Alert.alert('Error', 'Invalid profile data. Please check your inputs.');
       return;
@@ -756,13 +902,13 @@ const ProfileScreen = ({ navigation, route, language }) => {
         const updatedUser = authUpdate.user || { ...user, ...payload };
         setCurrentUser(updatedUser);
         setViewedUser(updatedUser);
-        setAvatarUri(updatedUser.avatar || null);
+        setAvatarUri(getImageUri(updatedUser.avatar));
         setName(updatedUser.name || updatedUser.username || '');
         setSocialLinks(Array.isArray(updatedUser.socialLinks) ? updatedUser.socialLinks.filter(l => typeof l === 'string') : newSocialLinks);
         setUsername(updatedUser.username || updatedUser.phone || '');
         await syncStoredUser(updatedUser);
         Alert.alert('Success', t.profileUpdated);
-        setEditSheetVisible(false);
+        closeEditSheet();
       } else {
         Alert.alert('Error', authUpdate?.message || t.updateFailed);
       }
@@ -798,7 +944,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
     );
   };
 
-  // ---------- Toggle save (unsave) ----------
   const toggleSavePost = async (post) => {
     if (!isOwnProfile) return;
     try {
@@ -818,12 +963,72 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
   };
 
-  // ---------- Logout Bottom Sheet ----------
+  const openSidebar = () => {
+    if (!isOwnProfile) return;
+    if (sidebarUnmountTimer.current) {
+      clearTimeout(sidebarUnmountTimer.current);
+      sidebarUnmountTimer.current = null;
+    }
+    setSidebarMounted(true);
+    setSidebarVisible(true);
+  };
+
+  const closeSidebar = () => {
+    setSidebarVisible(false);
+    if (sidebarUnmountTimer.current) clearTimeout(sidebarUnmountTimer.current);
+    sidebarUnmountTimer.current = setTimeout(() => {
+      setSidebarMounted(false);
+      sidebarUnmountTimer.current = null;
+    }, SHEET_ANIMATION_MS);
+  };
+
+  const openEditSheet = () => {
+    const user = viewedUser || currentUser;
+    setEditName(String(user?.name || user?.username || '').slice(0, MAX_NAME_LENGTH));
+    setEditUsername(String(user?.username || '').slice(0, MAX_USERNAME_LENGTH));
+    setEditLocation(String(user?.location || '').slice(0, MAX_LOCATION_LENGTH));
+    const sanitized = (Array.isArray(user?.socialLinks) ? user.socialLinks : [])
+      .filter(l => typeof l === 'string')
+      .slice(0, 3);
+    while (sanitized.length < 3) sanitized.push('');
+    setEditSocialLinks(sanitized);
+
+    if (editSheetUnmountTimer.current) {
+      clearTimeout(editSheetUnmountTimer.current);
+      editSheetUnmountTimer.current = null;
+    }
+    setEditSheetMounted(true);
+    setEditSheetVisible(true);
+  };
+
+  const closeEditSheet = () => {
+    setEditSheetVisible(false);
+    if (editSheetUnmountTimer.current) clearTimeout(editSheetUnmountTimer.current);
+    editSheetUnmountTimer.current = setTimeout(() => {
+      setEditSheetMounted(false);
+      editSheetUnmountTimer.current = null;
+    }, SHEET_ANIMATION_MS);
+  };
+
   const openLogoutSheet = () => {
     closeSidebar();
+    if (logoutSheetUnmountTimer.current) {
+      clearTimeout(logoutSheetUnmountTimer.current);
+      logoutSheetUnmountTimer.current = null;
+    }
+    setLogoutSheetMounted(true);
     setLogoutSheetVisible(true);
   };
-  const closeLogoutSheet = () => setLogoutSheetVisible(false);
+
+  const closeLogoutSheet = () => {
+    setLogoutSheetVisible(false);
+    if (logoutSheetUnmountTimer.current) clearTimeout(logoutSheetUnmountTimer.current);
+    logoutSheetUnmountTimer.current = setTimeout(() => {
+      setLogoutSheetMounted(false);
+      logoutSheetUnmountTimer.current = null;
+    }, SHEET_ANIMATION_MS);
+  };
+
   const handleLogout = () => openLogoutSheet();
 
   const confirmLogout = async () => {
@@ -859,7 +1064,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
     });
   };
 
-  // ---------- Sidebar ----------
   const handleMenuOption = (option) => {
     closeSidebar();
     if (option === 'addPost') {
@@ -881,26 +1085,60 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
   };
 
-  const openSidebar = () => {
-    if (!isOwnProfile) return;
-    setSidebarVisible(true);
-  };
-  const closeSidebar = () => setSidebarVisible(false);
+  // ---------- Tutorial steps (own profile only) ----------
+  const tutorialSteps = useMemo(() => {
+    if (!isOwnProfile) return [];
 
-  // ---------- Edit Sheet ----------
-  const openEditSheet = () => {
-    const user = viewedUser || currentUser;
-    setEditName(String(user?.name || user?.username || ''));
-    setEditUsername(String(user?.username || ''));
-    setEditLocation(String(user?.location || ''));
-    const sanitized = (Array.isArray(user?.socialLinks) ? user.socialLinks : [])
-      .filter(l => typeof l === 'string')
-      .slice(0, 3);
-    while (sanitized.length < 3) sanitized.push('');
-    setEditSocialLinks(sanitized);
-    setEditSheetVisible(true);
-  };
-  const closeEditSheet = () => setEditSheetVisible(false);
+    const steps = [
+      {
+        getTarget: () => profileAvatarRef.current,
+        title: t.tAvatarTitle,
+        body: t.tAvatarBody,
+      },
+      {
+        getTarget: () => profileNameRef.current,
+        title: t.tNameTitle,
+        body: t.tNameBody,
+      },
+      {
+        getTarget: () => profileStatsRef.current,
+        title: t.tStatsTitle,
+        body: t.tStatsBody,
+      },
+      {
+        getTarget: () => profileEditBtnRef.current,
+        title: t.tEditTitle,
+        body: t.tEditBody,
+      },
+      {
+        getTarget: () => profileMenuBtnRef.current,
+        title: t.tMenuTitle,
+        body: t.tMenuBody,
+      },
+    ];
+
+    // Replace tabs step with delete/unsave step on the first post card
+    if (userPosts.length > 0) {
+      steps.push({
+        getTarget: () => firstDeleteBtnRef.current,
+        title: t.tDeleteTitle,
+        body: t.tDeleteBody,
+      });
+    }
+
+    // Fallback: if user has NO regular posts but HAS saved posts,
+    // teach the unsave (bookmark) button instead.
+    if (userPosts.length === 0 && savedPosts.length > 0) {
+      steps.push({
+        getTarget: () => firstUnsaveBtnRef.current,
+        title: t.tDeleteTitle,
+        body: t.tDeleteBody,
+      });
+    }
+
+    return steps;
+    // No .filter() — refs are null during useMemo; overlay handles null targets.
+  }, [isOwnProfile, t, userPosts.length, savedPosts.length]);
 
   // ---------- Render helpers ----------
   const isVideoPost = (post) => Boolean(post.videoUrl || post.video || post.mediaUrl);
@@ -920,6 +1158,9 @@ const ProfileScreen = ({ navigation, route, language }) => {
         >
           {isSavedTab && isOwnProfile && (
             <TouchableOpacity
+              ref={(el) => {
+                if (el && !firstUnsaveBtnRef.current) firstUnsaveBtnRef.current = el;
+              }}
               style={[styles.unsaveButton,{backgroundColor: isDarkMode ? '#111' : '#dddd'}]}
               onPress={(e) => {
                 e?.stopPropagation?.();
@@ -932,11 +1173,12 @@ const ProfileScreen = ({ navigation, route, language }) => {
 
           {showDelete && (
             <TouchableOpacity
+              ref={(el) => {
+                if (el && !firstDeleteBtnRef.current) firstDeleteBtnRef.current = el;
+              }}
               style={[
                 styles.deleteButton,
-                {
-                  backgroundColor: isDarkMode ? '#111' : '#dddd',
-                },
+                { backgroundColor: isDarkMode ? '#111' : '#dddd' },
               ]}
               onPress={(e) => {
                 e?.stopPropagation?.();
@@ -962,15 +1204,16 @@ const ProfileScreen = ({ navigation, route, language }) => {
     const videoCount = userPosts.filter(isVideoPost).length;
     const savedCount = savedPosts.length;
 
-    const coverImage = user.coverImage || user.coverPhoto || user.bannerImage;
-    const coverSource = coverImage
-      ? { uri: coverImage }
+    const coverImage = getImageUri(user.coverImage || user.coverPhoto || user.bannerImage);
+    const coverUri = coverImage ? normalizeImageUrl(coverImage) : null;
+    const coverSource = coverUri
+      ? { uri: coverUri }
       : require('../assets/house.png');
 
     return (
       <View style={styles.referenceProfileHeader}>
         <View style={styles.coverImageWrap}>
-          <Image source={coverSource} style={styles.coverImage} />
+          <Image source={coverSource} style={styles.coverImage} resizeMode="cover" />
           <View style={styles.coverShade} />
           <TouchableOpacity
             style={styles.profileBackButton}
@@ -984,24 +1227,45 @@ const ProfileScreen = ({ navigation, route, language }) => {
 
         <View style={styles.referenceProfileBody}>
           <TouchableOpacity
+            ref={profileAvatarRef}
             onPress={isOwnProfile ? pickImage : undefined}
             style={styles.referenceAvatarWrap}
             disabled={!isOwnProfile || uploading}
           >
-            {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={styles.referenceAvatar} />
+            {uploading ? (
+              <View style={[styles.referenceAvatar, { backgroundColor: isDarkMode ? '#333' : '#ddd', justifyContent: 'center', alignItems: 'center' }]}>
+                <ActivityIndicator size="large" color={theme.accent || '#47ae87'} />
+              </View>
+            ) : profileAvatarSource && !avatarLoadError ? (
+              <Image
+                source={profileAvatarSource}
+                style={styles.referenceAvatar}
+                resizeMode="cover"
+                onError={() => setAvatarLoadError(true)}
+              />
             ) : (
               <View style={[styles.referenceAvatar, styles.referenceAvatarPlaceholder, { backgroundColor: theme.accent }]}>
                 <Text style={styles.avatarInitialsRow}>{String(username || 'U').charAt(0).toUpperCase()}</Text>
               </View>
             )}
-            {isOwnProfile && <View style={styles.referenceAvatarEdit}><Ionicons name="camera" size={16} color="#fff" /></View>}
+            <OnlineStatusDot visible={isViewedUserOnline} size={16} />
+            {isOwnProfile && !uploading && (
+              <View style={styles.referenceAvatarEdit}>
+                <Ionicons name="camera" size={16} color="#fff" />
+              </View>
+            )}
           </TouchableOpacity>
 
-          <Text style={[styles.referenceUsername, { color: theme.text }]} numberOfLines={1}>{name || username || 'User'}</Text>
+          <Text
+            ref={profileNameRef}
+            style={[styles.referenceUsername, { color: theme.text }]}
+            numberOfLines={1}
+          >
+            {name || username || 'User'}
+          </Text>
           <Text style={[styles.referenceHandle, { color: theme.textSecondary }]}>@{(username || 'user').toLowerCase().replace(/\s+/g, '')}</Text>
 
-          <View style={styles.referenceStatsRow}>
+          <View ref={profileStatsRef} style={styles.referenceStatsRow}>
             <View style={styles.referenceStat}>
               <Text style={[styles.referenceStatNumber, { color: theme.text }]}>{userPosts.length}</Text>
               <Text style={[styles.referenceStatLabel, { color: theme.textSecondary }]}>{t.posts}</Text>
@@ -1024,7 +1288,11 @@ const ProfileScreen = ({ navigation, route, language }) => {
 
           <View style={styles.referenceActionRow}>
             {isOwnProfile ? (
-              <TouchableOpacity style={[styles.referenceActionButton, { backgroundColor: theme.accent }]} onPress={openEditSheet}>
+              <TouchableOpacity
+                ref={profileEditBtnRef}
+                style={[styles.referenceActionButton, { backgroundColor: theme.accent }]}
+                onPress={openEditSheet}
+              >
                 <Text style={styles.referencePrimaryActionText}>{t.editProfile}</Text>
               </TouchableOpacity>
             ) : (
@@ -1035,6 +1303,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
 
             {isOwnProfile && (
               <TouchableOpacity
+                ref={profileMenuBtnRef}
                 style={[styles.referenceActionButton, styles.referenceMenuButton, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}
                 onPress={openSidebar}
                 accessibilityRole="button"
@@ -1113,7 +1382,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
     </>
   );
 
-  // ---------- Empty-state navigation ----------
   const handleCreateFirstVideo = () => {
     if (!isOwnProfile) return;
     try {
@@ -1141,7 +1409,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
   };
 
   const ListEmpty = () => {
-    // Load error → show retry
     if (loadError && !loading) {
       return (
         <View style={styles.emptyState}>
@@ -1174,7 +1441,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
       );
     }
 
-    // SAVED
     if (activeTab === 'saved') {
       return (
         <View style={styles.emptyState}>
@@ -1190,7 +1456,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
       );
     }
 
-    // VIDEOS
     if (activeTab === 'videos') {
       if (isOwnProfile) {
         return (
@@ -1201,7 +1466,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
           >
             <Ionicons name="videocam-outline" size={64} color={theme.textSecondary} />
             <Text style={[styles.emptyStateText, { color: theme.textSecondary }]}>{t.noVideos}</Text>
-           
           </TouchableOpacity>
         );
       }
@@ -1213,7 +1477,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
       );
     }
 
-    // POSTS
     return (
       <View style={styles.emptyState}>
         {isOwnProfile ? (
@@ -1243,6 +1506,12 @@ const ProfileScreen = ({ navigation, route, language }) => {
     return <ShaakaLoadingScreen message={t.loading} backgroundColor={theme.background} textColor={theme.text} />;
   }
 
+  const buildCounter = (value, max) => {
+    const remaining = Math.max(0, max - value.length);
+    const word = remaining === 1 ? t.charsRemainingOne : t.charsRemaining;
+    return `${remaining} ${word}`;
+  };
+
   return (
     <SafeAreaView
       style={[styles.container, { backgroundColor: theme.background }]}
@@ -1263,13 +1532,15 @@ const ProfileScreen = ({ navigation, route, language }) => {
         onRefresh={handleRefresh}
       />
 
-      {isOwnProfile && sidebarVisible && (
-        <TouchableWithoutFeedback onPress={closeSidebar}>
-          <View style={styles.transparentOverlay} />
-        </TouchableWithoutFeedback>
+      {isOwnProfile && sidebarMounted && (
+        <TouchableOpacity
+          activeOpacity={1}
+          style={styles.transparentOverlay}
+          onPress={closeSidebar}
+        />
       )}
 
-      {isOwnProfile && sidebarVisible && (
+      {isOwnProfile && sidebarMounted && (
         <Animated.View
           style={[
             styles.sidebar,
@@ -1318,12 +1589,13 @@ const ProfileScreen = ({ navigation, route, language }) => {
         </Animated.View>
       )}
 
-      {/* LOGOUT BOTTOM SHEET */}
-      {logoutSheetVisible && (
+      {logoutSheetMounted && (
         <>
-          <TouchableWithoutFeedback onPress={closeLogoutSheet}>
-            <View style={styles.sheetOverlay} />
-          </TouchableWithoutFeedback>
+          <TouchableOpacity
+            activeOpacity={1}
+            style={styles.sheetOverlay}
+            onPress={closeLogoutSheet}
+          />
           <Animated.View
             style={[
               styles.logoutBottomSheet,
@@ -1357,12 +1629,13 @@ const ProfileScreen = ({ navigation, route, language }) => {
         </>
       )}
 
-      {/* EDIT PROFILE SHEET */}
-      {isOwnProfile && editSheetVisible && (
+      {isOwnProfile && editSheetMounted && (
         <>
-          <TouchableWithoutFeedback onPress={closeEditSheet}>
-            <View style={styles.sheetOverlay} />
-          </TouchableWithoutFeedback>
+          <TouchableOpacity
+            activeOpacity={1}
+            style={styles.sheetOverlay}
+            onPress={closeEditSheet}
+          />
           <Animated.View
             style={[
               styles.editBottomSheet,
@@ -1383,44 +1656,70 @@ const ProfileScreen = ({ navigation, route, language }) => {
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={styles.sheetContent} showsVerticalScrollIndicator={false}>
-              <TextInput
-                style={[styles.sheetInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.cardBackground }]}
-                placeholder="Name"
-                placeholderTextColor={theme.textSecondary}
+            <ScrollView
+              style={styles.sheetContent}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              <FloatingLabelInput
+                label={t.name}
                 value={editName}
-                onChangeText={setEditName}
-              />
-              <TextInput
-                style={[styles.sheetInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.cardBackground }]}
-                placeholder={t.username}
-                placeholderTextColor={theme.textSecondary}
-                value={editUsername}
-                onChangeText={setEditUsername}
-              />
-              <TextInput
-                style={[styles.sheetInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.cardBackground }]}
-                placeholder={t.location}
-                placeholderTextColor={theme.textSecondary}
-                value={editLocation}
-                onChangeText={setEditLocation}
+                onChangeText={(text) => setEditName(sanitizeNameField(text))}
+                maxLength={MAX_NAME_LENGTH}
+                theme={theme}
+                helperText={buildCounter(editName, MAX_NAME_LENGTH)}
+                helperWarning={MAX_NAME_LENGTH - editName.length <= 3}
+                autoCorrect={false}
               />
 
-              <Text style={[styles.sheetLabel, { color: theme.textSecondary }]}>Social Links</Text>
-              {[0, 1, 2].map((index) => (
-                <TextInput
-                  key={`social-link-${index}`}
-                  style={[styles.sheetInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.cardBackground }]}
-                  placeholder={`Social link ${index + 1}`}
-                  placeholderTextColor={theme.textSecondary}
-                  value={String(editSocialLinks[index] || '')}
-                  onChangeText={(value) => {
-                    const updated = [...editSocialLinks];
-                    updated[index] = value;
-                    setEditSocialLinks(updated);
-                  }}
-                />
-              ))}
+              <FloatingLabelInput
+                label={t.username}
+                value={editUsername}
+                onChangeText={(text) => setEditUsername(sanitizeUsernameField(text))}
+                maxLength={MAX_USERNAME_LENGTH}
+                theme={theme}
+                helperText={buildCounter(editUsername, MAX_USERNAME_LENGTH)}
+                helperWarning={MAX_USERNAME_LENGTH - editUsername.length <= 3}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+
+              <FloatingLabelInput
+                label={t.location}
+                value={editLocation}
+                onChangeText={(text) => setEditLocation(sanitizeLocationField(text))}
+                maxLength={MAX_LOCATION_LENGTH}
+                theme={theme}
+                helperText={buildCounter(editLocation, MAX_LOCATION_LENGTH)}
+                helperWarning={MAX_LOCATION_LENGTH - editLocation.length <= 3}
+              />
+
+              <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>
+                {t.socialLinks}
+              </Text>
+
+              {[0, 1, 2].map((index) => {
+                const value = String(editSocialLinks[index] || '');
+                return (
+                  <FloatingLabelInput
+                    key={`social-link-${index}`}
+                    label={`${t.socialLink} ${index + 1}`}
+                    value={value}
+                    onChangeText={(text) => {
+                      const updated = [...editSocialLinks];
+                      updated[index] = text.slice(0, MAX_LINK_LENGTH);
+                      setEditSocialLinks(updated);
+                    }}
+                    maxLength={MAX_LINK_LENGTH}
+                    theme={theme}
+                    helperText={buildCounter(value, MAX_LINK_LENGTH)}
+                    helperWarning={MAX_LINK_LENGTH - value.length <= 5}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="url"
+                  />
+                );
+              })}
 
               <View style={styles.sheetButtons}>
                 <TouchableOpacity onPress={closeEditSheet} style={[styles.sheetCancelBtn, { borderColor: theme.border }]}>
@@ -1435,6 +1734,16 @@ const ProfileScreen = ({ navigation, route, language }) => {
         </>
       )}
 
+      {/* ============ PROFILE TUTORIAL ============ */}
+      <ScreenTutorialOverlay
+        visible={showTutorial}
+        steps={tutorialSteps}
+        isDarkMode={isDarkMode}
+        language={language}
+        onFinish={finishTutorial}
+        padding={5}
+        dimOpacity={0}
+      />
     </SafeAreaView>
   );
 };
@@ -1451,6 +1760,13 @@ const styles = StyleSheet.create({
   referenceAvatar: { width: 78, height: 78, borderRadius: 39 },
   referenceAvatarPlaceholder: { alignItems: 'center', justifyContent: 'center' },
   referenceAvatarEdit: { position: 'absolute', right: -2, bottom: 2, width: 25, height: 25, borderRadius: 13, backgroundColor: '#666', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff' },
+  avatarUploadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 43,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   referenceUsername: { marginTop: 8, fontSize: 22, fontWeight: '700' },
   referenceHandle: { marginTop: 2, fontSize: 12 },
   referenceStatsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', width: '100%', marginTop: 16 },
@@ -1505,7 +1821,6 @@ const styles = StyleSheet.create({
   gridRow: { justifyContent: 'space-between', marginBottom: 8 },
   gridPostItem: { width: (width - 32) / 2, aspectRatio: 1, marginBottom: 8, position: 'relative' },
 
-  /* ---------- Full-bleed cover tile ---------- */
   gridPostCover: {
     width: '100%',
     height: '100%',
@@ -1531,8 +1846,8 @@ const styles = StyleSheet.create({
   },
   coverTileVideoBadge: {
     position: 'absolute',
-    top: 8,
-    right: 8,
+    bottom: 8,
+    left: 8,
     width: 22,
     height: 22,
     borderRadius: 11,
@@ -1541,24 +1856,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
 
-  /* Overlay action buttons */
- deleteButton: {
-  position: 'absolute',
-  top: 0,
-  right: 0,
-  padding: 5,                 // ← no padding
-  borderTopLeftRadius: 0,
-  borderTopRightRadius: 0,
-  borderBottomRightRadius: 0,
-  borderBottomLeftRadius: 12, // ← only bottom-left rounded
-  zIndex: 5,
-},
- gridMenuIconWrapper: { width: 18, height: 18, justifyContent: 'center', alignItems: 'center' },
+  deleteButton: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    padding: 5,
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+    borderBottomRightRadius: 0,
+    borderBottomLeftRadius: 12,
+    zIndex: 5,
+  },
+  gridMenuIconWrapper: { width: 18, height: 18, justifyContent: 'center', alignItems: 'center' },
   gridMenuIconLine: { borderRadius: 999, height: 2, marginVertical: 1.5 },
   gridMenuIconLineShort: { width: '42%' },
   gridMenuIconLineMid: { width: '72%' },
   gridMenuIconLineLong: { width: '100%' },
-  unsaveButton: { position: 'absolute', bottom: 0, right: 0,  borderTopLeftRadius: 12, padding: 5, zIndex: 5 },
+  unsaveButton: { position: 'absolute', bottom: 0, right: 0, borderTopLeftRadius: 12, padding: 5, zIndex: 5 },
 
   tabBar: { flexDirection: 'row', justifyContent: 'space-around', borderBottomWidth: 1, paddingTop: 4, paddingBottom: 0, marginTop: 4 },
   tab: { flex: 1, alignItems: 'center', paddingVertical: 12 },
@@ -1579,7 +1893,12 @@ const styles = StyleSheet.create({
     minWidth: 220,
   },
   emptyPrimaryButtonText: { color: '#fff', fontWeight: '700', fontSize: 14 },
-  transparentOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'transparent', zIndex: 10 },
+
+  transparentOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.001)',
+    zIndex: 10,
+  },
   sidebar: {
     position: 'absolute',
     right: 0,
@@ -1600,6 +1919,7 @@ const styles = StyleSheet.create({
   sidebarContent: { flex: 1, justifyContent: 'flex-start' },
   sidebarOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 0 },
   sidebarOptionText: { fontSize: 16, marginLeft: 12, fontWeight: '500' },
+
   sheetOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.4)', zIndex: 100 },
   editBottomSheet: {
     position: 'absolute',
@@ -1634,8 +1954,49 @@ const styles = StyleSheet.create({
   sheetTitle: { fontSize: 20, fontWeight: 'bold' },
   sheetCloseBtn: { padding: 4 },
   sheetContent: { flex: 1 },
-  sheetInput: { borderWidth: 1, borderRadius: 8, padding: 12, fontSize: 16, marginBottom: 16 },
-  sheetLabel: { fontSize: 14, fontWeight: '500', marginBottom: 8 },
+
+  floatingFieldWrapper: { marginBottom: 22 },
+  floatingFieldBox: {
+    borderWidth: 1.5,
+    borderRadius: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    minHeight: 54,
+    flexDirection: 'row',
+    alignItems: 'center',
+    position: 'relative',
+  },
+  floatingInput: {
+    flex: 1,
+    fontSize: 16,
+    padding: 0,
+    paddingRight: 8,
+    minHeight: 22,
+  },
+  floatingSuffix: { fontSize: 14, marginLeft: 8 },
+  floatingLabelMask: {
+    position: 'absolute',
+    top: -8,
+    left: 10,
+    paddingHorizontal: 4,
+  },
+  floatingLabelText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  floatingHelper: {
+    fontSize: 11,
+    marginTop: 4,
+    marginLeft: 4,
+  },
+  sectionLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 10,
+    marginTop: 4,
+    marginLeft: 2,
+  },
+
   sheetButtons: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, marginBottom: 20, gap: 12 },
   sheetCancelBtn: { flex: 1, paddingVertical: 14, borderRadius: 8, alignItems: 'center', borderWidth: 1 },
   sheetSaveBtn: { flex: 1, paddingVertical: 14, borderRadius: 8, alignItems: 'center' },

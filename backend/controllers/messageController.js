@@ -247,9 +247,7 @@ exports.sendMessage = async (req, res) => {
 // GET /messages/thread/:userId1/:userId2
 exports.getMessages = async (req, res) => {
   try {
-    const { postId, userId1, userId2 } = req.params;
-    const requestedPostId = req.query.postId || postId;
-    const normalizedPostId = String(requestedPostId || '').trim();
+    const { userId1, userId2 } = req.params;
     const firstUser = String(userId1 || '').trim();
     const secondUser = String(userId2 || '').trim();
 
@@ -262,28 +260,19 @@ exports.getMessages = async (req, res) => {
     const isId1 = mongoose.Types.ObjectId.isValid(firstUser);
     const isId2 = mongoose.Types.ObjectId.isValid(secondUser);
 
-    const buildQuery = (filterByPostId = true) => {
-      const conditions = [];
-      if (isId1 && isId2) {
-        conditions.push(
-          { senderId: firstUser, receiverId: secondUser },
-          { senderId: secondUser, receiverId: firstUser }
-        );
-      }
+    const conditions = [];
+    if (isId1 && isId2) {
       conditions.push(
-        { senderPhone: firstUser, receiverPhone: secondUser },
-        { senderPhone: secondUser, receiverPhone: firstUser }
+        { senderId: firstUser, receiverId: secondUser },
+        { senderId: secondUser, receiverId: firstUser }
       );
-      const query = { $or: conditions };
-      if (filterByPostId) {
-        query.postId = normalizedPostId && normalizedPostId !== 'undefined' && normalizedPostId !== 'null'
-          ? normalizedPostId
-          : { $in: ['', null] };
-      }
-      return query;
-    };
+    }
+    conditions.push(
+      { senderPhone: firstUser, receiverPhone: secondUser },
+      { senderPhone: secondUser, receiverPhone: firstUser }
+    );
 
-    let messages = await Message.find(buildQuery(true)).sort({ createdAt: 1 });
+    const messages = await Message.find({ $or: conditions }).sort({ createdAt: 1 });
 
     const updatedMessages = await Promise.all(messages.map(async (msg) => {
       const msgObj = refreshMessageMediaUrls(msg, req);

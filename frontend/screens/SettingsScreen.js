@@ -1,5 +1,6 @@
+
 // screens/SettingsScreen.js
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -27,12 +28,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useBottomSheet } from '../context/BottomSheetContext';
+import { getTutorialPreferences, setTutorialPreference, subscribeTutorialPreferences } from '../services/tutorialPreferences';
 import AppAlert from '../utils/alert';
 import { OFFLINE_STORAGE_ENABLED_KEY, offlineDatabase, setOfflineStorageEnabled } from '../services/offlineDatabase';
 import { offlineStorage } from '../services/offlineStorage';
 import { mediaCache } from '../services/mediaCache';
 import { reelVideoCache } from '../services/reelVideoCache';
 import { startupPrefetch } from '../services/startupPrefetch';
+import { useContactInfo, useContactLinks } from '../services/contactInfo';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BOTTOM_SHEET_HEIGHT = SCREEN_HEIGHT * 0.7;
@@ -53,6 +58,10 @@ const translations = {
     offlineDataCleared: 'Offline data cleared',
     offlineDataClearFailed: 'Could not clear offline data. Please try again.',
     darkMode: 'Dark Mode',
+    showTutorials: 'Show Tutorials',
+    showTutorialsDescription: 'Automatically show page guides up to two times.',
+    showMeTutorial: 'Show me tutorial',
+    tutorialPreferenceError: 'Could not save your tutorial preference. Please try again.',
     account: 'Account',
     personalInfo: 'Personal Information',
     changePassword: 'Change Password',
@@ -95,15 +104,14 @@ const translations = {
     paymentSubscriptionPolicy: 'Account & Safety Policy',
     accountSafetyPolicy: 'Account & Safety Policy',
     mapShopListingPolicy: 'Map & Shop Listing Policy',
-   
+
     privacyPolicyText: 'SHAAKA collects your phone number, username, and your product to provide the service. Your data is stored securely and can never shared . You can request deletion of your account any time.',
     termsConditionsText: 'By using SHAAKA you agree to our terms. You must be at least 18 years old (children can use it with supervision). You are responsible for your account and all content you post.',
     communityGuidelinesText: 'Respect others, share accurate information, use real shop locations, and report harmful content. No hate speech, harassment, threats, violence, terrorism, porn, spam, fake businesses, fraud, scams, illegal products, or impersonation allowed.',
     paymentSubscriptionPolicyText: 'This app does not charge a subscription fee. If you have any issue with your account, contact SHAAKA support directly.',
-    accountSafetyPolicyText: 'Keep your password secure, don\'t share account information with others, and avoid bots. We will suspend accounts that violate our policies. Contact us at 0796640462 / 0799882580 or via social media for help.',
+    accountSafetyPolicyText: 'Keep your password secure, don\'t share account information with others, and avoid bots. We will suspend accounts that violate our policies. Contact us by phone or via social media for help.',
     mapShopListingPolicyText: 'Shops must be real and accurately located. Fake or illegal businesses will be removed. Duplicate listings are prohibited.',
-   
-  
+
     notProvided: 'N/A',
     statusActive: 'Active',
     statusExpired: 'Expired',
@@ -113,7 +121,7 @@ const translations = {
     connectWithUs: 'Connect Us',
     followUs: 'Contact using social media',
   },
- Kinyarwanda: {
+  Kinyarwanda: {
     settings: 'Igenamiterere',
     appearance: 'Igaragara rya shaaka',
     offlineData: 'Bika amakuru ',
@@ -124,6 +132,10 @@ const translations = {
     offlineDataCleared: 'Amakuru yabitswe yasibwe',
     offlineDataClearFailed: 'Ntibyashobotse gusiba amakuru yabitswe. Ongera ugerageze.',
     darkMode: 'Kwijima',
+    showTutorials: 'Erekana inyigisho',
+    showTutorialsDescription: 'Erekana inyigisho z’impapuro kugeza inshuro ebyiri.',
+    showMeTutorial: 'Nyereka inyigisho',
+    tutorialPreferenceError: 'Ntibyashobotse kubika uko ushaka kwerekwa inyigisho. Ongera ugerageze.',
     account: 'Konti',
     personalInfo: 'Amakuru bwite',
     changePassword: 'Hindura ijambobanga',
@@ -132,7 +144,7 @@ const translations = {
     notificationPreferences: 'Uko imenyesha rikora',
     supportAbout: 'Ubufasha n\'amakuru',
     howItWorks: 'Uko shaaka ikora',
-    howItWorksDesc: 'SHAAKA igufasha kugura no kugurisha. Tangaza ibicuruzwa byawe, reba amaduka, kandi uvugane n\'abaguzi.',
+    howItWorksDesc: 'SHAAKA igufasha kugura no kugurisha. Tangaza ibicuruzwa byawe, reba amaduka, andi uvugane n\'abaguzi.',
     termsPolicies: 'Amategeko n\'amabwiriza',
     appVersion: 'Verisiyo',
     logout: 'Sohoka',
@@ -166,14 +178,14 @@ const translations = {
     paymentSubscriptionPolicy: 'Amabwiriza y\'umutekano wa konti',
     accountSafetyPolicy: 'Amabwiriza y\'umutekano wa konti yawe',
     mapShopListingPolicy: 'Amabwiriza y\'ikarita n\'amaduka',
-   
+
     privacyPolicyText: 'SHAAKA ikusanya nomero ya telefoni, izina, n\'ibicuruzwa byawe kugira ngo itange serivisi. Amakuru yawe abikwa mu mumutekano kandi ntashyirwa hanze. Ushobora gusaba gusiba konti yawe igihe icyo aricyo cyose.',
     termsConditionsText: 'Mugukoresha SHAAKA ugomba kuba ukurikiza wemera amategeko yacu. Ufite imyaka 18 (numwana yayikoreha).',
     communityGuidelinesText: 'Ugomba guha agaciro abandi, gusangiza amakuru nyayo, koresha ahantu nyayo ku maduka, kandi utangire amakuru kugihe. Nta mvugo z\'urwango, gusebyanya, iterabwoba, ubugizi bwa nabi, ibitero, porono, amaduka y\'impimbano, uburiganya, ibicuruzwa bitemewe.',
     paymentSubscriptionPolicyText: 'Iyi app ntabwo ikoresha amafaranga y\'ishyura. Niba ufite ikibazo na konti yawe, wandikire SHAAKA support.',
-    accountSafetyPolicyText: 'Bika ijambo ryibanga ryawe mu mutekano nurisangize buri umwe wese, ntusangize konti yawe ndetse n\'ijambo banga. Konti yawe izahagarikwa ninyuranya namategeko. Hamagara 0796640462 / 0799882580 cyangwa ubandikire kuri social media.',
+    accountSafetyPolicyText: 'Bika ijambo ryibanga ryawe mu mutekano nurisangize buri umwe wese, ntusangize konti yawe ndetse n\'ijambo banga. Konti yawe izahagarikwa ninyuranya namategeko. Hamagara kuri telefone cyangwa ubandikire kuri social media.',
     mapShopListingPolicyText: 'Amaduka agomba kuba nyayo kandi mu hantu nyayo. Amaduka y\'impimbano cyangwa adasanzwe azakurwaho. Kwandika inshuro nyinshi ntibyemewe.',
-   
+
     notProvided: 'Ntaboneka',
     statusActive: 'Ikora',
     statusExpired: 'Yashize',
@@ -185,63 +197,21 @@ const translations = {
   },
 };
 
-// ---------- Social Media Data ----------
-const socialLinks = [
-  {
-    name: 'Instagram',
-    icon: 'logo-instagram',
-    color: '#E4405F',
-    url: 'instagram://user?username=shaaka_rw',
-    fallbackUrl: 'https://www.instagram.com/shaaka_rw/',
-  },
-  {
-    name: 'YouTube',
-    icon: 'logo-youtube',
-    color: '#FF0000',
-    url: 'youtube://www.youtube.com/@shaaka-rw',
-    fallbackUrl: 'https://www.youtube.com/@shaaka-rw',
-  },
-  {
-    name: 'X',
-    icon: 'logo-x',
-    color: '#000000',
-    url: 'https://x.com/shaaka_rw',
-    fallbackUrl: 'https://x.com/shaaka_rw',
-  },
-  {
-    name: 'Facebook',
-    icon: 'logo-facebook',
-    color: '#1877F2',
-    url: 'fb://profile/61592686307072',
-    fallbackUrl: 'https://www.facebook.com/profile.php?id=61592686307072',
-  },
-  {
-    name: 'Email',
-    icon: 'mail-outline',
-    color: '#D44638',
-    url: 'mailto:shaakarw@gmail.com',
-    fallbackUrl: null,
-  },
-  {
-    name: 'WhatsApp',
-    icon: 'logo-whatsapp',
-    color: '#25D366',
-    url: 'whatsapp://send?phone=+250799882580',
-    fallbackUrl: 'https://wa.me/250799882580',
-  },
-];
-
 export default function SettingsScreen({ navigation, route, language = 'English', toggleLanguage }) {
   const { theme, isDarkMode, toggleTheme } = useTheme();
   const { user, logout, refreshUser } = useAuth();
   const { showBottomSheet } = useBottomSheet();
+  const contactInfo = useContactInfo();
+  const socialLinks = useContactLinks(contactInfo);
   const [refreshing, setRefreshing] = useState(false);
   const [offlineDataEnabled, setOfflineDataEnabled] = useState(true);
   const [updatingOfflineData, setUpdatingOfflineData] = useState(false);
+  const [tutorialPreferences, setTutorialPreferences] = useState({
+    enabled: true,
+  });
   const t = translations[language] || translations.English;
 
-  // Screen-local swipe sheet state removed; all dialogs now use the shared global sheet.
-
+  // ---------- Screen state ----------
   const [pushNotifications, setPushNotifications] = useState(true);
   const [adminSession, setAdminSession] = useState(false);
 
@@ -250,7 +220,6 @@ export default function SettingsScreen({ navigation, route, language = 'English'
       const token = await AsyncStorage.getItem('adminToken');
       setAdminSession(Boolean(token));
     };
-
     checkAdminSession();
   }, []);
 
@@ -258,6 +227,20 @@ export default function SettingsScreen({ navigation, route, language = 'English'
     AsyncStorage.getItem(OFFLINE_STORAGE_ENABLED_KEY)
       .then(value => setOfflineDataEnabled(value !== 'false'))
       .catch(() => setOfflineDataEnabled(true));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    getTutorialPreferences()
+      .then(value => {
+        if (active) setTutorialPreferences(value);
+      })
+      .catch(error => console.error('Could not load tutorial preferences:', error));
+    const unsubscribe = subscribeTutorialPreferences(setTutorialPreferences);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, []);
 
   // Collapsible sections
@@ -281,6 +264,14 @@ export default function SettingsScreen({ navigation, route, language = 'English'
     });
   };
 
+  const handleTutorialPreferenceChange = async (key, value) => {
+    try {
+      await setTutorialPreference(key, value);
+    } catch (error) {
+      openBottomSheet(t.error, t.tutorialPreferenceError);
+    }
+  };
+
   const openSocialSheet = () => {
     showBottomSheet({
       type: 'social',
@@ -291,7 +282,6 @@ export default function SettingsScreen({ navigation, route, language = 'English'
       socialLinks: socialLinks,
       buttonAction: () => {},
     });
-    
   };
 
   const handleLogout = () => {
@@ -376,7 +366,6 @@ export default function SettingsScreen({ navigation, route, language = 'English'
     }
   };
 
-  // Reusable social icons component
   const renderSocialIcons = () => (
     <View style={styles.socialIconsFooter}>
       <Text style={[styles.followText, { color: theme.textSecondary }]}>{t.followUs}</Text>
@@ -411,14 +400,10 @@ export default function SettingsScreen({ navigation, route, language = 'English'
   const profileImageSource = user?.avatar ? { uri: user.avatar } : defaultAvatar;
   const isAdmin = user?.role === 'admin';
   const hasAdminAccess = isAdmin || adminSession;
-  const subscriptionLabel = user ? t.mySubscriptions : t.login;
 
   // ---------- Handlers with login checks ----------
   const handleSubscriptionPress = () => {
-    if (!user) {
-      navigation.navigate('Login');
-      return;
-    }
+    if (!user) { navigation.navigate('Login'); return; }
     navigateTo('Profile');
   };
 
@@ -431,10 +416,7 @@ export default function SettingsScreen({ navigation, route, language = 'English'
   };
 
   const handleProfilePress = () => {
-    if (!user) {
-      handleLogin();
-      return;
-    }
+    if (!user) { handleLogin(); return; }
     navigateTo('Profile');
   };
 
@@ -456,33 +438,38 @@ export default function SettingsScreen({ navigation, route, language = 'English'
         </View>
 
         {/* Profile Card */}
-        <TouchableOpacity
-          style={[styles.profileCard, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}
-          onPress={handleProfilePress}
-          activeOpacity={0.7}
-        >
-          <Image source={profileImageSource} style={styles.profileAvatar} />
-          <View style={styles.profileInfo}>
-            <Text style={[styles.profileName, { color: theme.text }]}>
-              {user?.username || t.guest}
-            </Text>
-            <Text style={[styles.profilePhone, { color: theme.textSecondary }]}>
-              {user?.phone || t.phone}
-            </Text>
-            {user && (
-              <Text style={[styles.profileEdit, { color: theme.accent }]}>{t.editProfile}</Text>
-            )}
-          </View>
-          <Ionicons name="chevron-forward" size={20} color={theme.textSecondary} />
-        </TouchableOpacity>
+        <View>
+          <TouchableOpacity
+            style={[styles.profileCard, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}
+            onPress={handleProfilePress}
+            activeOpacity={0.7}
+          >
+            <Image
+              source={normalizeImageSource(profileImageSource)}
 
-        {/* SUBSCRIPTION */}
+              style={styles.profileAvatar}
+            />
+            <View style={styles.profileInfo}>
+              <Text style={[styles.profileName, { color: theme.text }]}>
+                {user?.username || t.guest}
+              </Text>
+              <Text style={[styles.profilePhone, { color: theme.textSecondary }]}>
+                {user?.phone || t.phone}
+              </Text>
+              {user && (
+                <Text style={[styles.profileEdit, { color: theme.accent }]}>{t.editProfile}</Text>
+              )}
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={theme.textSecondary} />
+          </TouchableOpacity>
+        </View>
+
+        {/* SUBSCRIPTION / ADMIN */}
         <View style={styles.section}>
           <Text style={[styles.sectionHeader, { color: theme.textSecondary }]}></Text>
-          
           {hasAdminAccess && (
             <TouchableOpacity onPress={handleAdminLogin}>
-              <View style={[styles.settingRow, { borderBottomColor: theme.border }]}> 
+              <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                   <Ionicons name="lock-closed-outline" size={22} color={theme.text} style={{ marginRight: 8 }} />
                   <Text style={[styles.settingText, { color: theme.text }]}>{t.adminLogin}</Text>
@@ -496,6 +483,7 @@ export default function SettingsScreen({ navigation, route, language = 'English'
         {/* APPEARANCE */}
         <View style={styles.section}>
           <Text style={[styles.sectionHeader, { color: theme.textSecondary }]}>{t.appearance}</Text>
+
           <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
             <Text style={[styles.settingText, { color: theme.text }]}>{t.darkMode}</Text>
             <Switch
@@ -505,6 +493,33 @@ export default function SettingsScreen({ navigation, route, language = 'English'
               thumbColor={isDarkMode ? '#fff' : '#f4f3f4'}
             />
           </View>
+
+          <View style={[styles.settingRow, { borderBottomColor: theme.border, alignItems: 'center' }]}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={[styles.settingText, { color: theme.text }]}>{t.showTutorials}</Text>
+              <Text style={[styles.versionText, { color: theme.textSecondary, marginTop: 4 }]}>
+                {t.showTutorialsDescription}
+              </Text>
+            </View>
+            <Switch
+              value={tutorialPreferences.enabled}
+              onValueChange={value => handleTutorialPreferenceChange('enabled', value)}
+              trackColor={{ false: '#767577', true: theme.accent }}
+              thumbColor={tutorialPreferences.enabled ? '#fff' : '#f4f3f4'}
+              accessibilityLabel={t.showTutorials}
+            />
+          </View>
+
+          <TouchableOpacity
+            style={[styles.settingRow, { borderBottomColor: theme.border }]}
+            onPress={() => navigateTo('Tutorial')}
+            accessibilityRole="button"
+            accessibilityLabel={t.showMeTutorial}
+          >
+            <Text style={[styles.settingText, { color: theme.text }]}>{t.showMeTutorial}</Text>
+            <Ionicons name="chevron-forward" size={20} color={theme.textSecondary} />
+          </TouchableOpacity>
+
           <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
             <Text style={[styles.settingText, { color: theme.text }]}>{t.language}</Text>
             <TouchableOpacity onPress={toggleLanguageHandler} style={styles.languageToggle}>
@@ -533,17 +548,19 @@ export default function SettingsScreen({ navigation, route, language = 'English'
 
         {/* ACCOUNT (collapsible) */}
         <View style={styles.section}>
-          <TouchableOpacity
-            onPress={() => setShowAccount(!showAccount)}
-            style={[styles.settingRow, { borderBottomColor: theme.border }]}
-          >
-            <Text style={[styles.sectionHeader, { color: theme.textSecondary, flex: 1, marginBottom: 0 }]}>{t.account}</Text>
-            <Ionicons
-              name={showAccount ? 'chevron-up' : 'chevron-down'}
-              size={20}
-              color={theme.textSecondary}
-            />
-          </TouchableOpacity>
+          <View>
+            <TouchableOpacity
+              onPress={() => setShowAccount(!showAccount)}
+              style={[styles.settingRow, { borderBottomColor: theme.border }]}
+            >
+              <Text style={[styles.sectionHeader, { color: theme.textSecondary, flex: 1, marginBottom: 0 }]}>{t.account}</Text>
+              <Ionicons
+                name={showAccount ? 'chevron-up' : 'chevron-down'}
+                size={20}
+                color={theme.textSecondary}
+              />
+            </TouchableOpacity>
+          </View>
           {showAccount && (
             <>
               <TouchableOpacity onPress={() => navigateTo('ProfileEdit')}>
@@ -581,17 +598,19 @@ export default function SettingsScreen({ navigation, route, language = 'English'
 
         {/* LEGAL & POLICIES (collapsible) */}
         <View style={styles.section}>
-          <TouchableOpacity
-            onPress={() => setShowLegalPolicies(!showLegalPolicies)}
-            style={[styles.settingRow, { borderBottomColor: theme.border }]}
-          >
-            <Text style={[styles.sectionHeader, { color: theme.textSecondary, flex: 1, marginBottom: 0 }]}>{t.legalPolicies}</Text>
-            <Ionicons
-              name={showLegalPolicies ? 'chevron-up' : 'chevron-down'}
-              size={20}
-              color={theme.textSecondary}
-            />
-          </TouchableOpacity>
+          <View>
+            <TouchableOpacity
+              onPress={() => setShowLegalPolicies(!showLegalPolicies)}
+              style={[styles.settingRow, { borderBottomColor: theme.border }]}
+            >
+              <Text style={[styles.sectionHeader, { color: theme.textSecondary, flex: 1, marginBottom: 0 }]}>{t.legalPolicies}</Text>
+              <Ionicons
+                name={showLegalPolicies ? 'chevron-up' : 'chevron-down'}
+                size={20}
+                color={theme.textSecondary}
+              />
+            </TouchableOpacity>
+          </View>
           {showLegalPolicies &&
             policyItems.map((item) => (
               <TouchableOpacity key={item.key} onPress={() => openBottomSheet(item.title, item.content)}>
@@ -605,17 +624,19 @@ export default function SettingsScreen({ navigation, route, language = 'English'
 
         {/* SUPPORT & ABOUT (collapsible) */}
         <View style={styles.section}>
-          <TouchableOpacity
-            onPress={() => setShowSupportAbout(!showSupportAbout)}
-            style={[styles.settingRow, { borderBottomColor: theme.border }]}
-          >
-            <Text style={[styles.sectionHeader, { color: theme.textSecondary, flex: 1, marginBottom: 0 }]}>{t.supportAbout}</Text>
-            <Ionicons
-              name={showSupportAbout ? 'chevron-up' : 'chevron-down'}
-              size={20}
-              color={theme.textSecondary}
-            />
-          </TouchableOpacity>
+          <View>
+            <TouchableOpacity
+              onPress={() => setShowSupportAbout(!showSupportAbout)}
+              style={[styles.settingRow, { borderBottomColor: theme.border }]}
+            >
+              <Text style={[styles.sectionHeader, { color: theme.textSecondary, flex: 1, marginBottom: 0 }]}>{t.supportAbout}</Text>
+              <Ionicons
+                name={showSupportAbout ? 'chevron-up' : 'chevron-down'}
+                size={20}
+                color={theme.textSecondary}
+              />
+            </TouchableOpacity>
+          </View>
           {showSupportAbout && (
             <>
               <TouchableOpacity onPress={() => openBottomSheet(t.howItWorks, t.howItWorksDesc)}>
@@ -670,45 +691,43 @@ const styles = StyleSheet.create({
   sectionHeader: { fontSize: 14, fontWeight: '600', textTransform: 'uppercase', marginBottom: 8, marginLeft: 4 },
   settingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 0 },
   settingText: { fontSize: 16 },
-  settingText1:{
-fontSize: 15 
-  },
+  settingText1: { fontSize: 15 },
   chevron: { fontSize: 20, fontWeight: '300', marginRight: 4 },
   versionText: { fontSize: 14 },
   languageToggle: { flexDirection: 'row', alignItems: 'center' },
   languageText: { fontSize: 16, fontWeight: '600', marginRight: 4 },
   logoutContainer: { marginTop: 20, paddingVertical: 16, alignItems: 'start', borderTopWidth: 0 },
   logoutText: { fontSize: 16, fontWeight: '600' },
-  
+
   // Bottom sheet overlay
-  sheetOverlay: { 
-    ...StyleSheet.absoluteFillObject, 
-    backgroundColor: 'rgba(0,0,0,0.4)', 
+  sheetOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.4)',
     zIndex: 100
   },
-  
+
   // Bottom sheet container
-  bottomSheetContainer: { 
-    position: 'absolute', 
-    left: 0, 
-    right: 0, 
-    bottom: 0, 
-    borderTopLeftRadius: 20, 
-    borderTopRightRadius: 20, 
-    borderTopWidth: 1, 
-    paddingHorizontal: 20, 
-    paddingTop: 8, 
+  bottomSheetContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderTopWidth: 1,
+    paddingHorizontal: 20,
+    paddingTop: 8,
     paddingBottom: 20,
     zIndex: 101,
   },
-  
+
   bottomSheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: '#ccc', alignSelf: 'center', marginBottom: 8 },
   bottomSheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   bottomSheetTitle: { fontSize: 20, fontWeight: 'bold' },
   bottomSheetClose: { padding: 4 },
   bottomSheetContent: { flex: 1 },
   bottomSheetText: { fontSize: 16, lineHeight: 24 },
-  
+
   // Logout confirm styles
   logoutConfirmMessage: {
     fontSize: 15,
@@ -731,7 +750,7 @@ fontSize: 15
   noButton: { marginRight: 6 },
   yesButton: { marginLeft: 6 },
   logoutButtonText: { color: '#ffffff', fontWeight: '700', fontSize: 16 },
-  
+
   // Social icons
   socialIconsFooter: {
     marginTop: 16,
@@ -747,8 +766,9 @@ fontSize: 15
   },
   socialIconsRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     justifyContent: 'center',
-    gap: 16,
+    gap: 10,
   },
   socialIconSmall: {
     alignItems: 'center',

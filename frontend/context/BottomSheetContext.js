@@ -1,3 +1,4 @@
+// context/BottomSheetContext.js
 import React, { createContext, useContext, useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import {
   Animated,
@@ -90,7 +91,8 @@ const getTypeAccent = (type) => {
 };
 
 export const BottomSheet = ({ visible, config, onClose }) => {
-  const { theme } = useTheme();
+  // ⬇️ We now also pull `isDarkMode` so the main icon can theme-adapt.
+  const { theme, isDarkMode } = useTheme();
   const insets = useSafeAreaInsets();
   const { height: screenHeight } = useWindowDimensions();
 
@@ -111,6 +113,11 @@ export const BottomSheet = ({ visible, config, onClose }) => {
   } = resolvedConfig;
 
   const colors = useMemo(() => getTypeColors(type, theme), [type, theme]);
+
+  // ⬇️ Main-icon colour is now purely theme-driven.
+  //    Dark mode → light grey (#dddddd). Light mode → near-black (#111111).
+  const iconColor = isDarkMode ? '#dddddd' : '#111111';
+
   const slideAnim = useRef(new Animated.Value(screenHeight)).current;
   const overlayOpacity = useRef(new Animated.Value(0)).current;
 
@@ -224,6 +231,7 @@ export const BottomSheet = ({ visible, config, onClose }) => {
                     key={index}
                     onPress={() => openSocialLink(item.url, item.fallbackUrl)}
                   >
+                    {/* Social icons keep their brand colours — untouched */}
                     <View style={[styles.socialIconCircleSmall, { backgroundColor: item.color }]}>
                       <Ionicons name={item.icon} size={18} color="#fff" />
                     </View>
@@ -240,16 +248,13 @@ export const BottomSheet = ({ visible, config, onClose }) => {
             </View>
           ) : (
             <View style={styles.content}>
-              <View
-                style={[
-                  styles.iconBadge,
-                  {
-                    backgroundColor: type === 'error' ? '#fff1eb' : '#edf9f3',
-                    borderColor: `${getTypeAccent(type)}33`,
-                  },
-                ]}
-              >
-                <Ionicons name={icon || 'information-circle-outline'} size={32} color={colors.icon} />
+              {/* ── Main icon: theme-adaptive, no background / border ── */}
+              <View style={styles.iconBadge}>
+                <Ionicons
+                  name={icon || 'information-circle-outline'}
+                  size={32}
+                  color={iconColor}
+                />
               </View>
 
               <Text style={[styles.title, { color: theme.text }]} numberOfLines={3}>
@@ -383,14 +388,13 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: 12,
   },
+  // ── Icon wrapper: no background, no border, no shadow ─────────────────
+  //    Only centering + spacing remains so the layout is unchanged.
   iconBadge: {
-    width: 36,
-    height: 36,
-    borderRadius: 36,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
     marginBottom: 10,
+    backgroundColor: 'transparent',
   },
   title: {
     fontSize: 17,

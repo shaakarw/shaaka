@@ -1,5 +1,6 @@
+
 // screens/RegisterScreen.js
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -17,6 +18,7 @@ import {
   Image,
   Modal,
 } from 'react-native';
+import { useIsFocused } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
@@ -25,8 +27,18 @@ import { BASE_URL } from '../constants';
 import { normalizeRwandaPhone, normalizeForAuth } from '../utils/phoneNormalizer';
 import Logo from '../assets/logos.png';
 import SharedBottomNav from '../components/SharedBottomNav';
+import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
+import useScreenTutorial from '../hooks/useScreenTutorial';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width } = Dimensions.get('window');
+
+// ---- Tutorial config ---------------------------------------------------------
+const REGISTER_TUTORIAL_ID = 'register';
+const REGISTER_TUTORIAL_DELAY_MS = 700;
+
+// -----------------------------------------------------------------------------
 
 // ---------- Translations ----------
 const translations = {
@@ -76,7 +88,6 @@ const translations = {
     valid: 'Available',
     invalid: 'Invalid',
     suggestionsTitle: 'Try one of these:',
-    // Hints
     step2HintTitle: 'Set your password',
     step2HintMessages: [
       'Choose a strong password.',
@@ -96,6 +107,21 @@ const translations = {
       'Complete the agreement to finish.',
     ],
     error: 'Please check your internet',
+    // Tutorial
+    tStep1PhoneTitle: 'Your phone number',
+    tStep1PhoneBody: 'Enter your phone number starting with 07. You will use it to log in.',
+    tStep1UserTitle: 'Choose a username',
+    tStep1UserBody: 'Pick a username with at least 4 characters. We will check it is available.',
+    tStep2PassTitle: 'Create a password',
+    tStep2PassBody: 'Pick a password with at least 4 characters. No spaces allowed.',
+    tStep2ConfirmTitle: 'Confirm password',
+    tStep2ConfirmBody: 'Type the same password again to make sure you remember it.',
+    tStep3RecoveryTitle: 'Recovery number',
+    tStep3RecoveryBody: 'Enter a number only you know (at least 4 digits). We will use it if you forget your password.',
+    tStep4TermsTitle: 'Accept terms',
+    tStep4TermsBody: 'Read and check this box to agree to the Terms & Conditions before registering.',
+    tStep4RegisterTitle: 'Create account',
+    tStep4RegisterBody: 'Tap here to finish creating your account. You will be logged in automatically.',
   },
   Kinyarwanda: {
     title: 'Funguza Konti',
@@ -110,7 +136,7 @@ const translations = {
     recoveryNumberLabel: 'Numero yo kwibutsa (min imibare 4):',
     termsCheck: 'Emeza amasezerano n’amategeko ngenderwaho',
     termsLink: 'Amasezerano',
-    next: 'Ibikurikiye',
+    next: 'Komeza',
     back: 'Subira inyuma',
     register: 'Iyandikishe',
     subtitle: 'Iyandikishe, ushaake amaduka, ugurishe & ugurishe ibicuruzwa byawe',
@@ -162,6 +188,21 @@ const translations = {
       'Soza amasezerano urangize.',
     ],
     error: 'Genzura internet yawe',
+    // Tutorial
+    tStep1PhoneTitle: 'Nimero ya telefone',
+    tStep1PhoneBody: 'Andika nimero ya telefone itangira na 07. Uzayikoresha kwinjira.',
+    tStep1UserTitle: 'Hitamo izina ry’ukoresha',
+    tStep1UserBody: 'Hitamo izina rifite nibura inyuguti 4. Tuzagenzura niba rirahari.',
+    tStep2PassTitle: 'Kora ijambo banga',
+    tStep2PassBody: 'Hitamo ijambo banga rifite nibura inyuguti 4. Nta mwanya wemewe.',
+    tStep2ConfirmTitle: 'Emeza ijambo banga',
+    tStep2ConfirmBody: 'Ongera wandike ijambo banga rimwe kugira ngo wibuke neza.',
+    tStep3RecoveryTitle: 'Numero yo kwibutsa',
+    tStep3RecoveryBody: 'Andika numero wowe gusa uzi (nibura imibare 4). Tuzayikoresha niba wibagiwe ijambo banga.',
+    tStep4TermsTitle: 'Emeza amasezerano',
+    tStep4TermsBody: 'Soma kandi ushyire akamenyetso kuri aka gasanduku wemere amasezerano mbere yo kwiyandikisha.',
+    tStep4RegisterTitle: 'Funguza konti',
+    tStep4RegisterBody: 'Kanda hano urangize gufungura konti yawe. Uzahita winjira mu buryo bwikora.',
   },
 };
 
@@ -192,7 +233,8 @@ const generateSuggestions = (username) => {
 
 // ---------- Component ----------
 const RegisterScreen = ({ navigation, language = 'English' }) => {
-  const { theme } = useTheme();
+  const { theme, isDarkMode } = useTheme();
+  const isFocused = useIsFocused();
   const { login: authLogin } = useAuth();
   const t = translations[language];
 
@@ -225,22 +267,36 @@ const RegisterScreen = ({ navigation, language = 'English' }) => {
   const confirmRef = useRef(null);
   const recoveryRef = useRef(null);
 
+  // ---- Tutorial refs ----
+  const phoneContainerRef = useRef(null);
+  const usernameContainerRef = useRef(null);
+  const passwordContainerRef = useRef(null);
+  const confirmContainerRef = useRef(null);
+  const recoveryContainerRef = useRef(null);
+  const termsCheckboxRef = useRef(null);
+  const registerButtonRef = useRef(null);
+
+  // ---- Tutorial state ----
+  const [showTutorial, finishTutorial] = useScreenTutorial(
+    REGISTER_TUTORIAL_ID,
+    isFocused && !loading,
+    REGISTER_TUTORIAL_DELAY_MS,
+    step
+  );
+
   // Real‑time validation statuses
   const [phoneStatus, setPhoneStatus] = useState({ checking: false, valid: false, message: '' });
   const [usernameStatus, setUsernameStatus] = useState({ checking: false, valid: false, message: '' });
   const [recoveryStatus, setRecoveryStatus] = useState({ checking: false, valid: false, message: '' });
 
-  // Debounce timer
   const debounceRef = useRef(null);
 
-  // Clear errors after timeout
   useEffect(() => {
     if (!error) return;
     const timer = setTimeout(() => setError(''), 2500);
     return () => clearTimeout(timer);
   }, [error]);
 
-  // Step hints (only for steps 2,3,4)
   useEffect(() => {
     if (step < 2 || step > 4) {
       setShowHint(false);
@@ -289,7 +345,6 @@ const RegisterScreen = ({ navigation, language = 'English' }) => {
     };
   }, [step, t.step2HintTitle, t.step2HintMessages, t.step3HintTitle, t.step3HintMessages, t.step4HintTitle, t.step4HintMessages, fadeAnim]);
 
-  // ---------- API check functions ----------
   const checkPhone = async (phone) => {
     if (!phone || phone.length < 10) {
       setPhoneStatus({ checking: false, valid: false, message: t.phoneLengthError });
@@ -344,7 +399,6 @@ const RegisterScreen = ({ navigation, language = 'English' }) => {
     }
     setRecoveryStatus({ checking: true, valid: false, message: t.checking });
     try {
-      // Uses the same backend endpoint as old ID check
       const res = await axios.post(`${BASE_URL}/api/auth/check-id`, { idNumber: number });
       const exists = res?.data?.exists;
       if (exists) {
@@ -357,7 +411,6 @@ const RegisterScreen = ({ navigation, language = 'English' }) => {
     }
   };
 
-  // Debounced check
   const debouncedCheck = (field, value) => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
@@ -367,7 +420,6 @@ const RegisterScreen = ({ navigation, language = 'English' }) => {
     }, 500);
   };
 
-  // ---------- Input handlers ----------
   const handlePhoneChange = (text) => {
     let digits = text.replace(/\D/g, '');
     if (!digits.startsWith('07')) digits = '07';
@@ -384,7 +436,6 @@ const RegisterScreen = ({ navigation, language = 'English' }) => {
   };
 
   const handlePasswordChange = (text) => {
-    // Remove spaces
     const cleaned = text.replace(/\s/g, '');
     setFormData({ ...formData, password: cleaned });
     setError('');
@@ -404,10 +455,8 @@ const RegisterScreen = ({ navigation, language = 'English' }) => {
     debouncedCheck('recovery', digits);
   };
 
-  // ---------- Step validation ----------
   const validateStep = () => {
     if (step === 1) {
-      // Both phone and username must be valid
       if (!phoneStatus.valid) {
         setError(phoneStatus.message || t.fillPhone);
         return false;
@@ -467,7 +516,6 @@ const RegisterScreen = ({ navigation, language = 'English' }) => {
 
   const nextStep = () => {
     if (validateStep()) {
-      // Clear username suggestions when leaving step 1
       if (step === 1) setUsernameSuggestions([]);
       setStep(step + 1);
     }
@@ -475,11 +523,10 @@ const RegisterScreen = ({ navigation, language = 'English' }) => {
 
   const prevStep = () => setStep(step - 1);
 
-  // ---------- Registration submission ----------
-const handleRegister = async () => {
-  if (!validateStep()) return;
-  setLoading(true);
-  setError('');
+  const handleRegister = async () => {
+    if (!validateStep()) return;
+    setLoading(true);
+    setError('');
 
     const registerPayload = {
       phone: normalizeForAuth(formData.phone) || formData.phone,
@@ -488,41 +535,38 @@ const handleRegister = async () => {
       password: formData.password,
     };
 
-  try {
-    await axios.post(`${BASE_URL}/api/auth/register`, registerPayload);
+    try {
+      await axios.post(`${BASE_URL}/api/auth/register`, registerPayload);
 
-    // Auto‑login immediately after registration
-    const loginResult = await authLogin(normalizeForAuth(formData.phone) || formData.phone, formData.password);
-    if (loginResult.success) {
-      // Navigate straight to the main app – no modal
-      navigation.replace('Main');
-    } else {
-      // Login failed – shouldn’t normally happen, but handle gracefully
-      setError('Account created but automatic login failed. Please log in manually.');
+      const loginResult = await authLogin(normalizeForAuth(formData.phone) || formData.phone, formData.password);
+      if (loginResult.success) {
+        navigation.replace('Main');
+      } else {
+        setError('Account created but automatic login failed. Please log in manually.');
+        setSuccessTitle(t.registerFailedTitle);
+        setSuccessMessage('Login failed. Please go to the login screen.');
+        setSuccessModalVisible(true);
+      }
+    } catch (err) {
+      console.error('Registration error:', err);
+      let message = t.registerFailed;
+      if (err?.response) {
+        const backendMsg = err.response.data?.message;
+        if (backendMsg?.includes('phone')) message = t.userExists;
+        else if (backendMsg?.includes('username')) message = t.usernameTaken;
+        else if (backendMsg?.includes('ID')) message = t.recoveryNumberTaken;
+        else message = backendMsg || t.registerFailed;
+      } else if (err?.request) {
+        message = 'Network error – cannot reach backend. Check the app IP and backend server.';
+      }
+      setError(message);
       setSuccessTitle(t.registerFailedTitle);
-      setSuccessMessage('Login failed. Please go to the login screen.');
+      setSuccessMessage(message);
       setSuccessModalVisible(true);
+    } finally {
+      setLoading(false);
     }
-  } catch (err) {
-    console.error('Registration error:', err);
-    let message = t.registerFailed;
-    if (err?.response) {
-      const backendMsg = err.response.data?.message;
-      if (backendMsg?.includes('phone')) message = t.userExists;
-      else if (backendMsg?.includes('username')) message = t.usernameTaken;
-      else if (backendMsg?.includes('ID')) message = t.recoveryNumberTaken;
-      else message = backendMsg || t.registerFailed;
-    } else if (err?.request) {
-      message = 'Network error – cannot reach backend. Check the app IP and backend server.';
-    }
-    setError(message);
-    setSuccessTitle(t.registerFailedTitle);
-    setSuccessMessage(message);
-    setSuccessModalVisible(true);
-  } finally {
-    setLoading(false);
-  }
-};
+  };
 
   const handleTermsCheck = () => {
     const nextValue = !formData.termsAgreed;
@@ -535,7 +579,6 @@ const handleRegister = async () => {
     setError('');
   };
 
-  // ---------- UI helpers ----------
   const renderStatusIcon = (status) => {
     if (status.checking) {
       return <ActivityIndicator size="small" color={theme.textSecondary} />;
@@ -584,15 +627,72 @@ const handleRegister = async () => {
     </View>
   );
 
+  // ---- Tutorial steps for the current step ----
+  const tutorialSteps = useMemo(() => {
+    if (loading) return [];
+    const steps = [];
+
+    if (step === 1) {
+      steps.push(
+        {
+          getTarget: () => phoneContainerRef.current,
+          title: t.tStep1PhoneTitle,
+          body: t.tStep1PhoneBody,
+        },
+        {
+          getTarget: () => usernameContainerRef.current,
+          title: t.tStep1UserTitle,
+          body: t.tStep1UserBody,
+        }
+      );
+    } else if (step === 2) {
+      steps.push(
+        {
+          getTarget: () => passwordContainerRef.current,
+          title: t.tStep2PassTitle,
+          body: t.tStep2PassBody,
+        },
+        {
+          getTarget: () => confirmContainerRef.current,
+          title: t.tStep2ConfirmTitle,
+          body: t.tStep2ConfirmBody,
+        }
+      );
+    } else if (step === 3) {
+      steps.push({
+        getTarget: () => recoveryContainerRef.current,
+        title: t.tStep3RecoveryTitle,
+        body: t.tStep3RecoveryBody,
+      });
+    } else if (step === 4) {
+      steps.push(
+        {
+          getTarget: () => termsCheckboxRef.current,
+          title: t.tStep4TermsTitle,
+          body: t.tStep4TermsBody,
+        },
+        {
+          getTarget: () => registerButtonRef.current,
+          title: t.tStep4RegisterTitle,
+          body: t.tStep4RegisterBody,
+        }
+      );
+    }
+
+    return steps;
+  }, [step, t, loading]);
+
   const renderStepContent = () => {
     switch (step) {
-      // Step 1: Phone + Username
       case 1:
         return (
           <>
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.phoneLabel}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+              <View
+                ref={phoneContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border }]}
+              >
                 <Ionicons name="call-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={phoneRef}
@@ -620,7 +720,10 @@ const handleRegister = async () => {
 
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.usernameLabel}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+              <View
+                ref={usernameContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border }]}
+              >
                 <Ionicons name="person-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={usernameRef}
@@ -632,7 +735,6 @@ const handleRegister = async () => {
                   autoCapitalize="none"
                   returnKeyType="done"
                   onSubmitEditing={() => {
-                    // Optionally go to next step if valid
                     if (validateStep()) nextStep();
                   }}
                 />
@@ -667,13 +769,15 @@ const handleRegister = async () => {
           </>
         );
 
-      // Step 2: Password + Confirm Password
       case 2:
         return (
           <>
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.passwordLabel}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+              <View
+                ref={passwordContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border }]}
+              >
                 <Ionicons name="lock-closed-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={passwordRef}
@@ -697,7 +801,10 @@ const handleRegister = async () => {
 
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.confirmPasswordLabel}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+              <View
+                ref={confirmContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border }]}
+              >
                 <Ionicons name="lock-closed-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={confirmRef}
@@ -720,12 +827,14 @@ const handleRegister = async () => {
           </>
         );
 
-      // Step 3: Recovery Number
       case 3:
         return (
           <View style={styles.inputGroup}>
             <Text style={[styles.label, { color: theme.text }]}>{t.recoveryNumberLabel}</Text>
-            <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+            <View
+              ref={recoveryContainerRef}
+              style={[styles.inputContainer, { borderColor: theme.border }]}
+            >
               <Ionicons name="keypad-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
               <TextInput
                 ref={recoveryRef}
@@ -751,20 +860,21 @@ const handleRegister = async () => {
           </View>
         );
 
-      // Step 4: Terms & Conditions
       case 4:
         return (
           <View style={styles.agreementContainer}>
-            <TouchableOpacity style={styles.checkboxRow} onPress={handleTermsCheck}>
-              <Ionicons
-                name={formData.termsAgreed ? 'checkbox-outline' : 'square-outline'}
-                size={24}
-                color={theme.accent}
-              />
-              <Text style={[styles.checkboxLabel, { color: theme.text }]}>
-                {t.termsCheck}
-              </Text>
-            </TouchableOpacity>
+            <View ref={termsCheckboxRef}>
+              <TouchableOpacity style={styles.checkboxRow} onPress={handleTermsCheck}>
+                <Ionicons
+                  name={formData.termsAgreed ? 'checkbox-outline' : 'square-outline'}
+                  size={24}
+                  color={theme.accent}
+                />
+                <Text style={[styles.checkboxLabel, { color: theme.text }]}>
+                  {t.termsCheck}
+                </Text>
+              </TouchableOpacity>
+            </View>
             <TouchableOpacity onPress={() => setTermsExpanded((prev) => !prev)}>
               <Text style={[styles.termsLink, { color: theme.accent }]}>
                 {t.termsLink}
@@ -787,7 +897,6 @@ const handleRegister = async () => {
     }
   };
 
-  // ---------- Main render ----------
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['top','left','right']}>
       <KeyboardAvoidingView
@@ -796,7 +905,7 @@ const handleRegister = async () => {
         style={{ flex: 1 }}
       >
         <ScrollView contentContainerStyle={styles.scrollContainer} keyboardShouldPersistTaps="handled">
-          <Image source={Logo} style={[styles.logos, { width: 100, height: 95 }]} />
+          <Image source={normalizeImageSource(Logo)} style={[styles.logos, { width: 100, height: 95 }]} />
           <View style={styles.header}>
             <Text style={[styles.title, { color: theme.text }]}>{t.title}</Text>
             {step === 1 && (
@@ -804,10 +913,10 @@ const handleRegister = async () => {
             )}
             {(step === 2 || step === 3 || step === 4) && showHint && (
               <Animated.View style={[styles.stepHint, { opacity: fadeAnim }]}>
-                <Text style={[styles.stepHintTitle, { color: theme.textSecondary }]}> 
+                <Text style={[styles.stepHintTitle, { color: theme.textSecondary }]}>
                   {step === 2 ? t.step2HintTitle : step === 3 ? t.step3HintTitle : t.step4HintTitle}
                 </Text>
-                <Text style={[styles.stepHintText, { color: theme.text }]}> 
+                <Text style={[styles.stepHintText, { color: theme.text }]}>
                   {step === 2
                     ? t.step2HintMessages[hintIndex]
                     : step === 3
@@ -848,6 +957,7 @@ const handleRegister = async () => {
                 </TouchableOpacity>
               ) : (
                 <TouchableOpacity
+                  ref={registerButtonRef}
                   style={[styles.button, styles.registerButton, { backgroundColor: theme.accent }]}
                   onPress={handleRegister}
                   disabled={loading}
@@ -873,7 +983,6 @@ const handleRegister = async () => {
         </ScrollView>
       </KeyboardAvoidingView>
 
-      {/* Success / Failure Modal */}
       <Modal
         transparent
         visible={successModalVisible}
@@ -898,6 +1007,17 @@ const handleRegister = async () => {
           </View>
         </View>
       </Modal>
+
+      {/* ============ REGISTER STEP TUTORIAL ============ */}
+      <ScreenTutorialOverlay
+        visible={showTutorial}
+        steps={tutorialSteps}
+        isDarkMode={isDarkMode}
+        language={language}
+        onFinish={finishTutorial}
+        padding={5}
+        dimOpacity={0}
+      />
     </SafeAreaView>
   );
 };
@@ -914,10 +1034,7 @@ const styles = StyleSheet.create({
     zIndex: 999,
     elevation: 999,
   },
-  logos: {
-    marginTop: 20,
-    alignSelf: 'center',
-  },
+  logos: { marginTop: 20, alignSelf: 'center' },
   header: { alignItems: 'center', marginBottom: 30 },
   title: { fontSize: 28, fontWeight: 'bold', marginBottom: 40 },
   subtitle: { fontSize: 14, textAlign: 'center', bottom: 10 },
@@ -939,12 +1056,8 @@ const styles = StyleSheet.create({
   },
   stepWrapper: { flexDirection: 'row', alignItems: 'center', flex: 1, left: 40 },
   stepCircle: {
-    width: 35,
-    height: 35,
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
+    width: 35, height: 35, borderRadius: 18,
+    justifyContent: 'center', alignItems: 'center', borderWidth: 1,
   },
   stepNumber: { fontSize: 16, fontWeight: 'bold' },
   stepLine: { flex: 1, height: 2, marginHorizontal: 8 },
@@ -952,12 +1065,8 @@ const styles = StyleSheet.create({
   inputGroup: { marginBottom: 20 },
   label: { fontSize: 14, fontWeight: '500', marginBottom: 6 },
   inputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    height: 52,
+    flexDirection: 'row', alignItems: 'center',
+    borderWidth: 1, borderRadius: 12, paddingHorizontal: 12, height: 52,
   },
   inputIcon: { marginRight: 10 },
   input: { flex: 1, fontSize: 16 },
@@ -970,20 +1079,9 @@ const styles = StyleSheet.create({
   checkboxRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
   checkboxLabel: { fontSize: 14, marginLeft: 10, flex: 1 },
   termsLink: { fontSize: 14, textAlign: 'center', marginTop: 8, textDecorationLine: 'underline' },
-  termsExpandedBox: {
-    marginTop: 5,
-    padding: 10,
-    borderWidth: 1,
-    borderRadius: 22,
-    maxHeight: 220,
-  },
-  termsExpandedScroll: {
-    maxHeight: 200,
-  },
-  termsExpandedText: {
-    fontSize: 13,
-    lineHeight: 18,
-  },
+  termsExpandedBox: { marginTop: 5, padding: 10, borderWidth: 1, borderRadius: 22, maxHeight: 220 },
+  termsExpandedScroll: { maxHeight: 200 },
+  termsExpandedText: { fontSize: 13, lineHeight: 18 },
   errorText: { fontSize: 13, textAlign: 'center', marginBottom: 16 },
   buttonRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 20 },
   button: { flex: 1, height: 48, borderRadius: 24, justifyContent: 'center', alignItems: 'center' },
@@ -997,17 +1095,10 @@ const styles = StyleSheet.create({
   loginRedirectText: { fontSize: 14 },
   loginLink: { fontSize: 14, fontWeight: '600', marginLeft: 4 },
   modalOverlay: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+    flex: 1, justifyContent: 'center', alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.5)',
   },
-  modalContent: {
-    width: width * 0.85,
-    borderRadius: 16,
-    padding: 20,
-    maxHeight: '70%',
-  },
+  modalContent: { width: width * 0.85, borderRadius: 16, padding: 20, maxHeight: '70%' },
   modalTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 12, textAlign: 'center' },
   modalText: { fontSize: 14, lineHeight: 20 },
   modalButton: { paddingVertical: 12, borderRadius: 8, alignItems: 'center' },

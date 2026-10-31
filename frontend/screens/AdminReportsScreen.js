@@ -1,3 +1,4 @@
+
 // screens/AdminReportsScreen.js
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
@@ -26,6 +27,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import AdminScreenHeader from '../components/AdminScreenHeader';
+import { showAdminFeedback } from '../utils/adminFeedback';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width, height } = Dimensions.get('window');
 const BOTTOM_SHEET_MAX_HEIGHT = height * 0.75;
@@ -113,7 +117,7 @@ const ImageSlider = ({ images }) => {
         scrollEventThrottle={16}
         keyExtractor={(_, idx) => idx.toString()}
         renderItem={({ item }) => (
-          <Image source={{ uri: item }} style={styles.sliderImage} resizeMode="cover" />
+          <Image source={normalizeImageSource({ uri: item })} style={styles.sliderImage} resizeMode="cover" />
         )}
       />
       {images.length > 1 && (
@@ -144,11 +148,6 @@ const AdminReportsScreen = ({ navigation, language }) => {
   // Bottom sheet state
   const [selectedReport, setSelectedReport] = useState(null);
   const [sheetVisible, setSheetVisible] = useState(false);
-
-  // Status modal
-  const [statusModalVisible, setStatusModalVisible] = useState(false);
-  const [statusTitle, setStatusTitle] = useState('');
-  const [statusMessage, setStatusMessage] = useState('');
 
   // Image Carousel (existing, still usable)
   const [carouselVisible, setCarouselVisible] = useState(false);
@@ -189,9 +188,7 @@ const AdminReportsScreen = ({ navigation, language }) => {
   const getToken = async () => AsyncStorage.getItem('adminToken');
 
   const showStatus = (title, message) => {
-    setStatusTitle(title);
-    setStatusMessage(message);
-    setStatusModalVisible(true);
+    showAdminFeedback(title, message, title === t.error ? 'error' : 'success', { buttonText: t.ok });
   };
 
   const openCarousel = (images, index = 0) => {
@@ -219,14 +216,14 @@ const AdminReportsScreen = ({ navigation, language }) => {
         setReports(reportList);
         setFilteredReports(reportList);
       } else {
-        Alert.alert(t.error, 'Failed to fetch reports.');
+        showAdminFeedback(t.error, 'Failed to fetch reports.', 'error');
       }
     } catch (error) {
       console.error('Fetch reports error:', error);
       if (error.response?.status === 401) {
         navigation.replace('AdminLogin');
       } else {
-        Alert.alert(t.error, 'An error occurred while fetching reports.');
+        showAdminFeedback(t.error, 'An error occurred while fetching reports.', 'error');
       }
     } finally {
       setRefreshing(false);
@@ -272,7 +269,7 @@ const AdminReportsScreen = ({ navigation, language }) => {
             closeSheet();
             fetchReports();
           } catch (e) {
-            Alert.alert(t.error, 'Failed to ignore report.');
+            showAdminFeedback(t.error, 'Failed to ignore report.', 'error');
           }
         },
       },
@@ -307,29 +304,6 @@ const AdminReportsScreen = ({ navigation, language }) => {
     setViewPostModalVisible(true);
   };
 
-  // ---------- Render modals ----------
-  const renderStatusModal = () => (
-    <Modal transparent visible={statusModalVisible} animationType="fade">
-      <View style={styles.modalOverlay}>
-        <View
-          style={[
-            styles.modalContent,
-            { backgroundColor: theme.background, borderColor: theme.border },
-          ]}
-        >
-          <Text style={[styles.modalTitle, { color: theme.text }]}>{statusTitle}</Text>
-          <Text style={[styles.modalText, { color: theme.textSecondary }]}>{statusMessage}</Text>
-          <TouchableOpacity
-            style={[styles.modalButton, { backgroundColor: theme.accent }]}
-            onPress={() => setStatusModalVisible(false)}
-          >
-            <Text style={styles.modalButtonText}>{t.ok}</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
-  );
-
   const renderCarousel = () => (
     <Modal
       visible={carouselVisible}
@@ -352,7 +326,7 @@ const AdminReportsScreen = ({ navigation, language }) => {
           keyExtractor={(_, index) => index.toString()}
           renderItem={({ item }) => (
             <View style={styles.carouselSlide}>
-              <Image source={{ uri: item }} style={styles.carouselImage} resizeMode="contain" />
+              <Image source={normalizeImageSource({ uri: item })} style={styles.carouselImage} resizeMode="contain" />
             </View>
           )}
           initialScrollIndex={carouselIndex}
@@ -395,7 +369,7 @@ const AdminReportsScreen = ({ navigation, language }) => {
         animationType="slide"
         onRequestClose={() => setViewPostModalVisible(false)}
       >
-        <SafeAreaView style={[styles.viewPostContainer, { backgroundColor: theme.background }]}>
+        <SafeAreaView style={[styles.viewPostContainer, { backgroundColor: theme.background }]} edges={['left', 'right', 'bottom']}>
           {/* Header */}
           <View style={[styles.viewPostHeader, { borderBottomColor: theme.border }]}>
             <TouchableOpacity onPress={() => setViewPostModalVisible(false)}>
@@ -494,7 +468,7 @@ const AdminReportsScreen = ({ navigation, language }) => {
                 activeOpacity={0.9}
               >
                 {imageUrl ? (
-                  <Image source={{ uri: imageUrl }} style={styles.sheetImage} resizeMode="cover" />
+                  <Image source={normalizeImageSource({ uri: imageUrl })} style={styles.sheetImage} resizeMode="cover" />
                 ) : (
                   <View style={[styles.sheetImagePlaceholder, { backgroundColor: theme.border }]}>
                     <Ionicons name="image-outline" size={40} color={theme.textSecondary} />
@@ -612,7 +586,7 @@ const AdminReportsScreen = ({ navigation, language }) => {
               activeOpacity={0.9}
             >
               {imageUrl ? (
-                <Image source={{ uri: imageUrl }} style={styles.reportImage} />
+                <Image source={normalizeImageSource({ uri: imageUrl })} style={styles.reportImage} />
               ) : (
                 <View
                   style={[
@@ -709,7 +683,7 @@ const AdminReportsScreen = ({ navigation, language }) => {
 
   // ---------- Main render ----------
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['left', 'right', 'bottom']}>
       {/* Header */}
       <AdminScreenHeader
         title={t.reports}
@@ -733,7 +707,6 @@ const AdminReportsScreen = ({ navigation, language }) => {
       )}
 
       {/* Modals */}
-      {renderStatusModal()}
       {renderBottomSheet()}
       {renderCarousel()}
       {renderViewPostModal()}  {/* NEW */}
@@ -781,11 +754,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: 12,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 2,
   },
   reportContent: { flex: 1 },
   reportHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },

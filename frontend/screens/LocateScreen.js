@@ -1,5 +1,5 @@
 // screens/LocateScreen.js
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   StyleSheet,
@@ -9,13 +9,14 @@ import {
   TextInput,
   TouchableOpacity,
   Alert,
+  BackHandler,
   Dimensions,
   FlatList,
   TouchableWithoutFeedback,
-  Modal,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useTheme } from '../context/ThemeContext';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
 import { showAppAlert } from '../context/MessageSheetContext';
 import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
@@ -23,14 +24,19 @@ import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
-import { useFocusEffect } from '@react-navigation/native';
 import Compass from '../components/Compass';
 import { networkStatus } from '../services/networkStatus';
 import { mapOfflineCache } from '../services/mapOfflineCache';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
+import useScreenTutorial from '../hooks/useScreenTutorial';
+import { getAddressText } from '../utils/address';
 
 const { height, width: SCREEN_WIDTH } = Dimensions.get('window');
 const EXPANDED_SEARCH_WIDTH = SCREEN_WIDTH * 0.7;
+
+// ---- Tutorial config ---------------------------------------------------------
+const LOCATE_TUTORIAL_DELAY_MS = 900;
 
 const travelSpeeds = {
   walking: 3.6,
@@ -46,7 +52,7 @@ const modeIcons = {
   car: 'car-outline',
 };
 
-// ----- CATEGORIES (full) -----
+// ----- CATEGORIES -----
 const CATEGORIES = [
   { id: 'location', label: 'Location', icon: 'map-marker' },
   { id: 'shop', label: 'Shop', icon: 'store' },
@@ -107,18 +113,7 @@ const CATEGORIES = [
 ];
 
 const getAddressString = (place) => {
-  if (!place) return 'No address';
-  if (typeof place.address === 'string') return place.address;
-  if (place.address && typeof place.address === 'object') {
-    if (place.address.full && typeof place.address.full === 'string') return place.address.full;
-    const parts = [];
-    if (place.address.district) parts.push(place.address.district);
-    if (place.address.sector) parts.push(place.address.sector);
-    if (place.address.cell) parts.push(place.address.cell);
-    if (parts.length > 0) return parts.join(', ');
-    return 'No address';
-  }
-  return 'No address';
+  return getAddressText(place?.address, 'No address');
 };
 
 const haversineDistance = (lat1, lon1, lat2, lon2) => {
@@ -137,6 +132,7 @@ const haversineDistance = (lat1, lon1, lat2, lon2) => {
 function LocateScreen({ navigation, route, language = 'English' }) {
   const { theme, isDarkMode } = useTheme();
   const { user } = useAuth();
+  const isFocused = useIsFocused();
 
   const translations = {
     English: {
@@ -186,6 +182,17 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       offlineMap: 'Offline map - showing saved map data',
       offlineSearch: 'Internet connection required to search for new places.',
       offlineRoute: 'Internet connection required to calculate a new route.',
+      // Tutorial
+      tSearchTitle: 'Search places',
+      tSearchBody: 'Tap here to search for places, shops, or malls by name or category.',
+      tSavedTitle: 'Saved places',
+      tSavedBody: 'Tap the heart to see places and shops you have saved for later.',
+      tMyShopsTitle: 'My shops',
+      tMyShopsBody: 'Tap the store icon to manage the shops you have added. You can open or delete them.',
+      tLocateTitle: 'Find me',
+      tLocateBody: 'Tap here to center the map on your current location.',
+      tCompassTitle: 'Compass',
+      tCompassBody: 'Tap here to open the compass and see which direction you are facing.',
     },
     Kinyarwanda: {
       loading: 'Turigutunganya…',
@@ -234,6 +241,17 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       offlineMap: 'Ikarita itari kuri interneti - herekana amakuru wabitse',
       offlineSearch: 'Internet irakenewe kugirango ushakishe ahandi hantu.',
       offlineRoute: 'Internet irakenewe kugirango ubare indi nzira.',
+      // Tutorial
+      tSearchTitle: 'Shakisha ahantu',
+      tSearchBody: 'Kanda hano ushakishe ahantu, amaduka, cyangwa amaduka manini ku izina cyangwa icyiciro.',
+      tSavedTitle: 'Ahantu wabitse',
+      tSavedBody: 'Kanda ku mutima urebe ahantu n’amaduka wabitse.',
+      tMyShopsTitle: 'Amaduka yanjye',
+      tMyShopsBody: 'Kanda ku kamenyetso k’iduka ucunge amaduka wongeyeho. Ushobora kuyafungura cyangwa uyasive.',
+      tLocateTitle: 'Nshakira',
+      tLocateBody: 'Kanda hano uhuze ikarita n’ahantu uri ubu.',
+      tCompassTitle: 'Kompasi',
+      tCompassBody: 'Kanda hano ufungure kompasi urebe icyerekezo ugana.',
     },
   };
   const t = translations[language] || translations.English;
@@ -266,9 +284,43 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   const [myShopsVisible, setMyShopsVisible] = useState(false);
   const [savedPlacesVisible, setSavedPlacesVisible] = useState(false);
+  const shopSheetTranslateY = useRef(new Animated.Value(height * 0.75)).current;
   const [savedPlaces, setSavedPlaces] = useState([]);
   const [favoriteIds, setFavoriteIds] = useState([]);
-  const autoOpenedMyShops = useRef(false);
+
+  const shopSheetVisible = myShopsVisible || savedPlacesVisible;
+
+  // ---- Tutorial refs ----
+  const searchIconRef = useRef(null);
+  const savedBtnRef = useRef(null);
+  const myShopsBtnRef = useRef(null);
+  const locateBtnRef = useRef(null);
+  const compassBtnRef = useRef(null);
+
+  // ---- Tutorial hook (same pattern as WelcomeHome) ----
+  const [showTutorial, finishTutorial] = useScreenTutorial(
+    'locate',
+    isFocused && !loading,
+    LOCATE_TUTORIAL_DELAY_MS
+  );
+
+  // ---- Single-sheet enforcement ----
+  useEffect(() => {
+    if (myShopsVisible && savedPlacesVisible) {
+      setSavedPlacesVisible(false);
+    }
+  }, [myShopsVisible, savedPlacesVisible]);
+
+  useEffect(() => {
+    if (!shopSheetVisible) return;
+    shopSheetTranslateY.setValue(height * 0.75);
+    Animated.spring(shopSheetTranslateY, {
+      toValue: 0,
+      useNativeDriver: true,
+      speed: 12,
+      bounciness: 4,
+    }).start();
+  }, [shopSheetVisible, shopSheetTranslateY]);
 
   const [userLocation, setUserLocation] = useState(null);
   const [matchingResults, setMatchingResults] = useState([]);
@@ -282,11 +334,8 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   const isClearingRoute = useRef(false);
   const isRouteActive = useRef(false);
-
-  // NEW: ensures nearest place centering happens only once
   const initialNearestSet = useRef(false);
 
-  // Heading callback from Compass
   const handleHeadingChange = useCallback((newHeading) => {
     setHeading(newHeading);
     setMapBearing(newHeading);
@@ -299,7 +348,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   }, []);
 
-  // Animated search
   const [searchExpanded, setSearchExpanded] = useState(false);
   const searchWidthAnim = useRef(new Animated.Value(0)).current;
 
@@ -317,7 +365,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     outputRange: [46, EXPANDED_SEARCH_WIDTH],
   });
 
-  // Auth helpers
   const isAuthenticated = async () => {
     const token = await AsyncStorage.getItem('userToken');
     return !!token;
@@ -356,7 +403,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         axios.get(`${BASE_URL}/api/mall-shops/mine`, { headers }),
       ]);
 
-      const places = placesResponse.data?.places || [];
+      const placesRes = placesResponse.data?.places || [];
       const mallShops = shopsResponse.data?.shops || [];
       const normalizeOwnerId = (value) => {
         if (!value) return null;
@@ -364,7 +411,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         return String(value);
       };
 
-      const hasPlaceAlready = places.some(place => {
+      const hasPlaceAlready = placesRes.some(place => {
         const ownerId = normalizeOwnerId(place.userId || place.owner || place.ownerId);
         return ownerId && ownerId === String(userId);
       });
@@ -389,7 +436,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     return false;
   }, [navigation, user, showAppAlert]);
 
-  // Location & loading
+  // Location
   useEffect(() => {
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -437,7 +484,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   };
 
-  // Fetch places, using the persistent cache when offline.
   const fetchPlaces = async () => {
     await loadCachedMapData();
     if (!networkStatus.get().isConnected || !networkStatus.get().isInternetReachable) return;
@@ -477,7 +523,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   };
 
-  // Fetch all mall shops once
   const fetchAllMallShops = async () => {
     const mallIds = places
       .filter(place => place.category === 'shoppingmall')
@@ -551,7 +596,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   }, [user?._id, user?.id]);
 
-  // Favourites
   const loadFavoriteIds = async () => {
     try {
       const favJson = await AsyncStorage.getItem('favorites');
@@ -567,7 +611,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   useFocusEffect(
     useCallback(() => {
-      autoOpenedMyShops.current = false;
       loadFavoriteIds();
       fetchMyMallShops();
     }, [fetchMyMallShops])
@@ -582,7 +625,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   }), []);
 
-  // Send places to map
   const sendPlacesToMap = () => {
     if (!webViewRef.current || places.length === 0) return;
     const placesData = places.map(p => {
@@ -641,7 +683,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   }, [mapReady, places]);
 
-  // If route requests to show mall shops on open, display them on the map
   useEffect(() => {
     const params = route?.params || {};
     if (!params.showMallShops) return;
@@ -662,7 +703,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     tryShowMallShops();
   }, [route?.params, mapReady, allMallShopsLoaded]);
 
-  // Center on the user in Rwanda, or the closest shop when they are outside it.
+  // Center on user / nearest
   useEffect(() => {
     if (initialNearestSet.current) return;
     if (!mapReady || !userLocation || !webViewRef.current) return;
@@ -746,8 +787,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     initialNearestSet.current = true;
   }, [mapReady, places, allMallShops, allMallShopsLoaded, userLocation]);
 
-  // Search logic (mall shops filtered locally)
-  const performSearch = useCallback((query) => {
+  const performSearch = (query) => {
     const trimmed = query.trim();
     setShowSearchPanel(trimmed.length > 0);
 
@@ -763,7 +803,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
     const lowerQuery = trimmed.toLowerCase();
 
-    // Local places search
     const matched = places.filter(p => {
       const searchIn = (value) => {
         if (!value) return false;
@@ -791,7 +830,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     setMatchingResults(matched);
     mapOfflineCache.saveSearch(trimmed, matched).catch(() => {});
 
-    // Nearby shops
     let nearby = [];
     if (userLocation) {
       const withDistance = places.map(p => {
@@ -811,7 +849,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       nearby = [];
     }
 
-    // Mall shops
     let mallShops = [];
     if (allMallShopsLoaded) {
       mallShops = allMallShops.filter(shop => {
@@ -838,7 +875,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         `);
       }
     }
-  }, [places, userLocation, allMallShops, allMallShopsLoaded, isOnline, fetchShopsBySearch]);
+  };
 
   const fetchShopsBySearch = useCallback(async (query) => {
     if (!query.trim()) {
@@ -1002,7 +1039,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       icon: 'store',
       lat: mallLat,
       lon: mallLon,
-      address: shop.address || shop.mall?.address || '',
+      address: getAddressText(shop.address || shop.mall?.address),
       mallName,
       shopNumber: shop.shopNumber || '',
       images: {
@@ -1124,7 +1161,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     );
   };
 
-  // WebView
   const handleLoadEnd = () => {
     setLoading(false);
     setMapReady(true);
@@ -1186,7 +1222,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   };
 
-  // -------------------- CLEAR ROUTE --------------------
   const clearRoute = () => {
     isClearingRoute.current = true;
     if (webViewRef.current) {
@@ -1204,7 +1239,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }, 500);
   };
 
-  // -------------------- DRAW ROUTE --------------------
   const drawRouteToPlace = async (place, profile = 'foot') => {
     if (!place?.lat || !place?.lon) return;
 
@@ -1282,7 +1316,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }, [])
   );
 
-  // Saved Places
   const loadSavedPlaces = async () => {
     try {
       const [favoritesJson, favoriteShopsJson] = await Promise.all([
@@ -1333,25 +1366,91 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   };
 
+  // ---- Single-sheet aware openers ----
   const handleSavedLocationsPress = async () => {
     const can = await requireAuth();
     if (!can) return;
+    if (myShopsVisible) setMyShopsVisible(false);
     setSavedPlacesVisible(true);
     loadSavedPlaces();
   };
 
-  const handleSavedPlacePress = async (place) => {
+  const openMyShops = async () => {
     const can = await requireAuth();
     if (!can) return;
-    setSavedPlacesVisible(false);
-    if (place.isMallShop) {
-      navigation.navigate('ViewShop', { shopId: place._id || place.id });
-      return;
-    }
-    navigation.navigate('ViewPlace', { place });
+    if (savedPlacesVisible) setSavedPlacesVisible(false);
+    setMyShopsVisible(true);
   };
 
-  // My Shops
+  // ---- Locate helper: fly map → highlight → navigate ----
+  const locateAndOpen = useCallback((item, isMallShop) => {
+    const lat =
+      item.lat ??
+      item.location?.latitude ??
+      item.mall?.lat ??
+      0;
+    const lon =
+      item.lon ??
+      item.location?.longitude ??
+      item.mall?.lon ??
+      0;
+
+    if (!lat || !lon || !webViewRef.current) {
+      if (isMallShop) {
+        navigation.navigate('ViewShop', { shopId: item._id || item.id });
+      } else {
+        navigation.navigate('ViewPlace', { place: item });
+      }
+      return;
+    }
+
+    if (isMallShop) {
+      webViewRef.current.injectJavaScript(`
+        if (window.highlightShopLocation) {
+          window.highlightShopLocation(${JSON.stringify({
+            lat,
+            lon,
+            name: item.name || '',
+            mallName: item.mall?.name || item.mallName || '',
+          })});
+        }
+      `);
+    } else {
+      setSingleSelectedPlaceId(item._id || item.id);
+      webViewRef.current.injectJavaScript(`
+        if (window.mapInstance) {
+          window.mapInstance.flyTo({ center: [${lon}, ${lat}], zoom: 17 });
+        }
+        if (window.highlightSinglePlace) {
+          window.highlightSinglePlace('${item._id || item.id}');
+        }
+      `);
+    }
+
+    if (shopRedirectTimerRef.current) clearTimeout(shopRedirectTimerRef.current);
+    shopRedirectTimerRef.current = setTimeout(() => {
+      if (isMallShop) {
+        navigation.navigate('ViewShop', { shopId: item._id || item.id });
+      } else {
+        navigation.navigate('ViewPlace', { place: item });
+      }
+    }, 1500);
+  }, [navigation]);
+
+  const handleSavedPlacePress = async (item) => {
+    const can = await requireAuth();
+    if (!can) return;
+    closeSavedPlaces();
+    locateAndOpen(item, !!item.isMallShop);
+  };
+
+  const handleMyShopPress = async (item) => {
+    const can = await requireAuth();
+    if (!can) return;
+    closeMyShops();
+    locateAndOpen(item, !!item.isMallShop);
+  };
+
   const viewerId = user?._id || user?.id;
   const userPlaces = places.filter(place => {
     const owner = place.userId || place.owner || place.ownerId;
@@ -1362,12 +1461,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     ...userPlaces,
     ...myMallShops.map(shop => ({ ...shop, isMallShop: true })),
   ];
-
-  useEffect(() => {
-    if (!mapReady || !viewerId || myBusinesses.length === 0 || autoOpenedMyShops.current) return;
-    autoOpenedMyShops.current = true;
-    setMyShopsVisible(true);
-  }, [mapReady, viewerId, myBusinesses.length]);
 
   const deletePlace = async (placeId) => {
     Alert.alert(
@@ -1385,7 +1478,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
                 headers: { Authorization: `Bearer ${token}` },
               });
               fetchPlaces();
-              setMyShopsVisible(false);
+              closeMyShops();
             } catch (error) {
               showAppAlert(t.deleteError, t.deleteFailed);
             }
@@ -1418,7 +1511,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
                 });
                 return updatedShops;
               });
-              setMyShopsVisible(false);
+              closeMyShops();
             } catch (error) {
               console.error('Error deleting mall shop:', error);
               showAppAlert(t.deleteError, t.deleteFailed);
@@ -1429,41 +1522,83 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     );
   };
 
+  // ---- My Shop Row (tap to locate, delete button separate) ----
   const renderMyShopItem = ({ item }) => {
     const cat = CATEGORIES.find(c => c.id === item.category);
     const icon = cat ? cat.icon : 'map-marker';
     const addressStr = item.isMallShop
-      ? [item.mallName, item.shopNumber ? `Shop ${item.shopNumber}` : null].filter(Boolean).join(' • ')
+      ? [item.mallName || item.mall?.name, item.shopNumber ? `Shop ${item.shopNumber}` : null].filter(Boolean).join(' • ')
       : getAddressString(item);
     return (
-      <View style={[styles.myShopItem, { borderBottomColor: theme.border }]}>
-        <View style={styles.myShopInfo}>
-          <MaterialCommunityIcons name={item.isMallShop ? 'store' : icon} size={24} color={theme.accent} />
-          <View style={styles.myShopTexts}>
-            <Text style={[styles.myShopName, { color: theme.text }]}>{item.name}</Text>
-            <Text style={[styles.myShopAddress, { color: theme.textSecondary }]}>
-              {addressStr}
-            </Text>
-          </View>
+      <TouchableOpacity
+        style={[styles.myShopItem, { backgroundColor: theme.background }]}
+        onPress={() => handleMyShopPress(item)}
+        activeOpacity={0.75}
+      >
+        <View style={[styles.myShopIconCircle, { backgroundColor: theme.accent + '22' }]}>
+          <MaterialCommunityIcons
+            name={item.isMallShop ? 'store' : icon}
+            size={22}
+            color={theme.accent}
+          />
+        </View>
+        <View style={styles.myShopTexts}>
+          <Text style={[styles.myShopName, { color: theme.text }]} numberOfLines={1}>
+            {item.name}
+          </Text>
+          <Text style={[styles.myShopAddress, { color: theme.textSecondary }]} numberOfLines={1}>
+            {addressStr}
+          </Text>
         </View>
         <TouchableOpacity
-          onPress={() => item.isMallShop ? deleteMallShop(item._id) : deletePlace(item._id)}
+          onPress={(e) => {
+            e?.stopPropagation?.();
+            item.isMallShop ? deleteMallShop(item._id) : deletePlace(item._id);
+          }}
           style={styles.myShopActionBtn}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
         >
-          <Ionicons name="trash-outline" size={22} color="#ff3b30" />
+          <Ionicons name="trash-outline" size={20} color="#ff3b30" />
         </TouchableOpacity>
-      </View>
+      </TouchableOpacity>
     );
   };
 
-  // Map tile & route color (dynamic)
   const tileUrl = isDarkMode
     ? 'https://api.thunderforest.com/transport-dark/{z}/{x}/{y}.png?apikey=ad15f28266904ce28f417e5f7b45e832'
     : 'https://api.thunderforest.com/transport/{z}/{x}/{y}.png?apikey=ad15f28266904ce28f417e5f7b45e832';
 
   const routeColor = isDarkMode ? '#FFFFFF' : '#000000';
 
-  // ---- Map HTML ----
+  // ---- Tutorial steps ----
+  const tutorialSteps = useMemo(() => [
+    {
+      getTarget: () => searchIconRef.current,
+      title: t.tSearchTitle,
+      body: t.tSearchBody,
+    },
+    {
+      getTarget: () => savedBtnRef.current,
+      title: t.tSavedTitle,
+      body: t.tSavedBody,
+    },
+    {
+      getTarget: () => myShopsBtnRef.current,
+      title: t.tMyShopsTitle,
+      body: t.tMyShopsBody,
+    },
+    {
+      getTarget: () => locateBtnRef.current,
+      title: t.tLocateTitle,
+      body: t.tLocateBody,
+    },
+    {
+      getTarget: () => compassBtnRef.current,
+      title: t.tCompassTitle,
+      body: t.tCompassBody,
+    },
+  ], [t]);
+
   const mapHtml = `
     <!DOCTYPE html>
     <html>
@@ -1489,12 +1624,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
           border: 1px solid white;
         }
         .custom-marker i { font-size: 15px; color: white; }
-       
-        @keyframes pulse {
-          0% { transform: scale(1); }
-          50% { transform: scale(1.2); }
-          100% { transform: scale(1); }
-        }
       </style>
     </head>
     <body>
@@ -1822,109 +1951,155 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     );
   };
 
-  const openMyShops = async () => {
-    const can = await requireAuth();
-    if (!can) return;
-    setMyShopsVisible(true);
-  };
+  const dismissShopSheet = useCallback((setVisible) => {
+    Animated.timing(shopSheetTranslateY, {
+      toValue: height * 0.75,
+      duration: 200,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) setVisible(false);
+    });
+  }, [shopSheetTranslateY]);
 
-  const renderMyShopsModal = () => (
-    <Modal visible={myShopsVisible} animationType="slide" transparent onRequestClose={() => setMyShopsVisible(false)}>
-      <View style={styles.myShopsOverlay}>
-        <View style={[styles.myShopsSheet, { backgroundColor: cardBg }]}>
-          <View style={[styles.sheetHandle, { backgroundColor: secondaryText }]} />
-          <View style={styles.modalHeader}>
+  const closeMyShops = useCallback(() => {
+    dismissShopSheet(setMyShopsVisible);
+  }, [dismissShopSheet]);
+
+  const closeSavedPlaces = useCallback(() => {
+    dismissShopSheet(setSavedPlacesVisible);
+  }, [dismissShopSheet]);
+
+  useEffect(() => {
+    if (!shopSheetVisible) return undefined;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (savedPlacesVisible) closeSavedPlaces();
+      else closeMyShops();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [shopSheetVisible, savedPlacesVisible, closeMyShops, closeSavedPlaces]);
+
+  // ---- My Shops Sheet ----
+  const renderMyShopsSheet = () => myShopsVisible ? (
+    <View style={styles.myShopsOverlay}>
+      <Animated.View
+        style={[
+          styles.myShopsSheet,
+          { backgroundColor: cardBg, transform: [{ translateY: shopSheetTranslateY }] },
+        ]}
+      >
+        <View style={[styles.sheetHandle, { backgroundColor: secondaryText }]} />
+        <View style={styles.modalHeader}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <MaterialCommunityIcons name="store-outline" size={24} color={theme.accent} />
             <Text style={[styles.modalTitle, { color: textColor }]}>{t.myShops}</Text>
-            <TouchableOpacity onPress={() => setMyShopsVisible(false)}>
-              <Ionicons name="close" size={28} color={textColor} />
-            </TouchableOpacity>
           </View>
-          {myBusinesses.length === 0 ? (
-            <View style={styles.emptyContainer}>
-              <MaterialCommunityIcons name="store-off" size={60} color={secondaryText} />
-              <Text style={[styles.emptyText, { color: secondaryText }]}>{t.noShopsYet}</Text>
-              <TouchableOpacity
-                style={[styles.addShopBtn, { backgroundColor: theme.accent }]}
-                onPress={async () => {
-                  setMyShopsVisible(false);
-                  const blocked = await checkExistingShopBeforeAdd();
-                  if (!blocked) navigation.navigate('AddShop');
-                }}
-              >
-                <Text style={styles.addShopBtnText}>{t.addFirstShop}</Text>
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <FlatList
-              data={myBusinesses}
-              renderItem={renderMyShopItem}
-              keyExtractor={(item) => `${item.isMallShop ? 'mall-' : 'place-'}${item._id}`}
-              contentContainerStyle={styles.myShopsList}
-            />
-          )}
+          <TouchableOpacity onPress={closeMyShops}>
+            <Ionicons name="close" size={26} color={textColor} />
+          </TouchableOpacity>
         </View>
-      </View>
-    </Modal>
-  );
-
-  const renderSavedPlacesModal = () => (
-    <Modal visible={savedPlacesVisible} animationType="slide" transparent onRequestClose={() => setSavedPlacesVisible(false)}>
-      <View style={styles.myShopsOverlay}>
-        <View style={[styles.myShopsSheet, { backgroundColor: cardBg }]}>
-          <View style={[styles.sheetHandle, { backgroundColor: secondaryText }]} />
-          <View style={styles.modalHeader}>
-            <Text style={[styles.modalTitle, { color: textColor }]}>{t.savedPlaces}</Text>
-            <TouchableOpacity onPress={() => setSavedPlacesVisible(false)}>
-              <Ionicons name="close" size={28} color={textColor} />
-            </TouchableOpacity>
-          </View>
-          {savedPlaces.length === 0 ? (
-            <View style={styles.emptyContainer}>
-              <Ionicons name="heart-outline" size={60} color={secondaryText} />
-              <Text style={[styles.emptyText, { color: secondaryText }]}>
-                {t.noSavedPlaces}
-              </Text>
-              <Text style={[styles.emptySubText, { color: secondaryText }]}>
-                {t.savedPlacesHint}
-              </Text>
-            </View>
-          ) : (
-            <FlatList
-              data={savedPlaces}
-              renderItem={({ item }) => {
-                const cat = CATEGORIES.find(c => c.id === item.category);
-                const icon = cat ? cat.icon : 'map-marker';
-                const addressStr = getAddressString(item);
-                return (
-                  <TouchableOpacity
-                    style={[styles.savedPlaceItem, { borderBottomColor: theme.border }]}
-                    onPress={() => handleSavedPlacePress(item)}
-                  >
-                    <View style={styles.savedPlaceInfo}>
-                      <MaterialCommunityIcons name={item.isMallShop ? 'store' : icon} size={24} color={theme.accent} />
-                      <View style={styles.savedPlaceTexts}>
-                        <Text style={[styles.savedPlaceName, { color: textColor }]}>{item.name}</Text>
-                        <Text style={[styles.savedPlaceAddress, { color: theme.textSecondary }]}>
-                          {item.isMallShop
-                            ? [item.mall?.name || item.mallName, item.shopNumber ? `Shop ${item.shopNumber}` : null].filter(Boolean).join(' • ')
-                            : addressStr}
-                        </Text>
-                      </View>
-                    </View>
-                    <Ionicons name="arrow-forward-circle" size={22} color={theme.textSecondary} />
-                  </TouchableOpacity>
-                );
+        {myBusinesses.length === 0 ? (
+          <View style={styles.emptyContainer}>
+            <MaterialCommunityIcons name="store-off" size={60} color={secondaryText} />
+            <Text style={[styles.emptyText, { color: secondaryText }]}>{t.noShopsYet}</Text>
+            <TouchableOpacity
+              style={[styles.addShopBtn, { backgroundColor: theme.accent }]}
+              onPress={async () => {
+                closeMyShops();
+                const blocked = await checkExistingShopBeforeAdd();
+                if (!blocked) navigation.navigate('AddShop');
               }}
-              keyExtractor={(item) => `${item.isMallShop ? 'shop' : 'place'}-${item._id || item.id}`}
-              contentContainerStyle={styles.savedPlacesList}
-            />
-          )}
-        </View>
-      </View>
-    </Modal>
-  );
+            >
+              <Text style={styles.addShopBtnText}>{t.addFirstShop}</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <FlatList
+            data={myBusinesses}
+            renderItem={renderMyShopItem}
+            keyExtractor={(item) => `${item.isMallShop ? 'mall-' : 'place-'}${item._id}`}
+            contentContainerStyle={styles.myShopsList}
+            ItemSeparatorComponent={() => (
+              <View style={{ height: 8 }} />
+            )}
+          />
+        )}
+      </Animated.View>
+    </View>
+  ) : null;
 
-  // RENDER SEARCH PANEL
+  // ---- Saved Places Sheet ----
+  const renderSavedPlacesSheet = () => savedPlacesVisible ? (
+    <View style={styles.myShopsOverlay}>
+      <Animated.View
+        style={[
+          styles.myShopsSheet,
+          { backgroundColor: cardBg, transform: [{ translateY: shopSheetTranslateY }] },
+        ]}
+      >
+        <View style={[styles.sheetHandle, { backgroundColor: secondaryText }]} />
+        <View style={styles.modalHeader}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Ionicons name="heart" size={22} color={theme.accent} />
+            <Text style={[styles.modalTitle, { color: textColor }]}>{t.savedPlaces}</Text>
+          </View>
+          <TouchableOpacity onPress={closeSavedPlaces}>
+            <Ionicons name="close" size={26} color={textColor} />
+          </TouchableOpacity>
+        </View>
+        {savedPlaces.length === 0 ? (
+          <View style={styles.emptyContainer}>
+            <Ionicons name="heart-outline" size={60} color={secondaryText} />
+            <Text style={[styles.emptyText, { color: secondaryText }]}>
+              {t.noSavedPlaces}
+            </Text>
+            <Text style={[styles.emptySubText, { color: secondaryText }]}>
+              {t.savedPlacesHint}
+            </Text>
+          </View>
+        ) : (
+          <FlatList
+            data={savedPlaces}
+            renderItem={({ item }) => {
+              const cat = CATEGORIES.find(c => c.id === item.category);
+              const icon = cat ? cat.icon : 'map-marker';
+              const addressStr = item.isMallShop
+                ? [item.mall?.name || item.mallName, item.shopNumber ? `Shop ${item.shopNumber}` : null].filter(Boolean).join(' • ')
+                : getAddressString(item);
+              return (
+                <TouchableOpacity
+                  style={[styles.myShopItem, { backgroundColor: theme.background }]}
+                  onPress={() => handleSavedPlacePress(item)}
+                  activeOpacity={0.75}
+                >
+                  <View style={[styles.myShopIconCircle, { backgroundColor: theme.accent + '22' }]}>
+                    <MaterialCommunityIcons
+                      name={item.isMallShop ? 'store' : icon}
+                      size={22}
+                      color={theme.accent}
+                    />
+                  </View>
+                  <View style={styles.myShopTexts}>
+                    <Text style={[styles.myShopName, { color: textColor }]} numberOfLines={1}>
+                      {item.name}
+                    </Text>
+                    <Text style={[styles.myShopAddress, { color: theme.textSecondary }]} numberOfLines={1}>
+                      {addressStr}
+                    </Text>
+                  </View>
+                  <Ionicons name="arrow-forward-circle" size={22} color={theme.textSecondary} />
+                </TouchableOpacity>
+              );
+            }}
+            keyExtractor={(item) => `${item.isMallShop ? 'shop' : 'place'}-${item._id || item.id}`}
+            contentContainerStyle={styles.myShopsList}
+            ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+          />
+        )}
+      </Animated.View>
+    </View>
+  ) : null;
+
   const renderSearchPanel = () => {
     if (!showSearchPanel) return null;
     const hasMatches = matchingResults.length > 0;
@@ -1932,7 +2107,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     const hasShopResults = shopSearchResults.length > 0;
 
     const data = [];
-
     if (hasMatches) {
       matchingResults.forEach(item => data.push({ ...item, type: 'match' }));
     }
@@ -1942,7 +2116,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     if (!hasMatches && hasNearby) {
       nearbyShops.forEach(item => data.push({ ...item, type: 'nearby' }));
     }
-  
     if (!hasMatches && !hasNearby && !hasShopResults) {
       data.push({ type: 'empty', id: 'empty' });
     }
@@ -1955,15 +2128,12 @@ function LocateScreen({ navigation, route, language = 'English' }) {
           </View>
         );
       }
-
       if (item.type === 'mallshop') {
-        const lowerQuery = searchQuery.toLowerCase().trim();
         const cat = CATEGORIES.find(c => c.id === item.category);
         const mallName = item.mall?.name || 'Shopping Mall';
         const distanceStr = item.distance !== undefined
           ? (item.distance < 1 ? `${(item.distance * 1000).toFixed(0)} m` : `${item.distance.toFixed(1)} km`)
           : '';
-
         return (
           <TouchableOpacity
             style={[styles.searchResultCard, { borderColor: searchBorder }]}
@@ -1993,7 +2163,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
           </TouchableOpacity>
         );
       }
-
       const lowerQuery = searchQuery.toLowerCase().trim();
       const cat = CATEGORIES.find(c => c.id === item.category);
       let matchField = '';
@@ -2022,12 +2191,10 @@ function LocateScreen({ navigation, route, language = 'English' }) {
           matchField = 'Address';
         }
       }
-
       const addressStr = getAddressString(item);
       const distanceStr = item.distance !== undefined
         ? (item.distance < 1 ? `${(item.distance * 1000).toFixed(0)} m` : `${item.distance.toFixed(1)} km`)
         : '';
-
       return (
         <TouchableOpacity
           style={[styles.searchResultCard, { borderColor: searchBorder }]}
@@ -2067,7 +2234,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
             <FlatList
               data={data}
               renderItem={renderItem}
-              keyExtractor={(item) => item.id || item._id || item._id || Math.random().toString()}
+              keyExtractor={(item) => item.id || item._id || Math.random().toString()}
               showsVerticalScrollIndicator={false}
               style={styles.searchPanelList}
             />
@@ -2077,7 +2244,6 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     );
   };
 
-  // ----- Main Render -----
   return (
     <SafeAreaView style={[styles.container, { backgroundColor }]}>
       <View style={styles.mapContainer}>
@@ -2107,12 +2273,12 @@ function LocateScreen({ navigation, route, language = 'English' }) {
           </View>
         )}
 
-        {/* TOP OVERLAY: ICONS WITH DYNAMIC BACKGROUND */}
         <View style={[styles.topOverlay, { backgroundColor: 'transparent' }]}>
           <View style={styles.iconsColumnAll}>
             <Animated.View style={[styles.searchWrapper, { width: searchContainerWidth }]}>
               {!searchExpanded ? (
                 <TouchableOpacity
+                  ref={searchIconRef}
                   onPress={toggleSearch}
                   style={[
                     styles.searchIconButton,
@@ -2156,6 +2322,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
             </Animated.View>
 
             <TouchableOpacity
+              ref={savedBtnRef}
               style={[styles.headerIconBtn, { backgroundColor: isDarkMode ? 'rgba(0,0,0,0.8)' : 'rgba(255,255,255,0.8)' }]}
               onPress={handleSavedLocationsPress}
             >
@@ -2163,6 +2330,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
             </TouchableOpacity>
 
             <TouchableOpacity
+              ref={myShopsBtnRef}
               style={[styles.headerIconBtn, { backgroundColor: isDarkMode ? 'rgba(0,0,0,0.8)' : 'rgba(255,255,255,0.8)' }]}
               onPress={openMyShops}
             >
@@ -2170,6 +2338,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
             </TouchableOpacity>
 
             <TouchableOpacity
+              ref={locateBtnRef}
               style={[styles.headerIconBtn, { backgroundColor: isDarkMode ? 'rgba(0,0,0,0.8)' : 'rgba(255,255,255,0.8)' }]}
               onPress={locateUser}
             >
@@ -2205,6 +2374,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
             </TouchableOpacity>
 
             <TouchableOpacity
+              ref={compassBtnRef}
               style={[styles.headerIconBtn, { backgroundColor: isDarkMode ? 'rgba(0,0,0,0.8)' : 'rgba(255,255,255,0.8)' }]}
               onPress={toggleCompass}
             >
@@ -2232,11 +2402,11 @@ function LocateScreen({ navigation, route, language = 'English' }) {
           </View>
         )}
 
-        {renderMyShopsModal()}
-        {renderSavedPlacesModal()}
+        {renderMyShopsSheet()}
+        {renderSavedPlacesSheet()}
 
         {loading && (
-          <View style={[StyleSheet.absoluteFillObject, styles.loadingOverlay, { backgroundColor: overlayColor }]}>
+          <View style={[styles.loadingOverlay, { backgroundColor: overlayColor }]}>
             <ShaakaLoadingScreen
               message={t.loading}
               backgroundColor={overlayColor}
@@ -2244,197 +2414,180 @@ function LocateScreen({ navigation, route, language = 'English' }) {
             />
           </View>
         )}
+
+        {/* ============ LOCATE TUTORIAL ============ */}
+        <ScreenTutorialOverlay
+          visible={showTutorial}
+          steps={tutorialSteps}
+          isDarkMode={isDarkMode}
+          language={language}
+          padding={5}
+          dimOpacity={0}
+          onFinish={finishTutorial}
+        />
       </View>
     </SafeAreaView>
   );
 }
 
-// ----- Styles -----
+// ----- Styles (unchanged) -----
 const styles = StyleSheet.create({
   container: { flex: 1 },
   mapContainer: { flex: 1, position: 'relative' },
   map: { flex: 1 },
-  loadingOverlay: { zIndex: 10000, elevation: 10000 },
+  loadingOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    zIndex: 10000, elevation: 10000, justifyContent: 'center', alignItems: 'center',
+  },
   touchOutsideOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 5,
-    backgroundColor: 'transparent',
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    zIndex: 5, backgroundColor: 'transparent',
   },
-
   compassContainer: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    zIndex: 10,
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    borderRadius: 16,
-    padding: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-    elevation: 6,
+    position: 'absolute', bottom: 0, left: 0, zIndex: 10,
+    backgroundColor: 'rgba(255,255,255,0.9)', borderRadius: 16, padding: 8,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15, shadowRadius: 6, elevation: 6,
   },
-  compassCloseBtn: {
-    alignSelf: 'flex-end',
-    padding: 4,
-  },
-
+  compassCloseBtn: { alignSelf: 'flex-end', padding: 4 },
   topOverlay: {
-    position: 'absolute',
-    top: 10,
-    left: 0,
-    paddingLeft: 16,
-    zIndex: 6,
-    flexDirection: 'column',
-    alignItems: 'flex-start',
-    justifyContent: 'flex-start',
+    position: 'absolute', top: 10, left: 0, paddingLeft: 16, zIndex: 6,
+    flexDirection: 'column', alignItems: 'flex-start', justifyContent: 'flex-start',
   },
   iconsColumnAll: {
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    marginTop: 4,
+    flexDirection: 'column', alignItems: 'center',
+    justifyContent: 'flex-start', marginTop: 4,
   },
   headerIconBtn: {
-    padding: 6,
-    marginBottom: 8,
-    borderRadius: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-    elevation: 2,
+    padding: 6, marginBottom: 8, borderRadius: 20,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1, shadowRadius: 2, elevation: 2,
   },
-
   searchWrapper: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 46,
-    overflow: 'hidden',
-    marginBottom: 8,
-    zIndex: 10,
-    position: 'absolute',
-    left: 50,
+    alignItems: 'center', justifyContent: 'center',
+    height: 46, overflow: 'hidden', marginBottom: 8,
+    zIndex: 10, position: 'absolute', left: 50,
   },
   searchIconButton: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 4,
+    width: 46, height: 46, borderRadius: 23,
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1, shadowRadius: 4, elevation: 4,
   },
   expandedSearchContainer: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 20,
-    borderBottomWidth: 2,
-    paddingHorizontal: 14,
-    height: 46,
-    minWidth: 180,
-    shadowColor: '#00000001',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 4,
-    width: '100%',
+    flex: 1, flexDirection: 'row', alignItems: 'center',
+    borderRadius: 20, borderBottomWidth: 2,
+    paddingHorizontal: 14, height: 46, minWidth: 180,
+    shadowColor: '#00000001', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1, shadowRadius: 4, elevation: 4, width: '100%',
   },
   searchIcon: { marginRight: 8 },
   searchInput: { flex: 1, fontSize: 16, paddingVertical: 8 },
   clearBtn: { marginLeft: 8, padding: 4 },
   locationBtn: { marginLeft: 8, padding: 4 },
   closeSearchBtn: { marginLeft: 8, padding: 4 },
-
   infoBox: {
-    position: 'absolute',
-    bottom: 0,
-    right: 0,
-    padding: 14,
-    borderTopLeftRadius: 12,
-    shadowColor: '#000',
+    position: 'absolute', bottom: 0, right: 0, padding: 14,
+    borderTopLeftRadius: 12, shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-    elevation: 5,
-    minWidth: 200,
-    maxWidth: 300,
-    zIndex: 6,
+    shadowOpacity: 0.15, shadowRadius: 6, elevation: 5,
+    minWidth: 200, maxWidth: 300, zIndex: 6,
   },
   infoHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   distanceText: { fontSize: 16, fontWeight: '700' },
   clearRouteBtn: { padding: 4 },
   modeColumn: { flexDirection: 'column', gap: 6 },
-  modeItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 4, paddingHorizontal: 10, borderRadius: 16, borderWidth: 1, marginBottom: 4 },
+  modeItem: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 4, paddingHorizontal: 10,
+    borderRadius: 16, borderWidth: 1, marginBottom: 4,
+  },
   modeIcon: { marginRight: 8 },
   modeName: { fontSize: 14, fontWeight: '500', flex: 1 },
   modeTime: { fontSize: 13, fontWeight: '400', marginLeft: 8 },
-
   modalOverlay: { flex: 1, backgroundColor: 'transparent', justifyContent: 'center', alignItems: 'center' },
   modalContent: { width: '80%', borderRadius: 16, padding: 20, borderWidth: 0.5, borderColor: 'rgba(0,0,0,0.1)' },
-  myShopsOverlay: { flex: 1, backgroundColor: 'transparent', justifyContent: 'flex-end' },
-  myShopsSheet: { width: '100%', maxHeight: '75%', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 32 },
-  sheetHandle: { alignSelf: 'center', width: 42, height: 5, borderRadius: 3, marginBottom: 14, opacity: 0.5 },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  modalTitle: { fontSize: 20, fontWeight: 'bold' },
-  loginModalContent: { width: '80%', borderRadius: 16, padding: 20, borderWidth: 0.5 },
-  loginModalTitle: { fontSize: 20, fontWeight: 'bold', textAlign: 'center', marginBottom: 12 },
-  loginConfirmButtonsRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  loginConfirmButton: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center', marginHorizontal: 4 },
-  loginCancelButton: { borderWidth: 1, backgroundColor: 'transparent' },
-  loginConfirmYesButton: { borderWidth: 0 },
-  loginConfirmButtonText: { fontSize: 16, fontWeight: '600' },
-
-  myShopsList: { paddingBottom: 20 },
-  myShopItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 0.5 },
+  myShopsOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'flex-end',
+    zIndex: 50,
+    elevation: 50,
+  },
+  myShopsSheet: {
+    width: '100%',
+    maxHeight: '80%',
+    minHeight: 220,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 28,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    elevation: 20,
+  },
+  sheetHandle: {
+    alignSelf: 'center', width: 42, height: 5,
+    borderRadius: 3, marginBottom: 16, opacity: 0.5,
+  },
+  modalHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    marginBottom: 14, paddingHorizontal: 4,
+  },
+  modalTitle: { fontSize: 20, fontWeight: '700' },
+  myShopsList: {
+    paddingBottom: 24,
+    paddingTop: 4,
+  },
+  myShopItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.06)',
+    minHeight: 68,
+  },
+  myShopIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
   myShopInfo: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  myShopTexts: { marginLeft: 12, flex: 1 },
-  myShopName: { fontSize: 18, fontWeight: '500' },
-  myShopAddress: { fontSize: 14 },
-  myShopActionBtn: { padding: 8, marginLeft: 4 },
-
+  myShopTexts: { marginLeft: 0, flex: 1, justifyContent: 'center' },
+  myShopName: { fontSize: 16, fontWeight: '600', marginBottom: 3 },
+  myShopAddress: { fontSize: 13 },
+  myShopActionBtn: { padding: 8, marginLeft: 6 },
   emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 40 },
   emptyText: { fontSize: 16, textAlign: 'center', marginTop: 12 },
   emptySubText: { fontSize: 14, textAlign: 'center', marginTop: 4 },
-  addShopBtn: { paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8, marginTop: 20 },
+  addShopBtn: { paddingHorizontal: 24, paddingVertical: 12, borderRadius: 24, marginTop: 20 },
   addShopBtnText: { color: '#fff', fontWeight: '600', fontSize: 16 },
-
   savedPlacesList: { paddingBottom: 20 },
-  savedPlaceItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 0.5 },
+  savedPlaceItem: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingVertical: 12, borderBottomWidth: 0.5,
+  },
   savedPlaceInfo: { flexDirection: 'row', alignItems: 'center', flex: 1 },
   savedPlaceTexts: { marginLeft: 12, flex: 1 },
   savedPlaceName: { fontSize: 18, fontWeight: '500' },
   savedPlaceAddress: { fontSize: 14 },
-
   searchPanelOverlay: {
-    position: 'absolute',
-    top: 80,
-    left: 16,
-    right: 16,
-    zIndex: 8,
-    elevation: 8,
-    pointerEvents: 'box-none',
+    position: 'absolute', top: 80, left: 16, right: 16,
+    zIndex: 8, elevation: 8, pointerEvents: 'box-none',
   },
   searchPanelContainer: {
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-    elevation: 6,
-    maxHeight: height * 0.4,
-    pointerEvents: 'auto',
+    borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15, shadowRadius: 6, elevation: 6,
+    maxHeight: height * 0.4, pointerEvents: 'auto',
   },
   searchPanelList: { flexGrow: 0 },
   searchResultCard: { borderBottomWidth: 0.5, paddingVertical: 8 },
@@ -2446,19 +2599,12 @@ const styles = StyleSheet.create({
   searchResultAddress: { fontSize: 12 },
   searchEmpty: { paddingVertical: 20, alignItems: 'center' },
   searchEmptyText: { fontSize: 14 },
-
   mallShopIconContainer: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-    backgroundColor: 'transparent',
+    width: 36, height: 36, borderRadius: 18,
+    justifyContent: 'center', alignItems: 'center',
+    marginRight: 10, backgroundColor: 'transparent',
   },
-  mallShopIconDark: {
-    backgroundColor: '#000000',
-  },
+  mallShopIconDark: { backgroundColor: '#000000' },
 });
 
 export default LocateScreen;

@@ -1,32 +1,23 @@
+import { getImageUri, normalizeImageSource } from '../utils/imageUrl';
+import { getPostCoverUri, getPostVideoUrl } from '../utils/postMedia';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Animated,
-  Image,
-  ImageBackground,
   StyleSheet,
   Text,
   TouchableOpacity,
-  View,
+  View, Image, ImageBackground,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext'; // 👈 adjust path if needed
 import { logPerformance } from '../utils/performanceLogger';
+import OnlineStatusDot from './OnlineStatusDot';
+import useOnlineUsers from '../hooks/useOnlineUsers';
 
 // ⏱️ Auto-slide interval (milliseconds) — each product shows for 8s
 const SLIDE_DURATION = 8000;
 const BRAND_GREEN = '#47ae8600';
-
-/* ---------- Helper: derive a video cover URL from a Cloudinary video ---------- */
-const getVideoCover = (videoUrl, videoThumbnail) => {
-  if (videoThumbnail) return videoThumbnail;
-  if (!videoUrl || !videoUrl.includes('res.cloudinary.com')) return null;
-  const [urlWithoutQuery] = videoUrl.split('?');
-  const uploadMarker = '/video/upload/';
-  if (!urlWithoutQuery.includes(uploadMarker)) return null;
-  return urlWithoutQuery
-    .replace(uploadMarker, '/video/upload/so_5/')
-    .replace(/\.[^/.]+$/, '.jpg');
-};
+const DEFAULT_AVATAR = require('../assets/avator.png');
 
 /* ---------- Card ---------- */
 const ProductDeckCard = ({
@@ -37,7 +28,9 @@ const ProductDeckCard = ({
   colors,
   onActivate,
   onPressProduct,
+  onPressVideo,
   onPressUserProfile,
+  onlineUsers,
 }) => {
   const positionValue = useRef(new Animated.Value(position)).current;
   const imageLoadStartedAt = useRef(null);
@@ -86,17 +79,19 @@ const ProductDeckCard = ({
   const overlayColor = colors.overlay || '#000000';
 
   const locationText = product.location || '';
+  const productOwnerId =
+    product.userId?._id ||
+    product.userId?.id ||
+    product.userId ||
+    product.user?._id ||
+    product.user?.id ||
+    product.user;
 
   // ---- Media resolution (video-aware) -----------------------------------
-  const hasVideo = Boolean(product.videoUrl);
-  const videoCover = hasVideo
-    ? getVideoCover(product.videoUrl, product.videoThumbnail)
-    : null;
-  const cardImageUri =
-    product._homeImageUri ||
-    videoCover ||
-    (Array.isArray(product.houseImages) && product.houseImages.find(Boolean)) ||
-    null;
+  const videoUrl = getPostVideoUrl(product);
+  const hasVideo = Boolean(videoUrl);
+  const cardImageUri = getImageUri(product._homeImageUri) || getPostCoverUri(product);
+  const userAvatarUri = getImageUri(product.userAvatar || product.user?.avatar);
 
   return (
     <Animated.View
@@ -114,11 +109,13 @@ const ProductDeckCard = ({
     >
       <TouchableOpacity
         activeOpacity={1}
-        onPress={position === 0 ? onPressProduct : () => onActivate(index)}
+        onPress={position === 0
+          ? (hasVideo ? (onPressVideo || onPressProduct) : onPressProduct)
+          : () => onActivate(index)}
         style={[styles.cardTouchTarget, { backgroundColor: cardBackground }]}
       >
         <ImageBackground
-          source={{ uri: cardImageUri }}
+          source={normalizeImageSource({ uri: cardImageUri })}
           style={styles.cardImage}
           imageStyle={styles.cardImageStyle}
           resizeMode="cover"
@@ -145,7 +142,11 @@ const ProductDeckCard = ({
           <View pointerEvents="none" style={styles.bottomShade} />
 
           {/* TOP-LEFT: product name + location */}
-          <View style={styles.topOverlay} pointerEvents="box-none">
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={onPressProduct}
+            style={styles.topOverlay}
+          >
             <Text numberOfLines={1} style={styles.productName}>
               {product.productName || 'Product'}
             </Text>
@@ -154,7 +155,7 @@ const ProductDeckCard = ({
                 {locationText}
               </Text>
             )}
-          </View>
+          </TouchableOpacity>
 
           {/* TOP-RIGHT: video badge (only when the post is a video) */}
           {hasVideo && (
@@ -170,21 +171,27 @@ const ProductDeckCard = ({
               onPress={() => onPressUserProfile?.(product)}
               style={styles.userRow}
             >
-              {!!product.userAvatar && (
+              <View style={styles.userAvatarWrap}>
                 <Image
-                  source={{ uri: product.userAvatar }}
-                  style={styles.userAvatar}
+                  source={normalizeImageSource(userAvatarUri ? { uri: userAvatarUri } : DEFAULT_AVATAR)}
+                  style={[styles.userAvatar, { marginRight: 0 }]}
                 />
-              )}
+                <OnlineStatusDot
+                  visible={Boolean(productOwnerId && onlineUsers[String(productOwnerId)])}
+                  size={10}
+                />
+              </View>
               <Text numberOfLines={1} style={styles.username}>
                 {product.username || 'User'}
               </Text>
             </TouchableOpacity>
 
             {!!product.amount && (
-              <Text numberOfLines={1} style={styles.amount}>
-                {product.amount}
-              </Text>
+              <TouchableOpacity activeOpacity={0.85} onPress={onPressProduct}>
+                <Text numberOfLines={1} style={styles.amount}>
+                  {product.amount}
+                </Text>
+              </TouchableOpacity>
             )}
           </View>
         </ImageBackground>
@@ -198,6 +205,7 @@ const ProductHeroDeck = ({
   products = [],
   colors: colorsProp,
   onPressProduct,
+  onPressVideo,
   onPressUserProfile,
 }) => {
   const themeContext = useTheme();
@@ -206,6 +214,9 @@ const ProductHeroDeck = ({
   const [deckWidth, setDeckWidth] = useState(0);
   const [activeIndex, setActiveIndex] = useState(0);
   const [restartKey, setRestartKey] = useState(0);
+  const onlineUsers = useOnlineUsers(products.map(product =>
+    product.userId?._id || product.userId?.id || product.userId || product.user?._id || product.user?.id || product.user
+  ));
 
   const brandGreen = colors.login || colors.brand || BRAND_GREEN;
   const glowColor = colors.glow || 'rgba(71, 174, 134, 0)';
@@ -286,8 +297,10 @@ const ProductHeroDeck = ({
               deckWidth={deckWidth}
               colors={colors}
               onActivate={selectProduct}
-              onPressProduct={() => onPressProduct(products[currentIndex])}
+              onPressProduct={() => onPressProduct(products[card.index])}
+              onPressVideo={() => onPressVideo?.(products[card.index])}
               onPressUserProfile={onPressUserProfile}
+              onlineUsers={onlineUsers}
             />
           ))}
         </View>
@@ -416,6 +429,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#333',
     marginRight: 8,
   },
+  userAvatarWrap: { position: 'relative', marginRight: 8 },
   username: {
     color: '#ffffff',
     fontSize: 13,

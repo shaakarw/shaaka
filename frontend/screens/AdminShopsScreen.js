@@ -1,3 +1,4 @@
+
 // screens/AdminShopsScreen.js
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
@@ -26,6 +27,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import AdminScreenHeader from '../components/AdminScreenHeader';
+import { showAdminFeedback } from '../utils/adminFeedback';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width, height } = Dimensions.get('window');
 const CARD_MARGIN = 6;
@@ -99,11 +103,6 @@ const AdminShopsScreen = ({ navigation, language }) => {
   const [selectedShop, setSelectedShop] = useState(null);
   const [sheetVisible, setSheetVisible] = useState(false);
 
-  // Status modal
-  const [statusModalVisible, setStatusModalVisible] = useState(false);
-  const [statusTitle, setStatusTitle] = useState('');
-  const [statusMessage, setStatusMessage] = useState('');
-
   // Collapsible search animation
   const scrollY = useRef(new Animated.Value(0)).current;
   const searchTranslateY = scrollY.interpolate({
@@ -147,9 +146,7 @@ const AdminShopsScreen = ({ navigation, language }) => {
   const getToken = async () => AsyncStorage.getItem('adminToken');
 
   const showStatus = (title, message) => {
-    setStatusTitle(title);
-    setStatusMessage(message);
-    setStatusModalVisible(true);
+    showAdminFeedback(title, message, title === t.error ? 'error' : 'success', { buttonText: t.ok });
   };
 
   // ---------- Fetch shops ----------
@@ -172,14 +169,14 @@ const AdminShopsScreen = ({ navigation, language }) => {
         const sorted = sortShops(shopList);
         setFilteredShops(sorted);
       } else {
-        Alert.alert(t.error, 'Failed to fetch shops.');
+        showAdminFeedback(t.error, 'Failed to fetch shops.', 'error');
       }
     } catch (error) {
       console.error('Fetch shops error:', error);
       if (error.response?.status === 401) {
         navigation.replace('AdminLogin');
       } else {
-        Alert.alert(t.error, 'An error occurred while fetching shops.');
+        showAdminFeedback(t.error, 'An error occurred while fetching shops.', 'error');
       }
     } finally {
       setRefreshing(false);
@@ -220,7 +217,7 @@ const AdminShopsScreen = ({ navigation, language }) => {
   }, [searchQuery, shops]);
 
   // ---------- Handlers ----------
-  const handleDeleteShop = (shopId) => {
+  const handleDeleteShop = (shop) => {
     Alert.alert(t.delete, t.deleteConfirm, [
       { text: t.cancel, style: 'cancel' },
       {
@@ -229,14 +226,15 @@ const AdminShopsScreen = ({ navigation, language }) => {
         onPress: async () => {
           try {
             const token = await getToken();
-            await axios.delete(`${BASE_URL}/api/admin/shops/${shopId}`, {
+            const shopType = shop.isMallShop ? 'mall-shops' : 'shops';
+            await axios.delete(`${BASE_URL}/api/admin/${shopType}/${shop._id}`, {
               headers: { Authorization: `Bearer ${token}` },
             });
             showStatus(t.success, 'Shop deleted successfully.');
             closeSheet();
             fetchShops();
           } catch (e) {
-            Alert.alert(t.error, 'Failed to delete shop.');
+            showAdminFeedback(t.error, 'Failed to delete shop.', 'error');
           }
         },
       },
@@ -257,7 +255,7 @@ const AdminShopsScreen = ({ navigation, language }) => {
       closeSheet();
       fetchShops();
     } catch (error) {
-      Alert.alert(t.error, 'Failed to update promotion status.');
+      showAdminFeedback(t.error, 'Failed to update promotion status.', 'error');
     }
   };
 
@@ -282,29 +280,6 @@ const AdminShopsScreen = ({ navigation, language }) => {
       setSelectedShop(null);
     });
   };
-
-  // ---------- Render modals ----------
-  const renderStatusModal = () => (
-    <Modal transparent visible={statusModalVisible} animationType="fade">
-      <View style={styles.modalOverlay}>
-        <View
-          style={[
-            styles.modalContent,
-            { backgroundColor: theme.background, borderColor: theme.border },
-          ]}
-        >
-          <Text style={[styles.modalTitle, { color: theme.text }]}>{statusTitle}</Text>
-          <Text style={[styles.modalText, { color: theme.textSecondary }]}>{statusMessage}</Text>
-          <TouchableOpacity
-            style={[styles.modalButton, { backgroundColor: theme.accent }]}
-            onPress={() => setStatusModalVisible(false)}
-          >
-            <Text style={styles.modalButtonText}>{t.ok}</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
-  );
 
   const renderBottomSheet = () => {
     if (!selectedShop) return null;
@@ -342,7 +317,7 @@ const AdminShopsScreen = ({ navigation, language }) => {
               {/* Shop image (if any) */}
               <View style={styles.sheetImageContainer}>
                 {selectedShop.image ? (
-                  <Image source={{ uri: selectedShop.image }} style={styles.sheetImage} resizeMode="cover" />
+                  <Image source={normalizeImageSource({ uri: selectedShop.image })} style={styles.sheetImage} resizeMode="cover" />
                 ) : (
                   <View style={[styles.sheetImagePlaceholder, { backgroundColor: theme.border }]}>
                     <Ionicons name="storefront-outline" size={50} color={theme.textSecondary} />
@@ -400,18 +375,20 @@ const AdminShopsScreen = ({ navigation, language }) => {
 
               {/* Action buttons */}
               <View style={styles.sheetActions}>
-                <TouchableOpacity
-                  style={[styles.sheetActionBtn, { backgroundColor: '#FFD700' }]}
-                  onPress={() => handleTogglePromote(selectedShop)}
-                >
-                  <Ionicons name={isPromoted ? 'star' : 'star-outline'} size={22} color="#000" />
-                  <Text style={[styles.sheetActionText, { color: '#000' }]}>
-                    {isPromoted ? t.unpromote : t.promote}
-                  </Text>
-                </TouchableOpacity>
+                {!selectedShop.isMallShop && (
+                  <TouchableOpacity
+                    style={[styles.sheetActionBtn, { backgroundColor: '#FFD700' }]}
+                    onPress={() => handleTogglePromote(selectedShop)}
+                  >
+                    <Ionicons name={isPromoted ? 'star' : 'star-outline'} size={22} color="#000" />
+                    <Text style={[styles.sheetActionText, { color: '#000' }]}>
+                      {isPromoted ? t.unpromote : t.promote}
+                    </Text>
+                  </TouchableOpacity>
+                )}
                 <TouchableOpacity
                   style={[styles.sheetActionBtn, { backgroundColor: '#dc3545' }]}
-                  onPress={() => handleDeleteShop(selectedShop._id)}
+                  onPress={() => handleDeleteShop(selectedShop)}
                 >
                   <Ionicons name="trash-outline" size={22} color="#fff" />
                   <Text style={styles.sheetActionText}>{t.delete}</Text>
@@ -448,7 +425,7 @@ const AdminShopsScreen = ({ navigation, language }) => {
       >
         <View style={styles.shopImageContainer}>
           {item.image ? (
-            <Image source={{ uri: item.image }} style={styles.shopImage} resizeMode="cover" />
+            <Image source={normalizeImageSource({ uri: item.image })} style={styles.shopImage} resizeMode="cover" />
           ) : (
             <View style={[styles.shopImagePlaceholder, { backgroundColor: theme.border }]}>
               <Ionicons name="storefront-outline" size={30} color={theme.textSecondary} />
@@ -459,6 +436,11 @@ const AdminShopsScreen = ({ navigation, language }) => {
               <Ionicons name="star" size={12} color="#000" />
             </View>
           )}
+          {item.isMallShop ? (
+            <View style={[styles.mallShopBadge, { backgroundColor: theme.accent }]}>
+              <Text style={styles.statusBadgeText}>MALL</Text>
+            </View>
+          ) : null}
           <View style={[styles.statusBadge, { backgroundColor: statusColor, position: 'absolute', top: 4, right: 4 }]}>
             <Text style={styles.statusBadgeText}>{statusLabel}</Text>
           </View>
@@ -543,7 +525,7 @@ const AdminShopsScreen = ({ navigation, language }) => {
 
   // ---------- Main render ----------
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['left', 'right', 'bottom']}>
       {/* Header */}
       <AdminScreenHeader
         title={t.shops}
@@ -567,7 +549,6 @@ const AdminShopsScreen = ({ navigation, language }) => {
       )}
 
       {/* Modals */}
-      {renderStatusModal()}
       {renderBottomSheet()}
     </SafeAreaView>
   );
@@ -616,11 +597,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: 10,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 2,
     position: 'relative',
   },
   shopImageContainer: {
@@ -643,6 +619,14 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  mallShopBadge: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
   },
   gridTitle: { fontSize: 13, fontWeight: '600', textAlign: 'center', marginBottom: 2 },
   gridSubtitle: { fontSize: 11, textAlign: 'center', opacity: 0.7, marginBottom: 2 },

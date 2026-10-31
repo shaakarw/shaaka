@@ -20,6 +20,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { normalizeRwandaPhone, isValidRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import AdminScreenHeader from '../components/AdminScreenHeader';
+import { showAdminFeedback } from '../utils/adminFeedback';
 
 // ---------- Full Translations ----------
 const translations = {
@@ -214,10 +215,11 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
     } catch (error) {
       console.error('Fetch error:', error?.response?.data || error?.message || error);
       if (error.response?.status === 401) {
-        Alert.alert(t.loginRequired);
-        navigation.replace('AdminLogin', { language });
+        showAdminFeedback(t.loginRequired, '', 'error', {
+          buttonAction: () => navigation.replace('AdminLogin', { language }),
+        });
       } else {
-        Alert.alert(t.failedToFetch);
+        showAdminFeedback(t.error, t.failedToFetch, 'error');
       }
     } finally {
       setLoadingList(false);
@@ -305,15 +307,16 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
   const prevStep = () => { if (step > 1) setStep(step - 1); };
 
   const handleSave = async () => {
-    if (activeTab === 'jobs' && !form.title?.trim()) { Alert.alert(t.jobTitle); return; }
-    if (activeTab === 'skills' && !form.name?.trim()) { Alert.alert(t.skillName); return; }
-    if (activeTab === 'business' && !form.name?.trim()) { Alert.alert(t.businessName); return; }
+    if (activeTab === 'jobs' && !form.title?.trim()) { showAdminFeedback(t.error, t.jobTitle, 'error'); return; }
+    if (activeTab === 'skills' && !form.name?.trim()) { showAdminFeedback(t.error, t.skillName, 'error'); return; }
+    if (activeTab === 'business' && !form.name?.trim()) { showAdminFeedback(t.error, t.businessName, 'error'); return; }
 
     const token = await getToken();
     if (!token) {
-      Alert.alert(t.loginRequired, t.loginRequired, [
-        { text: t.ok, onPress: () => navigation.replace('AdminLogin', { language }) },
-      ]);
+      showAdminFeedback(t.loginRequired, t.loginRequired, 'error', {
+        buttonText: t.ok,
+        buttonAction: () => navigation.replace('AdminLogin', { language }),
+      });
       return;
     }
 
@@ -371,15 +374,15 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
       if (response.data?.success) {
         const typeName = activeTab === 'jobs' ? t.typeJob : activeTab === 'skills' ? t.typeSkill : t.typeBusiness;
         const message = editingItem ? t.itemUpdated.replace('{type}', typeName) : t.itemCreated.replace('{type}', typeName);
-        Alert.alert(t.success, message, [{ text: t.ok }]);
+        showAdminFeedback(t.success, message, 'success', { buttonText: t.ok });
         closeForm();
         fetchItems(); // Refresh list from DB
       } else {
-        Alert.alert(t.failedToSave, response.data?.message || '');
+        showAdminFeedback(t.failedToSave, response.data?.message || t.failedToSave, 'error');
       }
     } catch (error) {
       console.error('Save error:', error?.response?.data || error?.message);
-      Alert.alert(t.failedToSave, t.failedToSave);
+      showAdminFeedback(t.failedToSave, t.failedToSave, 'error');
     } finally {
       setSaving(false);
     }
@@ -404,11 +407,11 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
       });
       if (response.data?.success) {
         const typeName = activeTab === 'jobs' ? t.typeJob : activeTab === 'skills' ? t.typeSkill : t.typeBusiness;
-        Alert.alert(t.success, t.itemDeleted.replace('{type}', typeName));
+        showAdminFeedback(t.success, t.itemDeleted.replace('{type}', typeName), 'success');
         fetchItems();
       }
     } catch (error) {
-      Alert.alert(t.failedToSave, t.failedToSave);
+      showAdminFeedback(t.failedToSave, t.failedToSave, 'error');
     }
   };
 
@@ -563,7 +566,7 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
   };
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['left', 'right', 'bottom']}>
       {!showForm && (
         <AdminScreenHeader
           title={t.businessTab}
@@ -713,8 +716,7 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: 16 },
   fab: {
     position: 'absolute', bottom: 24, right: 24, width: 56, height: 56, borderRadius: 28,
-    justifyContent: 'center', alignItems: 'center', elevation: 6,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.3, shadowRadius: 4,
+    justifyContent: 'center', alignItems: 'center',
   },
   formContainer: { padding: 16, paddingBottom: 40 },
   formHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },

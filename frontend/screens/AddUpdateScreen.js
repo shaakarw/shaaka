@@ -33,6 +33,7 @@ import { BASE_URL } from '../constants';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRoute } from '@react-navigation/native';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import { showAdminFeedback } from '../utils/adminFeedback';
 
 // ---------- Design tokens (NEUTRAL GRAYSCALE) ----------
 // Primary action gradient (gray → dark gray)
@@ -188,6 +189,18 @@ const AddUpdateScreen = ({ navigation, language }) => {
   const [statusTitle, setStatusTitle] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
 
+  const notify = useCallback((title, message, type = 'error') => {
+    if (isAdmin) {
+      showAdminFeedback(title, message, type);
+    } else if (type === 'success') {
+      setStatusTitle(title);
+      setStatusMessage(message);
+      setStatusModalVisible(true);
+    } else {
+      Alert.alert(title, message);
+    }
+  }, [isAdmin]);
+
   // ---------- Token & endpoint helpers (unchanged) ----------
   const getToken = async () => {
     if (isAdmin) {
@@ -225,12 +238,12 @@ const AddUpdateScreen = ({ navigation, language }) => {
           navigation.replace('Login');
         }
       }
-      Alert.alert(t.error, t.failedToSave);
+      notify(t.error, t.failedToSave, 'error');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [isAdmin, navigation, t]);
+  }, [isAdmin, navigation, notify, t]);
 
   useFocusEffect(
     useCallback(() => {
@@ -255,7 +268,7 @@ const AddUpdateScreen = ({ navigation, language }) => {
     try {
       const token = await getToken();
       if (!token) {
-        Alert.alert(t.error, isAdmin ? 'Please login as admin.' : 'Please login first.');
+        notify(t.error, isAdmin ? 'Please login as admin.' : 'Please login first.', 'error');
         return;
       }
 
@@ -268,19 +281,17 @@ const AddUpdateScreen = ({ navigation, language }) => {
 
       if (response.data.success) {
         setShareLink(response.data.shareLink || '');
-        setStatusTitle(t.success);
-        setStatusMessage(t.shareLinkSaved);
-        setStatusModalVisible(true);
+        notify(t.success, t.shareLinkSaved, 'success');
       } else {
-        Alert.alert(t.error, response.data.message || t.shareLinkSaveFailed);
+        notify(t.error, response.data.message || t.shareLinkSaveFailed, 'error');
       }
     } catch (error) {
       console.error('Save share link error:', error.response?.data || error.message);
-      Alert.alert(t.error, t.shareLinkSaveFailed);
+      notify(t.error, t.shareLinkSaveFailed, 'error');
     } finally {
       setShareLinkLoading(false);
     }
-  }, [shareLink, getToken, t, isAdmin]);
+  }, [shareLink, getToken, t, isAdmin, notify]);
 
   const openAddModal = () => {
     setFormTitle('');
@@ -310,7 +321,7 @@ const AddUpdateScreen = ({ navigation, language }) => {
   const handleSaveNote = async () => {
     const trimmedTitle = formTitle.trim();
     if (!trimmedTitle) {
-      Alert.alert(t.titleRequired, t.enterTitle);
+      notify(t.titleRequired, t.enterTitle, 'error');
       return;
     }
 
@@ -319,7 +330,7 @@ const AddUpdateScreen = ({ navigation, language }) => {
     try {
       const token = await getToken();
       if (!token) {
-        Alert.alert(t.error, isAdmin ? 'Please login as admin.' : 'Please login first.');
+        notify(t.error, isAdmin ? 'Please login as admin.' : 'Please login first.', 'error');
         setSaving(false);
         return;
       }
@@ -338,9 +349,7 @@ const AddUpdateScreen = ({ navigation, language }) => {
         : await axios.post(`${BASE_URL}${base}`, payload, { headers });
 
       if (response.data.success) {
-        setStatusTitle(t.success);
-        setStatusMessage(isEditing ? t.noteUpdated : t.noteSaved);
-        setStatusModalVisible(true);
+        notify(t.success, isEditing ? t.noteUpdated : t.noteSaved, 'success');
         setFormModalVisible(false);
         setFormTitle('');
         setFormMessage('');
@@ -348,11 +357,11 @@ const AddUpdateScreen = ({ navigation, language }) => {
         setEditingNoteId(null);
         fetchNotes();
       } else {
-        Alert.alert(t.error, response.data.message || (isEditing ? t.failedToUpdate : t.failedToSave));
+        notify(t.error, response.data.message || (isEditing ? t.failedToUpdate : t.failedToSave), 'error');
       }
     } catch (error) {
       console.error('Save note error:', error.response?.data || error.message);
-      Alert.alert(t.error, isEditing ? t.failedToUpdate : t.failedToSave);
+      notify(t.error, isEditing ? t.failedToUpdate : t.failedToSave, 'error');
     } finally {
       setSaving(false);
     }
@@ -370,7 +379,7 @@ const AddUpdateScreen = ({ navigation, language }) => {
     try {
       const token = await getToken();
       if (!token) {
-        Alert.alert(t.error, isAdmin ? 'Please login as admin.' : 'Please login first.');
+        notify(t.error, isAdmin ? 'Please login as admin.' : 'Please login first.', 'error');
         setDeleting(false);
         return;
       }
@@ -383,16 +392,14 @@ const AddUpdateScreen = ({ navigation, language }) => {
       if (response.data.success) {
         setDeleteModalVisible(false);
         setSelectedNoteId(null);
-        setStatusTitle(t.success);
-        setStatusMessage(t.noteDeleted);
-        setStatusModalVisible(true);
+        notify(t.success, t.noteDeleted, 'success');
         fetchNotes();
       } else {
-        Alert.alert(t.error, response.data.message || t.failedToDelete);
+        notify(t.error, response.data.message || t.failedToDelete, 'error');
       }
     } catch (error) {
       console.error('Delete note error:', error.response?.data || error.message);
-      Alert.alert(t.error, t.failedToDelete);
+      notify(t.error, t.failedToDelete, 'error');
     } finally {
       setDeleting(false);
     }
@@ -409,7 +416,7 @@ const AddUpdateScreen = ({ navigation, language }) => {
     try {
       const token = await getToken();
       if (!token) {
-        Alert.alert(t.error, isAdmin ? 'Please login as admin.' : 'Please login first.');
+        notify(t.error, isAdmin ? 'Please login as admin.' : 'Please login first.', 'error');
         setBatchDeleting(false);
         return;
       }
@@ -425,13 +432,11 @@ const AddUpdateScreen = ({ navigation, language }) => {
       setBatchDeleteModalVisible(false);
       setSelectedNotes([]);
       setSelectionMode(false);
-      setStatusTitle(t.success);
-      setStatusMessage(t.notesDeleted);
-      setStatusModalVisible(true);
+      notify(t.success, t.notesDeleted, 'success');
       fetchNotes();
     } catch (error) {
       console.error('Batch delete error:', error.response?.data || error.message);
-      Alert.alert(t.error, t.failedToDeleteSelected);
+      notify(t.error, t.failedToDeleteSelected, 'error');
     } finally {
       setBatchDeleting(false);
     }
@@ -520,7 +525,7 @@ const AddUpdateScreen = ({ navigation, language }) => {
           {item.link ? (
             <TouchableOpacity
               style={styles.cardLinkRow}
-              onPress={() => Linking.openURL(item.link).catch(() => Alert.alert('Invalid link', 'Unable to open this link.'))}
+              onPress={() => Linking.openURL(item.link).catch(() => notify('Invalid link', 'Unable to open this link.', 'error'))}
             >
               <Ionicons name="link" size={14} color="#fff" />
               <Text style={styles.cardLinkText} numberOfLines={1}>

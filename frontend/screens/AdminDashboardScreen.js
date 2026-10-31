@@ -33,7 +33,6 @@ const CHART_WIDTH = width - H_PADDING * 2 - CARD_PADDING * 2;
 // ---------- Translations ----------
 const translations = {
   English: {
-    adminDashboard: 'Admin Dashboard',
     totalUsers: 'Total Users',
     totalPosts: 'Total Posts',
     totalShops: 'Total Shops',
@@ -91,7 +90,6 @@ const translations = {
     today: 'Today',
   },
   Kinyarwanda: {
-    adminDashboard: 'Ikibaho cy’umuyobozi',
     totalUsers: 'Abakoresha bose',
     totalPosts: 'Inyandiko zose',
     totalShops: 'Amaduka yose',
@@ -394,6 +392,8 @@ const AdminDashboardScreen = ({ navigation, language }) => {
       { key: 'posts', icon: 'document-text-outline', label: 'Posts', onPress: () => navigation.navigate('AdminPosts') },
       { key: 'reports', icon: 'flag-outline', label: 'Reports', onPress: () => navigation.navigate('AdminReports') },
       { key: 'business', icon: 'briefcase-outline', label: 'Ideas', onPress: () => navigation.navigate('BusinessIdeasAdmin') },
+      { key: 'tutorial', icon: 'images-outline', label: 'Tutorial image', onPress: () => navigation.navigate('AdminTutorial') },
+      { key: 'contact', icon: 'call-outline', label: 'Contact info', onPress: () => navigation.navigate('AdminContactInfo') },
       { key: 'chat', icon: 'chatbubbles-outline', label: t.liveChat, onPress: () => navigation.navigate('AdminLiveChat') },
       { key: 'password', icon: 'lock-closed-outline', label: t.passwordAccess, onPress: () => navigation.navigate('ChangePassword', { adminMode: true }) },
       {
@@ -692,7 +692,7 @@ const AdminDashboardScreen = ({ navigation, language }) => {
 
   // ---------- Main render ----------
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['left', 'right', 'bottom']}>
       {/* Top bar */}
       <View
         style={[

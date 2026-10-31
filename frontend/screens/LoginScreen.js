@@ -1,5 +1,5 @@
 // screens/LoginScreen.js
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import {
   Platform,
   ScrollView,
 } from 'react-native';
+import { useIsFocused } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,10 +21,19 @@ import SharedBottomNav from '../components/SharedBottomNav';
 import AppAlert from '../utils/alert';
 import { normalizeRwandaPhone, normalizeForAuth } from '../utils/phoneNormalizer';
 import Logo from '../assets/logos.png';
+import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
+import useScreenTutorial from '../hooks/useScreenTutorial';
+
+// ---- Tutorial config ---------------------------------------------------------
+const LOGIN_TUTORIAL_ID = 'login';
+const LOGIN_TUTORIAL_DELAY_MS = 700;
+
+// -----------------------------------------------------------------------------
 
 const LoginScreen = ({ navigation, language = 'English' }) => {
-  const { theme } = useTheme();
+  const { theme, isDarkMode } = useTheme();
   const { login } = useAuth();
+  const isFocused = useIsFocused();
   const [phone, setPhone] = useState('07');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -35,6 +45,21 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
   const passwordRef = useRef(null);
   const logoScale = useRef(new Animated.Value(1)).current;
   const logoRotate = useRef(new Animated.Value(0)).current;
+
+  // ---- Tutorial refs ----
+  const phoneContainerRef = useRef(null);
+  const passwordContainerRef = useRef(null);
+  const eyeButtonRef = useRef(null);
+  const loginButtonRef = useRef(null);
+  const signUpLinkRef = useRef(null);
+  const forgotLinkRef = useRef(null);
+
+  // ---- Tutorial state ----
+  const [showTutorial, finishTutorial] = useScreenTutorial(
+    LOGIN_TUTORIAL_ID,
+    isFocused && !loading,
+    LOGIN_TUTORIAL_DELAY_MS
+  );
 
   useEffect(() => {
     if (!error) return;
@@ -75,6 +100,19 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
       passwordError: 'Please enter your password',
       invalidCredentials: 'Invalid credentials',
       resetText: 'Forgot your password?',
+      // Tutorial
+      tPhoneTitle: 'Your phone number',
+      tPhoneBody: 'Enter your phone number starting with 07. This is what you registered with.',
+      tPasswordTitle: 'Your password',
+      tPasswordBody: 'Enter the password you chose when creating your account.',
+      tEyeTitle: 'Show or hide password',
+      tEyeBody: 'Tap the eye icon to see what you typed, or hide it again.',
+      tLoginTitle: 'Log in',
+      tLoginBody: 'Tap here to log in to your Shaaka account.',
+      tSignUpTitle: 'New here?',
+      tSignUpBody: 'Tap Sign Up if you do not have an account yet.',
+      tForgotTitle: 'Forgot password',
+      tForgotBody: 'Tap here if you do not remember your password — we will help you reset it.',
     },
     Kinyarwanda: {
       welcome: 'Murakaza Neza',
@@ -89,6 +127,19 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
       passwordError: 'Shyiramo ijambo banga',
       invalidCredentials: 'Amazina n\'ijambo ry\'ibanga si byo',
       resetText: 'Wibagiwe ijambo banga?',
+      // Tutorial
+      tPhoneTitle: 'Nimero ya telefone',
+      tPhoneBody: 'Andika nimero ya telefone itangira na 07. Iyi ni yo wiyandikishije.',
+      tPasswordTitle: 'Ijambo ryibanga',
+      tPasswordBody: "Andika ijambo ry'ibanga wahisemo igihe wiyandikishaga.",
+      tEyeTitle: "Erekana cyangwa uhisha ijambo ry'ibanga",
+      tEyeBody: "Kanda ku kamenyetso k'ijisho urebe ibyo wanditse, cyangwa ubihishe.",
+      tLoginTitle: 'Injira',
+      tLoginBody: 'Kanda hano winjire muri konti yawe ya Shaaka.',
+      tSignUpTitle: 'Uri mushya?',
+      tSignUpBody: 'Kanda Iyandikishe niba utarafite konti.',
+      tForgotTitle: 'Wibagiwe ijambo ryibanga',
+      tForgotBody: "Kanda hano niba utibuka ijambo ry'ibanga — tuzagufasha kurihindura.",
     },
   };
   const t = texts[language] || texts.English;
@@ -135,7 +186,6 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
 
     const result = await login(loginIdentifier, password);
     if (result.success) {
-      // ✅ Redirect based on role
       if (result.user?.role === 'admin') {
         navigation.replace('AdminDashboard');
       } else {
@@ -157,6 +207,40 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
     }
     setLoading(false);
   };
+
+  // ---- Tutorial steps ----
+  const tutorialSteps = useMemo(() => [
+    {
+      getTarget: () => phoneContainerRef.current,
+      title: t.tPhoneTitle,
+      body: t.tPhoneBody,
+    },
+    {
+      getTarget: () => passwordContainerRef.current,
+      title: t.tPasswordTitle,
+      body: t.tPasswordBody,
+    },
+    {
+      getTarget: () => eyeButtonRef.current,
+      title: t.tEyeTitle,
+      body: t.tEyeBody,
+    },
+    {
+      getTarget: () => loginButtonRef.current,
+      title: t.tLoginTitle,
+      body: t.tLoginBody,
+    },
+    {
+      getTarget: () => signUpLinkRef.current,
+      title: t.tSignUpTitle,
+      body: t.tSignUpBody,
+    },
+    {
+      getTarget: () => forgotLinkRef.current,
+      title: t.tForgotTitle,
+      body: t.tForgotBody,
+    },
+  ], [t]);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['top','left','right']}>
@@ -197,7 +281,10 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
           <View style={styles.form}>
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.phoneLabel}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+              <View
+                ref={phoneContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border }]}
+              >
                 <Ionicons name="call-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={phoneRef}
@@ -211,7 +298,6 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
                   returnKeyType="next"
                   blurOnSubmit={false}
                   onSubmitEditing={() => {
-                    // Move focus to password field when pressing Enter/Next
                     if (passwordRef && passwordRef.current && passwordRef.current.focus) {
                       passwordRef.current.focus();
                     }
@@ -222,7 +308,10 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
 
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.passwordLabel}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+              <View
+                ref={passwordContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border }]}
+              >
                 <Ionicons name="lock-closed-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={passwordRef}
@@ -234,11 +323,13 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
                   onChangeText={setPassword}
                   returnKeyType="done"
                   onSubmitEditing={async () => {
-                    // Trigger same action as the login button when pressing Enter/Done
                     await handleLogin();
                   }}
                 />
-                <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
+                <TouchableOpacity
+                  ref={eyeButtonRef}
+                  onPress={() => setShowPassword(!showPassword)}
+                >
                   <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={20} color={theme.textSecondary} />
                 </TouchableOpacity>
               </View>
@@ -252,6 +343,7 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
             )}
 
             <TouchableOpacity
+              ref={loginButtonRef}
               style={[styles.loginButton, { backgroundColor: theme.accent }]}
               onPress={handleLogin}
               disabled={loading}
@@ -267,23 +359,41 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
               <Text style={[styles.registerText, { color: theme.textSecondary }]}>
                 {t.noAccount}
               </Text>
-              <TouchableOpacity onPress={() => navigation.navigate('Register')}>
+              <TouchableOpacity
+                ref={signUpLinkRef}
+                onPress={() => navigation.navigate('Register')}
+              >
                 <Text style={[styles.registerLink, { color: theme.text }]}> {t.signUp}</Text>
               </TouchableOpacity>
             </View>
-              <View style={styles.resetContainer}>
-                <Text style={[styles.resetText, { color: theme.textSecondary }]}>
+
+            <View style={styles.resetContainer}>
+              <Text style={[styles.resetText, { color: theme.textSecondary }]}>
                 {t.resetText}
               </Text>
-            <TouchableOpacity onPress={() => navigation.navigate('ForgotPassword')}>
-              <Text style={[styles.forgotPassword, { color: theme.text }]}>
-                {t.forgot}
-              </Text>
-            </TouchableOpacity>
+              <TouchableOpacity
+                ref={forgotLinkRef}
+                onPress={() => navigation.navigate('ForgotPassword')}
+              >
+                <Text style={[styles.forgotPassword, { color: theme.text }]}>
+                  {t.forgot}
+                </Text>
+              </TouchableOpacity>
             </View>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* ============ LOGIN TUTORIAL ============ */}
+      <ScreenTutorialOverlay
+        visible={showTutorial}
+        steps={tutorialSteps}
+        isDarkMode={isDarkMode}
+        language={language}
+        onFinish={finishTutorial}
+        padding={5}
+        dimOpacity={0}
+      />
     </SafeAreaView>
   );
 };
@@ -309,11 +419,11 @@ const styles = StyleSheet.create({
   loginButton: { height: 48, borderRadius: 24, justifyContent: 'center', alignItems: 'center', marginTop: 10 },
   loginButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   registerContainer: { flexDirection: 'row', justifyContent: 'center', marginTop: 20 },
-  resetContainer: { flexDirection: 'row', justifyContent: 'center', marginTop: 30,gap: 3 },
+  resetContainer: { flexDirection: 'row', justifyContent: 'center', marginTop: 30, gap: 3 },
   registerText: { fontSize: 14 },
   registerLink: { fontSize: 14, fontWeight: '600' },
   resetText: { fontSize: 14 },
-  forgotPassword: {fontSize: 14 },
+  forgotPassword: { fontSize: 14 },
 });
 
 export default LoginScreen;

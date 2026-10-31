@@ -1,3 +1,4 @@
+
 // screens/ViewPlaceScreen.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
@@ -30,6 +31,8 @@ import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
+import OnlineStatusDot from '../components/OnlineStatusDot';
+import useOnlineUsers from '../hooks/useOnlineUsers';
 import { Video } from '../utils/expoAvCompat';
 import { useFocusEffect } from '@react-navigation/native';
 import { offlineDatabase } from '../services/offlineDatabase';
@@ -37,6 +40,11 @@ import { networkStatus } from '../services/networkStatus';
 import { mediaCache } from '../services/mediaCache';
 import { mapOfflineCache } from '../services/mapOfflineCache';
 import { compressImageForUpload } from '../utils/imageCompressor';
+import VideoBackground from '../components/VideoBackground';
+import { requestVideoBackground } from '../services/videoBackgroundService';
+import { getAddressText } from '../utils/address';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { height, width } = Dimensions.get('window');
 const MODAL_HEIGHT_80 = height * 0.7;
@@ -189,6 +197,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const { refreshUser } = useAuth();
   const adminLimits = useUserLimits();
   const { place, pendingShopId } = route.params || {};
+  const placeAddress = getAddressText(place?.address);
   const showMapMessage = (title, message, type = 'info', buttonAction) => {
     showBottomSheet({
       type,
@@ -207,6 +216,9 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const [loadingOwner, setLoadingOwner] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [streetImageUri, setStreetImageUri] = useState(null);
+  const [placeVideoDuration, setPlaceVideoDuration] = useState(0);
+  const [placeVideoPlaying, setPlaceVideoPlaying] = useState(false);
+  const [placeVideoBackground, setPlaceVideoBackground] = useState(null);
   // ----- Shopping Mall specific state -----
   const [shops, setShops] = useState([]);
   const [loadingShops, setLoadingShops] = useState(false);
@@ -216,6 +228,37 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const isMall =
     place?.category === 'shoppingmall' || place?.category === 'shopping_mall';
   const placeOwnerId = place?.userId?._id || place?.userId || place?.owner?._id || place?.ownerId?._id || place?.ownerId;
+  const presenceUserIds = [
+    placeOwnerId,
+    ...shops.map(shop => shop.owner?._id || shop.ownerId?._id || shop.ownerId || shop.userId?._id || shop.userId),
+  ];
+  const onlineUsers = useOnlineUsers(presenceUserIds);
+  const placeHeaderMediaUrl = streetImageUri ||
+    place?.videoUrl ||
+    place?.images?.street ||
+    place?.images?.streetImage ||
+    null;
+
+  useEffect(() => {
+    let active = true;
+    setPlaceVideoBackground(null);
+    if (!isVideoUrl(placeHeaderMediaUrl) || placeVideoDuration <= 0) {
+      return () => { active = false; };
+    }
+
+    requestVideoBackground({
+      uri: placeHeaderMediaUrl,
+      cacheKey: place?._id || place?.id,
+      duration: placeVideoDuration,
+      thumbnailUri: place?.videoThumbnail,
+    }).then(result => {
+      if (active) setPlaceVideoBackground(result);
+    }).catch(error => {
+      console.warn('Could not prepare the video background:', error.name || 'Unknown error');
+    });
+
+    return () => { active = false; };
+  }, [placeHeaderMediaUrl, placeVideoDuration, place?._id, place?.id, place?.videoThumbnail]);
 
   // ----- Add product swipe‑up sheet state -----
   const [addProductSheetVisible, setAddProductSheetVisible] = useState(false);
@@ -740,7 +783,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
   const handleShare = async () => {
     try {
       const link = appShareLink || 'https://shaaka.app';
-      const message = `📍 ${place.name}\n${place.address || ''}\nCategory: ${categoryLabel}\n\n${link}`;
+      const message = `📍 ${place.name}\n${placeAddress}\nCategory: ${categoryLabel}\n\n${link}`;
       await Share.share({ message });
     } catch (e) {
       showMapMessage('Error', 'Could not share place.', 'error');
@@ -765,6 +808,32 @@ export default function ViewPlaceScreen({ route, navigation }) {
     const ownerName = ownerData?.username || ownerData?.name || place?.ownerName || 'Place owner';
     const ownerPhone = ownerData?.phone || place?.phone || '';
     const contextId = place?.id || place?._id || place?.placeId || `place_${place?.name || 'place'}`;
+    const placeMedia = placeHeaderMediaUrl;
+    const videoThumbnail = typeof place?.videoThumbnail === 'string'
+      ? place.videoThumbnail
+      : place?.videoThumbnail?.uri || place?.videoThumbnail?.url || '';
+    const placeImage = isVideoUrl(placeMedia)
+      ? videoThumbnail
+      : placeMedia || place?.images?.streetImage || place?.images?.street || '';
+    const replyPost = {
+      postId: String(contextId),
+      contextId: String(contextId),
+      contextType: 'place',
+      title: place?.name || 'Place',
+      description: place?.description || '',
+      image: placeImage,
+      streetImage: placeImage,
+      videoUrl: isVideoUrl(placeMedia) ? placeMedia : '',
+      videoThumbnail,
+      location: placeAddress,
+      category: place?.category || '',
+      lat: place?.lat ?? place?.location?.latitude ?? null,
+      lon: place?.lon ?? place?.location?.longitude ?? null,
+      ownerId: ownerId,
+      username: ownerName,
+      userAvatar: ownerData?.avatar || ownerData?.userAvatar || '',
+      timestamp: place?.createdAt || new Date().toISOString(),
+    };
 
     if (!ownerId) {
       showMapMessage('Error', 'Owner information is not available yet.', 'error');
@@ -778,6 +847,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
       postId: contextId,
       postTitle: place?.name || 'Place',
       sellerAvatar: ownerData?.avatar || ownerData?.userAvatar || '',
+      replyPost,
     });
   };
 
@@ -902,6 +972,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
 
       // Upload all images
       const uploadedUrls = [];
+      const uploadedVariants = [];
       for (const img of productImages) {
         const compressedImage = await compressImageForUpload(img.uri, img.name || 'product.jpg');
         const formData = new FormData();
@@ -918,6 +989,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
         );
         if (uploadRes.data.success) {
           uploadedUrls.push(uploadRes.data.url);
+          if (uploadRes.data.imageVariants) uploadedVariants.push(uploadRes.data.imageVariants);
         } else {
           throw new Error('Image upload failed');
         }
@@ -929,6 +1001,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
           name: newProduct.name.trim(),
           price: Number(newProduct.price),
           images: uploadedUrls, // description removed
+          imageVariants: uploadedVariants,
         },
         {
           headers: { Authorization: `Bearer ${token}` },
@@ -972,7 +1045,8 @@ export default function ViewPlaceScreen({ route, navigation }) {
         <View>
           {firstImage ? (
             <Image
-              source={{ uri: firstImage }}
+              source={normalizeImageSource({ uri: firstImage, storageKey: item.imageStorageKeys?.[0] })}
+
               style={styles.productGridImage}
             />
           ) : (
@@ -1021,6 +1095,9 @@ export default function ViewPlaceScreen({ route, navigation }) {
     const doorNumber = item.shopNumber || '';
     const floor = item.floorNumber ? `, Floor ${item.floorNumber}` : '';
     const ownerAvatar = shopOwner?.avatar || shopOwner?.userAvatar || null;
+    const shopOwnerId = typeof shopOwner === 'object'
+      ? shopOwner?._id || shopOwner?.id
+      : shopOwner;
     const initials =
       ownerName !== 'Unknown' ? ownerName.charAt(0).toUpperCase() : '?';
 
@@ -1036,7 +1113,11 @@ export default function ViewPlaceScreen({ route, navigation }) {
         <View style={styles.shopCardTop}>
           <View style={styles.shopCardLeft}>
             {shopImage ? (
-              <Image source={{ uri: shopImage }} style={styles.shopLogo} />
+              <Image
+                source={normalizeImageSource({ uri: shopImage, storageKey: item.frontImageStorageKey })}
+
+                style={styles.shopLogo}
+              />
             ) : (
               <View
                 style={[
@@ -1088,28 +1169,34 @@ export default function ViewPlaceScreen({ route, navigation }) {
                 </View>
               </View>
               <View style={styles.shopOwnerRow}>
-                {ownerAvatar ? (
-                  <Image
-                    source={{ uri: ownerAvatar }}
-                    style={styles.shopOwnerAvatar}
-                  />
-                ) : (
-                  <View
-                    style={[
-                      styles.shopOwnerAvatarPlaceholder,
-                      { backgroundColor: theme.border },
-                    ]}
-                  >
-                    <Text
+                <View style={styles.shopOwnerStatusAvatarWrap}>
+                  {ownerAvatar ? (
+                    <Image
+                      source={normalizeImageSource({ uri: ownerAvatar })}
+                      style={[styles.shopOwnerAvatar, { marginRight: 0 }]}
+                    />
+                  ) : (
+                    <View
                       style={[
-                        styles.shopOwnerAvatarInitials,
-                        { color: theme.text },
+                        styles.shopOwnerAvatarPlaceholder,
+                        { backgroundColor: theme.border, marginRight: 0 },
                       ]}
                     >
-                      {initials}
-                    </Text>
-                  </View>
-                )}
+                      <Text
+                        style={[
+                          styles.shopOwnerAvatarInitials,
+                          { color: theme.text },
+                        ]}
+                      >
+                        {initials}
+                      </Text>
+                    </View>
+                  )}
+                  <OnlineStatusDot
+                    visible={Boolean(shopOwnerId && onlineUsers[String(shopOwnerId)])}
+                    size={9}
+                  />
+                </View>
                 <Text
                   style={[
                     styles.shopOwnerName,
@@ -1183,22 +1270,28 @@ export default function ViewPlaceScreen({ route, navigation }) {
           disabled={!ownerId}
         >
           {ownerData.avatar || ownerData.userAvatar ? (
-            <Image
-              source={{ uri: ownerData.avatar || ownerData.userAvatar }}
-              style={styles.ownerAvatar}
-            />
+            <View style={styles.ownerStatusAvatarWrap}>
+              <Image
+                source={normalizeImageSource({ uri: ownerData.avatar || ownerData.userAvatar })}
+                style={[styles.ownerAvatar, { marginRight: 0 }]}
+              />
+              <OnlineStatusDot visible={Boolean(onlineUsers[String(ownerId)])} size={14} />
+            </View>
           ) : (
-            <View
-              style={[
-                styles.ownerAvatarPlaceholder,
-                { backgroundColor: theme.border },
-              ]}
-            >
-              <Text
-                style={[styles.ownerAvatarInitials, { color: theme.text }]}
+            <View style={styles.ownerStatusAvatarWrap}>
+              <View
+                style={[
+                  styles.ownerAvatarPlaceholder,
+                  { backgroundColor: theme.border, marginRight: 0 },
+                ]}
               >
-                {initials}
-              </Text>
+                <Text
+                  style={[styles.ownerAvatarInitials, { color: theme.text }]}
+                >
+                  {initials}
+                </Text>
+              </View>
+              <OnlineStatusDot visible={Boolean(onlineUsers[String(ownerId)])} size={14} />
             </View>
           )}
           <View style={styles.ownerInfo}>
@@ -1524,28 +1617,50 @@ export default function ViewPlaceScreen({ route, navigation }) {
               {!expanded && (
                 <>
                   {(() => {
-                    const streetImage = streetImageUri ||
-                      place.images?.street ||
-                      place.images?.streetImage ||
-                      null;
+                    const streetImage = placeHeaderMediaUrl;
                     return streetImage ? (
-                      <View style={{ marginBottom: 8 }}>
+                      <View style={{ marginBottom: 8, position: 'relative' }}>
                         {getPrimaryMedia({
                           imageUrl: streetImage,
                           videoUrl: streetImage,
                         }).type === 'video' ? (
-                          <Video
-                            source={{ uri: streetImage }}
-                            style={styles.headerImage}
-                            resizeMode="cover"
-                            shouldPlay
-                            isMuted
-                            isLooping
-                            useNativeControls={false}
-                          />
+                          <>
+                            <VideoBackground
+                              frameUri={placeVideoBackground?.frameUri || place?.videoThumbnail}
+                              duration={placeVideoBackground?.duration}
+                              active={placeVideoPlaying}
+                            />
+                            <Video
+                              source={{ uri: streetImage }}
+                              style={[
+                                styles.headerImage,
+                                { zIndex: 2 },
+                                placeVideoBackground?.frameUri ? { opacity: 0.96 } : null,
+                              ]}
+                              resizeMode="cover"
+                              shouldPlay
+                              isMuted
+                              isLooping
+                              useNativeControls={false}
+                              onPlaybackStatusUpdate={status => {
+                                const nextDuration = Number(status?.durationMillis) / 1000;
+                                if (nextDuration > 0) {
+                                  setPlaceVideoDuration(current =>
+                                    current === nextDuration ? current : nextDuration
+                                  );
+                                }
+                                setPlaceVideoPlaying(Boolean(status?.isPlaying));
+                              }}
+                            />
+                          </>
                         ) : (
                           <Image
-                            source={{ uri: streetImage }}
+                            source={normalizeImageSource({
+                              uri: streetImage,
+                              storageKey: place.imageStorageKeys?.street
+                                || place.imageStorageKeys?.streetImage,
+                            })}
+
                             style={styles.headerImage}
                           />
                         )}
@@ -1559,14 +1674,14 @@ export default function ViewPlaceScreen({ route, navigation }) {
                     {categoryLabel}
                   </Text>
 
-                  {place.address && (
+                  {placeAddress && (
                     <Text style={[styles.address, { color: theme.text }]}>
                       <Ionicons
                         name="location-sharp"
                         size={16}
                         color={theme.textSecondary}
                       />{' '}
-                      {place.address}
+                      {placeAddress}
                     </Text>
                   )}
 
@@ -1651,16 +1766,18 @@ export default function ViewPlaceScreen({ route, navigation }) {
                       <Ionicons name="navigate" size={22} color="#fff" />
                       <Text style={styles.actionBtnText}>Directions</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        styles.actionBtn,
-                        { backgroundColor: theme.accent },
-                      ]}
-                      onPress={handleMessageOwner}
-                    >
-                      <Ionicons name="chatbubble-ellipses-outline" size={22} color="#fff" />
-                      <Text style={styles.actionBtnText}>Message</Text>
-                    </TouchableOpacity>
+                    {!isOwner && (
+                      <TouchableOpacity
+                        style={[
+                          styles.actionBtn,
+                          { backgroundColor: theme.accent },
+                        ]}
+                        onPress={handleMessageOwner}
+                      >
+                        <Ionicons name="chatbubble-ellipses-outline" size={22} color="#fff" />
+                        <Text style={styles.actionBtnText}>Message</Text>
+                      </TouchableOpacity>
+                    )}
                     <TouchableOpacity
                       style={[
                         styles.actionBtn,
@@ -1933,7 +2050,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
                   {productImages.map((img, idx) => (
                     <View key={idx} style={styles.modalImageWrapper}>
                       <Image
-                        source={{ uri: img.uri }}
+                        source={normalizeImageSource({ uri: img.uri })}
                         style={styles.modalImagePreview}
                       />
                       <TouchableOpacity
@@ -2301,6 +2418,7 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     marginRight: 12,
   },
+  ownerStatusAvatarWrap: { position: 'relative', marginRight: 12 },
   ownerAvatarPlaceholder: {
     width: 50,
     height: 50,
@@ -2508,6 +2626,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 4,
   },
+  shopOwnerStatusAvatarWrap: { position: 'relative', marginRight: 6 },
   shopOwnerAvatar: {
     width: 24,
     height: 24,

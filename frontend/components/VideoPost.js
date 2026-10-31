@@ -5,6 +5,9 @@ import * as VideoThumbnails from 'expo-video-thumbnails';
 import { Ionicons } from '@expo/vector-icons';
 import VideoPlayerControls from './VideoPlayerControls';
 import { videoPreloader } from './VideoPreloader';
+import VideoBackground from './VideoBackground';
+import { requestVideoBackground } from '../services/videoBackgroundService';
+import { getImageUri, normalizeImageSource } from '../utils/imageUrl';
 
 const MIN_VIDEO_HEIGHT = 200;
 const MAX_VIDEO_HEIGHT = 750;
@@ -22,9 +25,11 @@ const safePlayerAction = (player, methodName, ...args) => {
 
 const VideoPost = ({ 
   videoUrl, 
+  videoId,
   videoThumbnail, 
   videoLink, 
   videoDuration = 0, 
+  videoSizeBytes = 0,
   theme,
   containerHeight = null,
   isVisible = false,
@@ -40,10 +45,13 @@ const VideoPost = ({
   centerControlOnPauseOnly = false,
   onVideoPress,
 }) => {
+  const thumbnailUri = getImageUri(videoThumbnail);
   const [duration, setDuration] = useState(Number(videoDuration) || 0);
   const [ready, setReady] = useState(false);
-  const [coverImage, setCoverImage] = useState(videoThumbnail || null);
+  const [coverImage, setCoverImage] = useState(thumbnailUri);
   const [videoSize, setVideoSize] = useState({ width: 9, height: 16 });
+  const [background, setBackground] = useState(null);
+  const [isPlaying, setIsPlaying] = useState(false);
   const [autoPlayNotice, setAutoPlayNotice] = useState(0);
   const manualOverride = useRef(null);
   
@@ -53,8 +61,8 @@ const VideoPost = ({
     const generateCover = async () => {
       if (!videoUrl) return;
 
-      if (videoThumbnail) {
-        setCoverImage(videoThumbnail);
+      if (thumbnailUri) {
+        setCoverImage(thumbnailUri);
         return;
       }
 
@@ -82,7 +90,7 @@ const VideoPost = ({
     return () => {
       isMounted = false;
     };
-  }, [videoUrl, videoThumbnail]);
+  }, [videoUrl, thumbnailUri]);
   
   const initialVideoHeight = containerHeight || Math.min(
     MAX_VIDEO_HEIGHT,
@@ -95,6 +103,28 @@ const VideoPost = ({
     instance.muted = muted;
     instance.timeUpdateEventInterval = 0.25;
   });
+
+  useEffect(() => {
+    let active = true;
+    setBackground(null);
+    if (!videoUrl || duration <= 0) return () => { active = false; };
+
+    requestVideoBackground({
+      uri: videoUrl,
+      cacheKey: videoId,
+      duration,
+      width: videoSize.width,
+      height: videoSize.height,
+      size: videoSizeBytes,
+      thumbnailUri,
+    }).then(result => {
+      if (active) setBackground(result);
+    }).catch(error => {
+      console.warn('Could not prepare the video background:', error.name || 'Unknown error');
+    });
+
+    return () => { active = false; };
+  }, [videoUrl, videoId, thumbnailUri, videoDuration, duration, videoSize, videoSizeBytes]);
 
   // Sync mute state with prop
   useEffect(() => {
@@ -129,6 +159,7 @@ const VideoPost = ({
       setReady(status === 'readyToPlay');
     });
     const playingSubscription = player.addListener('playingChange', ({ isPlaying }) => {
+      setIsPlaying(isPlaying);
       if (isPlaying) videoPreloader.pauseOtherPlayers(player);
     });
     const trackSubscription = player.addListener('videoTrackChange', ({ videoTrack }) => {
@@ -196,9 +227,15 @@ const VideoPost = ({
           backgroundColor: theme.mediaLoadingBackground,
         }
       ]}>
+        <VideoBackground
+          frameUri={background?.frameUri || coverImage}
+          duration={background?.duration}
+          active={isVisible && isPlaying}
+        />
+
         {!ready && coverImage ? (
           <Image
-            source={{ uri: coverImage }}
+            source={normalizeImageSource({ uri: coverImage })}
             style={[styles.coverImage, { backgroundColor: theme.mediaLoadingBackground }]}
             resizeMode="cover"
           />
@@ -215,7 +252,7 @@ const VideoPost = ({
         
         <VideoView 
           player={player} 
-          style={styles.video} 
+          style={[styles.video, background?.frameUri ? styles.videoWithBackground : null]}
           contentFit={contentFit}
           nativeControls={false} 
         />
@@ -289,6 +326,9 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: 'transparent',
     zIndex: 2,
+  },
+  videoWithBackground: {
+    opacity: 0.96,
   },
 });
 

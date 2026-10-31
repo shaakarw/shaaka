@@ -44,6 +44,18 @@ const UserSchema = new mongoose.Schema({
     default: '' 
   },
   avatarStorageKey: { type: String, default: '' },
+  avatarVariants: [{
+    originalUrl: String,
+    originalStorageKey: String,
+    width: Number,
+    height: Number,
+    variants: {
+      tiny: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      small: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      medium: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      large: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+    },
+  }],
   storageProvider: { type: String, default: '' },
   stories: [
     {

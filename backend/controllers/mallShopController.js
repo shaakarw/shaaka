@@ -6,6 +6,33 @@ const { deleteMallShopWithCleanup } = require('../utils/deletionCleanup');
 const { normalizeRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
 const storageService = require('../services/storage/storageService');
+const { resolveStoredImageUrl } = require('../utils/storedImageUrl');
+
+const normalizeMallShopImageUrls = shop => {
+  const result = typeof shop.toObject === 'function' ? shop.toObject() : { ...shop };
+  result.images = {
+    ...result.images,
+    frontImage: resolveStoredImageUrl(
+      result.images?.frontImage,
+      result.frontImageStorageKey,
+      storageService
+    ),
+  };
+  result.products = (result.products || []).map(product => {
+    const normalizedProduct = typeof product.toObject === 'function'
+      ? product.toObject()
+      : { ...product };
+    normalizedProduct.images = (normalizedProduct.images || []).map((image, index) => (
+      resolveStoredImageUrl(
+        image,
+        normalizedProduct.imageStorageKeys?.[index],
+        storageService
+      )
+    ));
+    return normalizedProduct;
+  });
+  return result;
+};
 
 // Create a new shop inside a mall
 exports.createMallShop = async (req, res) => {
@@ -26,6 +53,7 @@ exports.createMallShop = async (req, res) => {
       openingTime,
       closingTime,
       images,
+      imageVariants,
       products,
       lat,
       lon,
@@ -33,6 +61,7 @@ exports.createMallShop = async (req, res) => {
 
     const normalizedProducts = (products || []).map(product => ({
       ...product,
+      imageVariants: Array.isArray(product.imageVariants) ? product.imageVariants : [],
       imageStorageKeys: storageService.collectStorageKeys
         ? storageService.collectStorageKeys(product.images || [])
         : (product.images || []).map(storageService.getStorageKeyFromUrl).filter(Boolean),
@@ -108,6 +137,7 @@ exports.createMallShop = async (req, res) => {
       openingTime,
       closingTime,
       images,
+      imageVariants: Array.isArray(imageVariants) ? imageVariants : [],
       frontImageStorageKey,
       storageProvider: 'b2',
       products: normalizedProducts,
@@ -149,7 +179,7 @@ exports.getMallShopsByMall = async (req, res) => {
     const shops = await MallShop.find({ mallId })
       .populate('ownerId', 'name username avatar')
       .sort({ createdDate: -1 });
-    res.json({ success: true, shops });
+    res.json({ success: true, shops: shops.map(normalizeMallShopImageUrls) });
   } catch (error) {
     console.error('Error fetching mall shops:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -164,7 +194,7 @@ exports.getMallShopById = async (req, res) => {
     if (!shop) {
       return res.status(404).json({ success: false, message: 'Shop not found' });
     }
-    res.json({ success: true, shop });
+    res.json({ success: true, shop: normalizeMallShopImageUrls(shop) });
   } catch (error) {
     console.error('Error fetching mall shop:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -200,7 +230,7 @@ exports.searchMallShops = async (req, res) => {
 
     // Format response to match frontend expectations
     const formatted = shops.map(shop => ({
-      ...shop,
+      ...normalizeMallShopImageUrls(shop),
       mall: {
         name: shop.mallName || 'Unknown Mall',
         lat: shop.lat || 0,
@@ -275,7 +305,7 @@ exports.deleteMallShop = async (req, res) => {
 exports.getMyMallShops = async (req, res) => {
   try {
     const shops = await MallShop.find({ ownerId: req.user.id }).sort({ createdDate: -1 });
-    res.json({ success: true, shops });
+    res.json({ success: true, shops: shops.map(normalizeMallShopImageUrls) });
   } catch (error) {
     console.error('Error fetching my mall shops:', error);
     res.status(500).json({ success: false, message: 'Server error' });

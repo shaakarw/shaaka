@@ -49,6 +49,18 @@ const PlaceSchema = new mongoose.Schema({
     doorImage: { type: String, default: '' },
     doorVideo: { type: String, default: '' },
   },
+  imageVariants: [{
+    originalUrl: String,
+    originalStorageKey: String,
+    width: Number,
+    height: Number,
+    variants: {
+      tiny: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      small: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      medium: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      large: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+    },
+  }],
   storageProvider: { type: String, default: '' },
   // ✅ NEW: Products array
   products: [
@@ -58,6 +70,18 @@ const PlaceSchema = new mongoose.Schema({
      description: { type: String, default: '' },
      images: [String], // URLs after upload
     imageStorageKeys: [{ type: String }],
+    imageVariants: [{
+      originalUrl: String,
+      originalStorageKey: String,
+      width: Number,
+      height: Number,
+      variants: {
+        tiny: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+        small: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+        medium: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+        large: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      },
+    }],
    },
   ],
   extras: {

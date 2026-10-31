@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -26,11 +27,21 @@ import { useAuth, useUserLimits } from '../context/AuthContext';
 import { useBottomSheet } from '../context/BottomSheetContext';
 import { computeAggregatedLimits } from '../utils/subscriptionHelpers';
 import { normalizeRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
+import { getAddressText } from '../utils/address';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import { compressImageForUpload } from '../utils/imageCompressor';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
+import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
+import useScreenTutorial from '../hooks/useScreenTutorial';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width, height } = Dimensions.get('window');
 const CATEGORY_ICON_SIZE = 28;
+
+// ---------- Tutorial constants ----------
+const ADDSHOP_TUTORIAL_ID = 'add-mall-shop-screen';
+const ADDSHOP_TUTORIAL_DELAY_MS = 700;
 
 // ----- Categories suitable for shops inside a shopping mall -----
 const MALL_SHOP_CATEGORIES = [
@@ -137,6 +148,22 @@ const translations = {
     sessionExpired: 'Session expired. Please login again.',
     infoTitle: 'Why is Next disabled?',
     infoMessage: 'You already have a shop. You can only add one shop. If you want to change your shop, please delete the existing one first.',
+
+    // ----- Tutorial (per step) -----
+    tStep1NameTitle: 'Shop name',
+    tStep1NameBody: 'Enter your shop name and door / shop number. Both are required.',
+    tStep1PhoneTitle: 'Contact phone',
+    tStep1PhoneBody: 'Add a Rwanda number starting with 079, 078 or 073 so customers can call you.',
+    tStep2CategoryTitle: 'Shop category',
+    tStep2CategoryBody: 'Pick the category that best describes what you sell. This helps customers find you inside the mall.',
+    tStep3ImageTitle: 'Shop front image',
+    tStep3ImageBody: 'Upload a clear photo of your shop front. A good photo builds trust — this is required.',
+    tStep4ProductsTitle: 'Add products (optional)',
+    tStep4ProductsBody: 'Add products with a name, price, and photo. You can skip this step if you want.',
+    tStep5PreviewTitle: 'Preview',
+    tStep5PreviewBody: 'Tap here to see how your shop will appear to customers.',
+    tStep5PublishTitle: 'Publish',
+    tStep5PublishBody: 'When everything looks good, tap here to publish your shop to the mall.',
   },
   Kinyarwanda: {
     addShop: 'Ongera iduka',
@@ -203,11 +230,28 @@ const translations = {
     sessionExpired: 'Igihe cyawe cyashize. Nyamuneka winjire ondongeye.',
     infoTitle: 'Kuki Next idakora?',
     infoMessage: 'Ufite iduka. Ushobora kugira iduka rimwe gusa. Niba ushaka guhindura, siba iryawe mbere.',
+
+    // ----- Tutorial (per step) -----
+    tStep1NameTitle: 'Izina ry\'iduka',
+    tStep1NameBody: 'Andika izina ry\'iduka n\'umubare w\'umuryango. Byombi birasabwa.',
+    tStep1PhoneTitle: 'Numero ya telefone',
+    tStep1PhoneBody: 'Shyiraho numero yo mu Rwanda itangira na 079, 078 cyangwa 073 kugira ngo abakiriya baguhamagare.',
+    tStep2CategoryTitle: 'Icyiciro cy\'iduka',
+    tStep2CategoryBody: 'Hitamo icyiciro gisobanura neza ibyo ugurisha. Ibi bifasha abakiriya kukubona muri mall.',
+    tStep3ImageTitle: 'Ifoto y\'iduka',
+    tStep3ImageBody: 'Shyira ifoto igaragara neza y\'iduka ryawe. Ifoto nziza yubaka icyizere — iyi foto irasabwa.',
+    tStep4ProductsTitle: 'Ongeraho ibicuruzwa (bitari ngombwa)',
+    tStep4ProductsBody: 'Ongeraho ibicuruzwa bifite izina, igiciro n\'ifoto. Ushobora gusimbuka iri tuntu niba ubishaka.',
+    tStep5PreviewTitle: 'Reba mbere',
+    tStep5PreviewBody: 'Kanda hano kugira ngo ubone uko iduka ryawe rizagaragara ku bakiriya.',
+    tStep5PublishTitle: 'Tangaza',
+    tStep5PublishBody: 'Iyo byose bigaragara neza, kanda hano utangaze iduka ryawe muri mall.',
   },
 };
 
 export default function AddShoppingMallShopScreen({ route, navigation, language = 'English' }) {
   const { theme, isDarkMode } = useTheme();
+  const isFocused = useIsFocused();
   const { showBottomSheet } = useBottomSheet();
   const { refreshUser } = useAuth();
   const adminLimits = useUserLimits();
@@ -253,6 +297,24 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
   const [loadingUser, setLoadingUser] = useState(true);
   const [checkingShop, setCheckingShop] = useState(true);
   const [hasExistingShop, setHasExistingShop] = useState(false);
+
+  // ----- Tutorial refs -----
+  const shopNameRef = useRef(null);
+  const shopNumberRef = useRef(null);
+  const phoneRef = useRef(null);
+  const categoryGridRef = useRef(null);
+  const imageBoxRef = useRef(null);
+  const productFormRef = useRef(null);
+  const previewButtonRef = useRef(null);
+  const publishButtonRef = useRef(null);
+
+  // ----- Screen Tutorial hook (step-aware) -----
+  const [showTutorial, finishTutorial] = useScreenTutorial(
+    ADDSHOP_TUTORIAL_ID,
+    isFocused && !loadingUser && !checkingShop && !hasExistingShop,
+    ADDSHOP_TUTORIAL_DELAY_MS,
+    step
+  );
 
   const showThemedAlert = (title, message, buttons) => {
     const alertButtons = buttons?.length ? buttons : [{ text: 'OK' }];
@@ -315,7 +377,6 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
 
         await refreshUser();
 
-        // 1. Get current user
         const userRes = await axios.get(`${BASE_URL}/api/auth/me`, {
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -330,12 +391,10 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
         const user = userRes.data.user;
         setCurrentUser(user);
 
-        // 2. Check if user already has a shop inside THIS mall
         try {
-          // Fetch shops for this mall only
           const mallIdParam = mall?._id || mall?.id || mall?.uuid || null;
           const shopsRes = await axios.get(`${BASE_URL}/api/mall-shops`, {
-            params: { mallId: mallIdParam }, // pass robust mallId
+            params: { mallId: mallIdParam },
             headers: { Authorization: `Bearer ${token}` },
           });
 
@@ -351,7 +410,6 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
             showThemedAlert(t.alreadyHasShop, t.alreadyHasShopMessage);
           }
         } catch (shopError) {
-          // Log the error but don't block – we still proceed.
           console.warn('Could not check existing shops:', shopError.message);
         }
 
@@ -515,11 +573,9 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
       showThemedAlert(t.missing, t.imageMissing);
       return false;
     }
-    // Step 4 is optional
     return true;
   };
 
-  // ----- Keyboard submit handler (triggers next step) -----
   const handleSubmitEditing = () => {
     if (validateStep()) {
       nextStep();
@@ -559,7 +615,6 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
   const publishShop = async () => {
     if (!validateStep()) return;
 
-    // Check subscription limit before proceeding
     const canProceed = await checkSubscriptionLimit();
     if (!canProceed) return;
 
@@ -574,7 +629,6 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
         return;
       }
 
-      // One-type-only check: verify user does not already have a normal place/shop
       const placesRes = await axios.get(`${BASE_URL}/api/places`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -586,8 +640,8 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
         return;
       }
 
-      // 1. Upload shop front image
       let frontImageUrl = null;
+      let frontImageVariant = null;
       if (shopFrontImage) {
         const compressedImage = await compressImageForUpload(shopFrontImage, 'shop_front.jpg');
         const formData = new FormData();
@@ -600,12 +654,14 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
         });
         if (uploadRes.data.success) {
           frontImageUrl = uploadRes.data.url;
+          frontImageVariant = uploadRes.data.imageVariants;
+        } else {
+          throw new Error(uploadRes.data.message || 'Shop image upload failed');
         }
       }
 
-      // 2. Upload product images (if any)
       const uploadedProducts = await Promise.all(products.map(async (product) => {
-        const productImagesUrls = await Promise.all(product.images.map(async (img) => {
+        const uploadedImages = await Promise.all(product.images.map(async (img) => {
           const compressedImage = await compressImageForUpload(img.uri, img.name || 'product.jpg');
           const formData = new FormData();
           formData.append('image', compressedImage);
@@ -615,16 +671,17 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
               Authorization: `Bearer ${token}`,
             },
           });
-          return res.data.url;
+          if (!res.data.success) throw new Error(res.data.message || 'Product image upload failed');
+          return { url: res.data.url, imageVariants: res.data.imageVariants };
         }));
         return {
           name: product.name,
           price: parseFloat(product.price),
-          images: productImagesUrls,
+          images: uploadedImages.map(image => image.url),
+          imageVariants: uploadedImages.map(image => image.imageVariants).filter(Boolean),
         };
       }));
 
-      // 3. Build shop payload
       const mallIdPayload = mall?._id || mall?.id || mall?.uuid || null;
       const mallLat = mall?.lat || mall?.location?.latitude || mall?.location?.lat || null;
       const mallLon = mall?.lon || mall?.location?.longitude || mall?.location?.lon || null;
@@ -644,22 +701,19 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
         website: website.trim(),
         openingTime,
         closingTime,
-        images: {
-          frontImage: frontImageUrl,
-        },
+        images: { frontImage: frontImageUrl },
+        imageVariants: frontImageVariant ? [frontImageVariant] : [],
         products: uploadedProducts,
         lat: mallLat,
         lon: mallLon,
         createdDate: new Date().toISOString(),
       };
 
-      // Simulate progress
       for (let i = 0; i <= 100; i += 10) {
         await new Promise(resolve => setTimeout(resolve, 200));
         setProgress(i);
       }
 
-      // 4. Send to backend
       const response = await axios.post(`${BASE_URL}/api/mall-shops`, shopData, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -679,6 +733,60 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
       setProgress(0);
     }
   };
+
+  // ----- Tutorial steps (per step) -----
+  const tutorialSteps = useMemo(() => {
+    if (loadingUser || checkingShop || hasExistingShop) return [];
+    const steps = [];
+
+    if (step === 1) {
+      steps.push(
+        {
+          getTarget: () => shopNameRef.current,
+          title: t.tStep1NameTitle,
+          body: t.tStep1NameBody,
+        },
+        {
+          getTarget: () => phoneRef.current,
+          title: t.tStep1PhoneTitle,
+          body: t.tStep1PhoneBody,
+        }
+      );
+    } else if (step === 2) {
+      steps.push({
+        getTarget: () => categoryGridRef.current,
+        title: t.tStep2CategoryTitle,
+        body: t.tStep2CategoryBody,
+      });
+    } else if (step === 3) {
+      steps.push({
+        getTarget: () => imageBoxRef.current,
+        title: t.tStep3ImageTitle,
+        body: t.tStep3ImageBody,
+      });
+    } else if (step === 4) {
+      steps.push({
+        getTarget: () => productFormRef.current,
+        title: t.tStep4ProductsTitle,
+        body: t.tStep4ProductsBody,
+      });
+    } else if (step === 5) {
+      steps.push(
+        {
+          getTarget: () => previewButtonRef.current,
+          title: t.tStep5PreviewTitle,
+          body: t.tStep5PreviewBody,
+        },
+        {
+          getTarget: () => publishButtonRef.current,
+          title: t.tStep5PublishTitle,
+          body: t.tStep5PublishBody,
+        }
+      );
+    }
+
+    return steps;
+  }, [step, t, loadingUser, checkingShop, hasExistingShop, language]);
 
   // ----- Render step indicator -----
   const renderStepIndicator = () => (
@@ -729,10 +837,12 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
             </Text>
 
             <Text style={[styles.mallInfo, { color: secondaryText }]}>
-              {t.mallAddress.replace('{address}', mall?.address || 'N/A')}
+              {t.mallAddress.replace('{address}', getAddressText(mall?.address, 'N/A'))}
             </Text>
 
             <TextInput
+              ref={shopNameRef}
+              collapsable={false}
               style={inputStyle}
               placeholder={t.shopName}
               placeholderTextColor={secondaryText}
@@ -754,6 +864,8 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
               returnKeyType="next"
             />
             <TextInput
+              ref={shopNumberRef}
+              collapsable={false}
               style={inputStyle}
               placeholder={t.shopNumber}
               placeholderTextColor={secondaryText}
@@ -772,6 +884,8 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
               returnKeyType="next"
             />
             <TextInput
+              ref={phoneRef}
+              collapsable={false}
               style={inputStyle}
               placeholder={t.phone}
               placeholderTextColor={secondaryText}
@@ -842,7 +956,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
               onChangeText={setShopAddress}
               editable={editable}
               returnKeyType="done"
-              onSubmitEditing={handleSubmitEditing} // triggers next step
+              onSubmitEditing={handleSubmitEditing}
             />
           </View>
         );
@@ -852,40 +966,42 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
           <View style={styles.stepContainer}>
             <Text style={[styles.stepTitle, { color: textColor }]}>{t.step2}</Text>
             <Text style={[styles.stepSubtitle, { color: secondaryText }]}>{t.step2Sub}</Text>
-            <FlatList
-              data={MALL_SHOP_CATEGORIES}
-              renderItem={({ item }) => {
-                const isSelected = selectedCategory === item.id;
-                return (
-                  <TouchableOpacity
-                    style={[
-                      styles.categoryCard,
-                      {
-                        backgroundColor: isSelected ? accentColor : (isDarkMode ? theme.cardBackground : '#f0f0f0'),
-                        borderColor: isSelected ? accentColor : borderColor,
-                        opacity: editable ? 1 : 0.6,
-                      },
-                    ]}
-                    onPress={() => { if (editable) setSelectedCategory(isSelected ? null : item.id); }}
-                    activeOpacity={editable ? 0.8 : 1}
-                    disabled={!editable}
-                  >
-                    <MaterialCommunityIcons
-                      name={item.icon}
-                      size={CATEGORY_ICON_SIZE}
-                      color={isSelected ? '#fff' : textColor}
-                    />
-                    <Text style={[styles.categoryLabel, { color: isSelected ? '#fff' : textColor }]}>
-                      {item.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              }}
-              keyExtractor={item => item.id}
-              numColumns={3}
-              columnWrapperStyle={styles.categoryRow}
-              scrollEnabled={false}
-            />
+            <View ref={categoryGridRef} collapsable={false}>
+              <FlatList
+                data={MALL_SHOP_CATEGORIES}
+                renderItem={({ item }) => {
+                  const isSelected = selectedCategory === item.id;
+                  return (
+                    <TouchableOpacity
+                      style={[
+                        styles.categoryCard,
+                        {
+                          backgroundColor: isSelected ? accentColor : (isDarkMode ? theme.cardBackground : '#f0f0f0'),
+                          borderColor: isSelected ? accentColor : borderColor,
+                          opacity: editable ? 1 : 0.6,
+                        },
+                      ]}
+                      onPress={() => { if (editable) setSelectedCategory(isSelected ? null : item.id); }}
+                      activeOpacity={editable ? 0.8 : 1}
+                      disabled={!editable}
+                    >
+                      <MaterialCommunityIcons
+                        name={item.icon}
+                        size={CATEGORY_ICON_SIZE}
+                        color={isSelected ? '#fff' : textColor}
+                      />
+                      <Text style={[styles.categoryLabel, { color: isSelected ? '#fff' : textColor }]}>
+                        {item.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                }}
+                keyExtractor={item => item.id}
+                numColumns={3}
+                columnWrapperStyle={styles.categoryRow}
+                scrollEnabled={false}
+              />
+            </View>
           </View>
         );
 
@@ -897,12 +1013,14 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
 
             <Text style={[styles.imageLabel, { color: textColor }]}>{t.shopName}</Text>
             <TouchableOpacity
+              ref={imageBoxRef}
+              collapsable={false}
               style={[styles.imageUploadBox, { borderColor, opacity: editable ? 1 : 0.6 }]}
               onPress={() => { if (editable) pickImage(setShopFrontImage); }}
               disabled={!editable}
             >
               {shopFrontImage ? (
-                <Image source={{ uri: shopFrontImage }} style={styles.imagePreview} />
+                <Image source={normalizeImageSource({ uri: shopFrontImage })} style={styles.imagePreview} />
               ) : (
                 <View style={styles.imagePlaceholder}>
                   <Ionicons name="camera" size={40} color={secondaryText} />
@@ -919,7 +1037,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
             <Text style={[styles.stepTitle, { color: textColor }]}>{t.step4}</Text>
             <Text style={[styles.stepSubtitle, { color: secondaryText }]}>{t.step4Sub}</Text>
 
-            <View style={[styles.productForm, { borderColor, opacity: editable ? 1 : 0.6 }]}>
+            <View ref={productFormRef} collapsable={false} style={[styles.productForm, { borderColor, opacity: editable ? 1 : 0.6 }]}>
               <TextInput
                 style={[styles.input, { backgroundColor: inputBg, color: textColor, borderColor }]}
                 placeholder={t.productName}
@@ -938,7 +1056,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
                 onChangeText={(text) => setCurrentProduct({ ...currentProduct, price: text })}
                 editable={editable}
                 returnKeyType="done"
-                onSubmitEditing={addProduct} // Add product when "Done" pressed
+                onSubmitEditing={addProduct}
               />
               <View style={styles.productImagePicker}>
                 <Text style={[styles.productImageLabel, { color: textColor }]}>{t.addImages}:</Text>
@@ -955,7 +1073,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
                 <ScrollView horizontal style={styles.productImagePreviewList}>
                   {currentProduct.images.map((img, idx) => (
                     <View key={idx} style={styles.productImageWrapper}>
-                      <Image source={{ uri: img.uri }} style={styles.productImagePreview} />
+                      <Image source={normalizeImageSource({ uri: img.uri })} style={styles.productImagePreview} />
                       {editable && (
                         <TouchableOpacity style={styles.removeProductImageBtn} onPress={() => removeProductImage(idx)}>
                           <Ionicons name="close-circle" size={20} color="#ff3b30" />
@@ -1017,6 +1135,8 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
             <Text style={[styles.stepTitle, { color: textColor }]}>{t.step5}</Text>
             <Text style={[styles.stepSubtitle, { color: secondaryText }]}>{t.step5Sub}</Text>
             <TouchableOpacity
+              ref={previewButtonRef}
+              collapsable={false}
               style={[styles.previewButton, { backgroundColor: accentColor, opacity: editable ? 1 : 0.6 }]}
               onPress={() => { if (editable) setShowPreview(true); }}
               disabled={!editable}
@@ -1025,6 +1145,8 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
             </TouchableOpacity>
 
             <TouchableOpacity
+              ref={publishButtonRef}
+              collapsable={false}
               style={[styles.publishButton, { backgroundColor: accentColor, marginTop: 20, opacity: editable ? 1 : 0.6 }]}
               onPress={publishShop}
               disabled={!editable || publishing}
@@ -1051,7 +1173,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
                   <ScrollView showsVerticalScrollIndicator={false}>
                     <View style={styles.previewHeroWrap}>
                       {shopFrontImage ? (
-                        <Image source={{ uri: shopFrontImage }} style={styles.previewImage} />
+                        <Image source={normalizeImageSource({ uri: shopFrontImage })} style={styles.previewImage} />
                       ) : (
                         <View style={[styles.previewImage, styles.previewImagePlaceholder, { backgroundColor: borderColor }]}>
                           <Ionicons name="storefront-outline" size={48} color={secondaryText} />
@@ -1114,7 +1236,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
                           <Text style={[styles.previewOwnerTitle, { color: textColor }]}>{t.previewOwner}</Text>
                           <View style={styles.previewOwnerRow}>
                             {currentUser.avatar ? (
-                              <Image source={{ uri: currentUser.avatar }} style={styles.previewOwnerAvatar} />
+                              <Image source={normalizeImageSource({ uri: currentUser.avatar })} style={styles.previewOwnerAvatar} />
                             ) : (
                               <View style={[styles.previewOwnerAvatarPlaceholder, { backgroundColor: accentColor }]}>
                                 <Text style={styles.previewOwnerAvatarInitials}>
@@ -1258,11 +1380,22 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* ============ ADDSHOP STEP TUTORIAL ============ */}
+      <ScreenTutorialOverlay
+        visible={showTutorial}
+        steps={tutorialSteps}
+        isDarkMode={isDarkMode}
+        language={language}
+        onFinish={finishTutorial}
+        padding={5}
+        dimOpacity={0}
+      />
     </SafeAreaView>
   );
 }
 
-// ----- Styles -----
+// ----- Styles (unchanged) -----
 const styles = StyleSheet.create({
   container: { flex: 1 },
   scrollContainer: { flexGrow: 1, paddingHorizontal: 16, paddingBottom: 40 },
@@ -1431,7 +1564,6 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   previewActionText: { color: '#fff', marginLeft: 6, fontWeight: '500' },
-  // Themed alert modal styles
   alertOverlay: {
     flex: 1,
     justifyContent: 'center',

@@ -5,6 +5,18 @@ const postSchema = new mongoose.Schema({
   username: { type: String, required: true },
   userPhone: { type: String, required: true }, // ✅ remains required
   userAvatar: { type: String, default: '' },
+  userAvatarVariants: [{
+    originalUrl: String,
+    originalStorageKey: String,
+    width: Number,
+    height: Number,
+    variants: {
+      tiny: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      small: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      medium: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      large: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+    },
+  }],
   category: {
     type: String,
     enum: ['house', 'land', 'commercial', 'other'],
@@ -21,6 +33,18 @@ const postSchema = new mongoose.Schema({
   contactNumbers: [{ type: String }],
   houseImages: [{ type: String }],
   houseImageStorageKeys: [{ type: String }],
+  houseImageVariants: [{
+    originalUrl: { type: String, required: true },
+    originalStorageKey: { type: String, default: '' },
+    width: { type: Number, default: 0 },
+    height: { type: Number, default: 0 },
+    variants: {
+      tiny: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      small: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      medium: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      large: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+    },
+  }],
   storageProvider: { type: String, default: '' },
   videoUrl: { type: String, default: '' },
   videoHlsUrl: { type: String, default: '' },
@@ -29,6 +53,7 @@ const postSchema = new mongoose.Schema({
   videoDuration: { type: Number, default: 0 },
   videoThumbnail: { type: String, default: '' },
   videoThumbnailStorageKey: { type: String, default: '' },
+  videoThumbnailStatus: { type: String, enum: ['', 'completed'], default: '' },
   videoLink: { type: String, default: '' },
   amount: { type: String },
   ownerPhone: { type: String },

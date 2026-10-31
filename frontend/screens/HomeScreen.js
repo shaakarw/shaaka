@@ -1,5 +1,5 @@
 // screens/WelcomeHomeScreen.js
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -12,9 +12,10 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext';
 import { useTabMode } from '../context/TabModeContext';
+import { useAuth } from '../context/AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
@@ -25,6 +26,9 @@ import { offlineDatabase } from '../services/offlineDatabase';
 import { mediaCache } from '../services/mediaCache';
 import { BASE_URL } from '../constants';
 import ProductHeroDeck from '../components/ProductHeroDeck';
+import { getPostCoverUri, getPostImages, getPostVideoUrl } from '../utils/postMedia';
+import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
+import useScreenTutorial from '../hooks/useScreenTutorial';
 import { getUserDisplayName } from '../utils/userIdentity';
 
 // Assets
@@ -34,7 +38,14 @@ const user2 = require('../assets/user2.png');
 const countryFlag = require('../assets/flga1.webp');
 const houseBg = require('../assets/house.png');
 
-const { width, height } = Dimensions.get('window');
+const { width } = Dimensions.get('window');
+
+// ---- Tutorial config ---------------------------------------------------------
+const HOME_TUTORIAL_DELAY_MS = 700;
+const HOME_TUTORIAL_PADDING = 2;
+const HOME_TUTORIAL_SCROLL_WAIT_MS = 350;
+
+// -----------------------------------------------------------------------------
 
 const translations = {
   English: {
@@ -51,6 +62,18 @@ const translations = {
     loginRequired: 'Login Required',
     loginMessage: 'Please login to view post details',
     cancel: 'Cancel',
+    tBuyTitle: 'Buy',
+    tBuyBody: 'Tap here to browse all products for sale on Shaaka.',
+    tBusinessTitle: 'Business ideas',
+    tBusinessBody: 'Tap to explore business ideas you can start today.',
+    tTrendingTitle: 'Trending now',
+    tTrendingBody: 'Swipe through popular products and tap one to view details.',
+    tNotifTitle: 'Notifications',
+    tNotifBody: 'Tap here to see your notifications. The green badge shows unread items.',
+    tLoginBtnTitle: 'Log in',
+    tLoginBtnBody: 'Tap Login to sign in to your Shaaka account.',
+    tRegisterBtnTitle: 'Register',
+    tRegisterBtnBody: 'Tap Register to create a new account and start buying or selling.',
   },
   Kinyarwanda: {
     welcome: 'Murakaza neza kuri Shaaka',
@@ -66,6 +89,18 @@ const translations = {
     loginRequired: 'Ugomba kwinjira',
     loginMessage: 'Nyamuneka injira kugira ngo urebe ibyo ushaka',
     cancel: 'Hagarika',
+    tBuyTitle: 'Gura',
+    tBuyBody: 'Kanda hano urebe ibicuruzwa byose bigurishwa kuri Shaaka.',
+    tBusinessTitle: 'Imishinga',
+    tBusinessBody: "Kanda urebe ibitekerezo by'imishinga ushobora gutangira uyu munsi.",
+    tTrendingTitle: 'Ibikunzwe ubu',
+    tTrendingBody: 'Kanda ku bicuruzwa bikunzwe. Kanda ku kimwe urebe ibisobanuro.',
+    tNotifTitle: 'Amatangazo',
+    tNotifBody: "Kanda hano urebe amatangazo. Akabendera k'icyatsi kangana n'utarasomye.",
+    tLoginBtnTitle: 'Injira',
+    tLoginBtnBody: 'Kanda Injira winjire muri konti yawe ya Shaaka.',
+    tRegisterBtnTitle: 'Iyandikishe',
+    tRegisterBtnBody: 'Kanda Iyandikishe ufungure konti nshya utangire kugura cyangwa kugurisha.',
   },
 };
 
@@ -80,7 +115,7 @@ const mapPost = (post) => ({
   location: post.location,
   description: post.description,
   productName: post.productName || 'Product',
-  houseImages: post.houseImages || [],
+  houseImages: getPostImages(post),
   contactNumber1: post.contactNumbers?.[0] || '',
   contactNumber2: post.contactNumbers?.[1] || '',
   priceNegotiable: post.priceNegotiable || false,
@@ -88,36 +123,21 @@ const mapPost = (post) => ({
   status: post.status || 'active',
   featured: post.featured || false,
   trending: post.trending || false,
-  // 👇 Video fields — required by the deck to render the video badge
-  videoUrl: post.videoUrl || post.videoHlsUrl || post.video?.url || '',
+  videoUrl: getPostVideoUrl(post),
   videoThumbnail: post.videoThumbnail || '',
   videoLink: post.videoLink || '',
   videoDuration: post.videoDuration || 0,
   videoHlsUrl: post.videoHlsUrl || '',
   videoId: post.videoId || '',
+  reelId: String(post._id || post.id || post.reelId || post.videoId || getPostVideoUrl(post) || ''),
 });
 
-const getPostImage = post => {
-  const image = (Array.isArray(post.houseImages) && post.houseImages.find(Boolean))
-    || post.videoThumbnail
-    || post.imageUrl;
-  if (typeof image === 'string') return image;
-  if (image?.uri || image?.url) return image.uri || image.url;
-
-  const videoUrl = post.videoUrl;
-  if (!videoUrl?.includes('res.cloudinary.com')) return null;
-  const uploadMarker = '/video/upload/';
-  if (!videoUrl.includes(uploadMarker)) return null;
-  return videoUrl
-    .replace(uploadMarker, '/video/upload/so_5/')
-    .replace(/\.[^/.?]+(?=\?|$)/, '.jpg');
-};
+const getPostImage = post => getPostCoverUri(post);
 
 const buildHomeSections = posts => {
   const trendingPosts = posts.filter(
     post => post.status !== 'stopped' && post.trending && getPostImage(post)
   );
-
   return [{ key: 'trending', posts: trendingPosts }];
 };
 
@@ -132,18 +152,40 @@ const makeProtectedHomeSections = sections => sections.map(section => ({
   }),
 }));
 
-const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
+const WelcomeHomeScreen = ({
+  navigation,
+  language,
+  launchStartedAt,
+  onInitialLoadComplete,
+}) => {
   const { theme, isDarkMode } = useTheme();
   const { setTabMode } = useTabMode();
+  const { isAuthenticated, loading: authLoading } = useAuth();
   const [activeCard, setActiveCard] = useState('buySell');
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
 
   const [allPosts, setAllPosts] = useState([]);
   const [featuredSections, setFeaturedSections] = useState([]);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [initialFeedReady, setInitialFeedReady] = useState(false);
+  const initialLoadNotified = useRef(false);
   const homeStartedAt = useRef(Date.now());
   const firstUsableLogged = useRef(false);
   const firstProductsLogged = useRef(false);
+  const homeScrollRef = useRef(null);
+
+  const buyRef = useRef(null);
+  const businessRef = useRef(null);
+  const trendingRef = useRef(null);
+  const notifRef = useRef(null);
+  const loginBtnRef = useRef(null);      // ← NEW
+  const registerBtnRef = useRef(null);   // ← NEW
+
+  const isFocused = useIsFocused();
+  const [showTutorial, finishTutorial] = useScreenTutorial(
+    'home',
+    isFocused && !authLoading,
+    HOME_TUTORIAL_DELAY_MS
+  );
 
   const t = translations[language] || translations.English;
 
@@ -246,11 +288,31 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
   }, [allPosts]);
 
   useEffect(() => {
-    fetchPosts();
+    let active = true;
+    const loadInitialFeed = async () => {
+      try {
+        await fetchPosts();
+      } catch (error) {
+        console.error('Initial home feed loading failed:', error);
+      } finally {
+        if (active) setInitialFeedReady(true);
+      }
+    };
+
+    loadInitialFeed();
+    return () => {
+      active = false;
+    };
   }, [fetchPosts]);
 
+  useEffect(() => {
+    if (!initialFeedReady || authLoading || initialLoadNotified.current) return;
+    initialLoadNotified.current = true;
+    onInitialLoadComplete?.();
+  }, [authLoading, initialFeedReady, onInitialLoadComplete]);
+
   const handlePostResultPress = (post) => {
-    if (!isLoggedIn) {
+    if (!isAuthenticated) {
       Alert.alert(t.loginRequired, t.loginMessage, [
         { text: t.cancel, style: 'cancel' },
         { text: t.login || 'Login', onPress: () => navigation.navigate('Login') },
@@ -260,10 +322,19 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
     navigation.navigate('PostDetail', { house: post, language });
   };
 
+  const handleReelPress = post => {
+    const videoUrl = getPostVideoUrl(post);
+    if (!videoUrl) return;
+    navigation.navigate('BuyPost', {
+      activeTab: 'videos',
+      reelId: String(post.reelId || post._id || post.id || post.videoId || videoUrl),
+      reelPost: { ...post, videoUrl },
+    });
+  };
+
   const handleUserProfilePress = product => {
     const userId = product?.userId || product?.user?._id || product?.user;
     if (!userId) return;
-
     navigation.navigate('Profile', {
       userId,
       username: product?.username || 'User',
@@ -273,14 +344,8 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
   const fetchUnreadNotifications = useCallback(async () => {
     try {
       const token = await AsyncStorage.getItem('userToken');
-      if (!token) {
-        setUnreadNotifications(0);
-        return;
-      }
-      if (!networkStatus.get().isOnline) {
-        setUnreadNotifications(0);
-        return;
-      }
+      if (!token) { setUnreadNotifications(0); return; }
+      if (!networkStatus.get().isOnline) { setUnreadNotifications(0); return; }
 
       const response = await axios.get(`${BASE_URL}/api/notifications`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -305,21 +370,6 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
     navigation.navigate('BuyPost', { activeTab: 'ushaka' });
   };
 
-  useEffect(() => {
-    checkLoginStatus();
-    const unsubscribe = navigation.addListener('focus', checkLoginStatus);
-    return unsubscribe;
-  }, [navigation]);
-
-  const checkLoginStatus = async () => {
-    try {
-      const loggedIn = await AsyncStorage.getItem('isLoggedIn');
-      setIsLoggedIn(loggedIn === 'true');
-    } catch (error) {
-      console.error(error);
-    }
-  };
-
   const handleCardPress = (cardType, action) => {
     setActiveCard(cardType);
     action();
@@ -328,6 +378,38 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
   const homeSections = featuredSections.length
     ? featuredSections
     : buildHomeSections(allPosts);
+
+  // Tutorial steps:
+  //   - Always: Buy → Business → Trending → Notifications
+  //   - Only when logged OUT: adds Login → Register at the end
+  const tutorialSteps = useMemo(() => {
+    const steps = [
+      { ref: buyRef, scroll: 'top', title: t.tBuyTitle, body: t.tBuyBody },
+      { ref: businessRef, scroll: 'top', title: t.tBusinessTitle, body: t.tBusinessBody },
+      { ref: trendingRef, scroll: 'end', title: t.tTrendingTitle, body: t.tTrendingBody },
+      { ref: notifRef, scroll: 'none', title: t.tNotifTitle, body: t.tNotifBody },
+    ];
+
+    // Only include login/register when the buttons will actually render
+    if (!authLoading && !isAuthenticated) {
+      steps.push(
+        {
+          ref: loginBtnRef,
+          scroll: 'none',
+          title: t.tLoginBtnTitle,
+          body: t.tLoginBtnBody,
+        },
+        {
+          ref: registerBtnRef,
+          scroll: 'none',
+          title: t.tRegisterBtnTitle,
+          body: t.tRegisterBtnBody,
+        }
+      );
+    }
+
+    return steps;
+  }, [t, authLoading, isAuthenticated]);
 
   return (
     <SafeAreaView
@@ -374,6 +456,7 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
 
       <View style={styles.mainContainer}>
         <ScrollView
+          ref={homeScrollRef}
           style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
@@ -417,6 +500,7 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
               </TouchableOpacity>
 
               <TouchableOpacity
+                ref={buyRef}
                 style={[
                   styles.selectionCard,
                   {
@@ -449,6 +533,7 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
               </TouchableOpacity>
 
               <TouchableOpacity
+                ref={businessRef}
                 style={[
                   styles.selectionCard,
                   {
@@ -480,36 +565,40 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
               </TouchableOpacity>
             </View>
 
-            {homeSections.map(section => {
-              if (!section.posts?.length) return null;
-              return (
-                <View key={section.key} style={styles.heroSection}>
-                  <View style={styles.heroSectionHeader}>
-                    <View style={styles.heroSectionBadge}>
-                      <Ionicons name="flame" size={18} color="#fff" />
-                      <Text style={styles.heroSectionBadgeText}>{t.trendingProducts}</Text>
+            <View ref={trendingRef} style={{ width: '100%' }}>
+              {homeSections.map(section => {
+                if (!section.posts?.length) return null;
+                return (
+                  <View key={section.key} style={styles.heroSection}>
+                    <View style={styles.heroSectionHeader}>
+                      <View style={styles.heroSectionBadge}>
+                        <Ionicons name="flame" size={18} color="#fff" />
+                        <Text style={styles.heroSectionBadgeText}>{t.trendingProducts}</Text>
+                      </View>
                     </View>
+                    <ProductHeroDeck
+                      products={section.posts}
+                      colors={deckColors}
+                      showProgress={false}
+                      onPressProduct={handlePostResultPress}
+                      onPressVideo={handleReelPress}
+                      onPressUserProfile={handleUserProfilePress}
+                    />
                   </View>
-                  <ProductHeroDeck
-                    products={section.posts}
-                    colors={deckColors}
-                    showProgress={false}
-                    onPressProduct={handlePostResultPress}
-                    onPressUserProfile={handleUserProfilePress}
-                  />
-                </View>
-              );
-            })}
+                );
+              })}
+            </View>
           </View>
         </ScrollView>
 
         <View style={styles.bottomContentContainer}>
           <TouchableOpacity
+            ref={notifRef}
             activeOpacity={0.8}
             onPress={() => navigation.navigate('Notifications')}
             style={styles.locationRow}
           >
-            <Image source={logo} style={[styles.locationIcon, { tintColor: colors.textPrimary }]} />
+            <Image source={logo} style={[styles.locationIcon, { tintColor: colors.textPrimary }]} resizeMode="contain" />
             <Text style={[styles.locationText, { color: colors.textPrimary }]}>{t.locate}</Text>
             {unreadNotifications > 0 && (
               <View style={styles.notificationBadge}>
@@ -521,17 +610,18 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
           </TouchableOpacity>
 
           <View style={styles.avatarRow}>
-            <Image source={user2} style={[styles.avatar, { backgroundColor: '#ccc' }]} />
-            <Image source={user1} style={[styles.avatar, styles.avatarOverlap, { backgroundColor: '#ccc' }]} />
-            <Image source={countryFlag} style={[styles.avatar, styles.avatarOverlap2]} />
+            <Image source={user2} style={[styles.avatar, { backgroundColor: '#ccc' }]} resizeMode="cover" />
+            <Image source={user1} style={[styles.avatar, styles.avatarOverlap, { backgroundColor: '#ccc' }]} resizeMode="cover" />
+            <Image source={countryFlag} style={[styles.avatar, styles.avatarOverlap2]} resizeMode="cover" />
             <Text style={[styles.communityText, { color: colors.textPrimary }]}>{t.users}</Text>
           </View>
         </View>
 
-        {!isLoggedIn && (
+        {!authLoading && !isAuthenticated && (
           <View style={styles.footer}>
             <View style={styles.authButtonsContainer}>
               <TouchableOpacity
+                ref={loginBtnRef}
                 style={[styles.authButton, { backgroundColor: colors.authButtonBg }]}
                 onPress={() => navigation.navigate('Login')}
               >
@@ -540,6 +630,7 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
+                ref={registerBtnRef}
                 style={[styles.authButton, { backgroundColor: colors.authButtonBg }]}
                 onPress={() => navigation.navigate('Register')}
               >
@@ -551,200 +642,120 @@ const WelcomeHomeScreen = ({ navigation, language, launchStartedAt }) => {
           </View>
         )}
       </View>
+
+      <ScreenTutorialOverlay
+        visible={showTutorial}
+        steps={tutorialSteps}
+        isDarkMode={isDarkMode}
+        language={language}
+        scrollRef={homeScrollRef}
+        scrollDelayMs={HOME_TUTORIAL_SCROLL_WAIT_MS}
+        padding={HOME_TUTORIAL_PADDING}
+        dimOpacity={0}
+        onFinish={finishTutorial}
+      />
     </SafeAreaView>
   );
 };
 
-// ==================== STYLES ====================
 const styles = StyleSheet.create({
   safeArea: { flex: 1 },
-
   curve: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: -1,
-    overflow: 'hidden',
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    zIndex: -1, overflow: 'hidden',
     borderBottomLeftRadius: width * 0.9,
   },
-  curveImage: {
-    borderBottomLeftRadius: width * 0.9,
-  },
+  curveImage: { borderBottomLeftRadius: width * 0.9 },
   curveTopExtra: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: '55%',
+    position: 'absolute', top: 0, left: 0, right: 0, height: '55%',
   },
-
-  mainContainer: {
-    flex: 1,
-    paddingTop: 8,
-  },
+  mainContainer: { flex: 1, paddingTop: 8 },
   scrollView: { flex: 1 },
   scrollContent: {
-    flexGrow: 1,
-    justifyContent: 'flex-start',
-    alignItems: 'center',
-    paddingBottom: 20,
-    paddingHorizontal: 16,
-    paddingTop: 20,
+    flexGrow: 1, justifyContent: 'flex-start', alignItems: 'center',
+    paddingBottom: 20, paddingHorizontal: 16, paddingTop: 20,
   },
   topContent: { alignItems: 'center', width: '100%' },
   welcomeText: {
     fontSize: Math.min(width * 0.07, 30),
-    fontWeight: 'bold',
-    fontFamily: 'Irish Grover',
-    textAlign: 'center',
-    width: '100%',
-    marginBottom: 8,
+    fontWeight: 'bold', fontFamily: 'Irish Grover',
+    textAlign: 'center', width: '100%', marginBottom: 8,
   },
   selectionContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    width: '100%',
-    marginTop: 4,
-    marginBottom: 20,
+    flexDirection: 'row', justifyContent: 'space-between',
+    width: '100%', gap: 8, marginTop: 4, marginBottom: 20,
   },
   selectionCard: {
+    flex: 1,
     flexDirection: 'row',
-    width: '32%',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 6,
-    borderRadius: 16,
-    borderWidth: 2,
-    justifyContent: 'center',
-    gap: 4,
-    shadowColor: '#828282',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
+    paddingVertical: 12, paddingHorizontal: 6,
+    borderRadius: 16, borderWidth: 2, justifyContent: 'center', gap: 4,
+    shadowColor: '#828282', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1, shadowRadius: 3, elevation: 2,
   },
-  selectionTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    textAlign: 'center',
-    flexShrink: 1,
-  },
+  selectionTitle: { fontSize: 12, fontWeight: '700', textAlign: 'center', flexShrink: 1 },
   heroSection: {
-    width: '100%',
-    paddingTop: 20,
-    paddingBottom: 12,
-    alignItems: 'center',
+    width: '100%', paddingTop: 20, paddingBottom: 12, alignItems: 'center',
   },
   heroSectionHeader: {
-    flexDirection: 'row',
-     alignItems: 'flex-start',
-    justifyContent: 'flex-start',
-    width: '100%',
-    marginBottom: 20,
-    paddingHorizontal: 4,
+    flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'flex-start',
+    width: '100%', marginBottom: 20, paddingHorizontal: 4,
   },
   heroSectionBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#d87428',
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 18,
-    gap: 6,
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#d87428', paddingHorizontal: 12, paddingVertical: 5,
+    borderRadius: 18, gap: 6,
   },
   heroSectionBadgeText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   bottomContentContainer: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: 'transparent',
+    paddingHorizontal: 16, paddingVertical: 12, backgroundColor: 'transparent',
   },
   locationRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-    alignSelf: 'flex-start',
-    paddingLeft: 8,
-    paddingRight: 12,
-    position: 'relative',
+    flexDirection: 'row', alignItems: 'center',
+    marginBottom: 8, alignSelf: 'flex-start',
+    paddingLeft: 8, paddingRight: 12, position: 'relative',
   },
-  locationIcon: {
-    width: 24,
-    height: 24,
-    marginRight: 10,
-  },
+  locationIcon: { width: 24, height: 24, marginRight: 10 },
   notificationBadge: {
-    position: 'absolute',
-    top: -6,
-    right: -4,
-    minWidth: 22,
-    height: 22,
-    paddingHorizontal: 5,
-    borderRadius: 11,
-    backgroundColor: '#47ae87',
-    alignItems: 'center',
-    justifyContent: 'center',
+    position: 'absolute', top: -6, right: -4,
+    minWidth: 22, height: 22, paddingHorizontal: 5, borderRadius: 11,
+    backgroundColor: '#47ae87', alignItems: 'center', justifyContent: 'center',
   },
-  notificationBadgeText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '700',
-  },
+  notificationBadgeText: { color: '#fff', fontSize: 10, fontWeight: '700' },
   locationText: {
     fontSize: Math.min(width * 0.05, 20),
-    fontWeight: '600',
-    fontFamily: 'Inter',
+    fontWeight: '600', fontFamily: 'Inter',
   },
   avatarRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    marginBottom: 8,
+    flexDirection: 'row', alignItems: 'center',
+    alignSelf: 'flex-start', marginBottom: 8,
   },
   avatar: {
-    width: width * 0.1,
-    height: width * 0.1,
-    borderRadius: width * 0.05,
-    borderWidth: 2,
-    borderColor: 'white',
+    width: width * 0.1, height: width * 0.1,
+    borderRadius: width * 0.05, borderWidth: 2, borderColor: 'white',
   },
   avatarOverlap: { marginLeft: -width * 0.03 },
   avatarOverlap2: { marginLeft: -width * 0.03 },
   communityText: {
     marginLeft: width * 0.03,
-    fontSize: Math.min(width * 0.035, 14),
-    fontFamily: 'Inter',
+    fontSize: Math.min(width * 0.035, 14), fontFamily: 'Inter',
   },
   footer: {
-    paddingHorizontal: 16,
-    paddingBottom: 0,
-    paddingTop: 8,
+    paddingHorizontal: 16, paddingBottom: 0, paddingTop: 8,
     backgroundColor: 'transparent',
   },
   authButtonsContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    width: '100%',
-    gap: 10,
-    marginBottom: 0,
+    flexDirection: 'row', justifyContent: 'space-around',
+    width: '100%', gap: 10, marginBottom: 0,
   },
   authButton: {
-    flex: 1,
-    paddingVertical: 12,
-    top: 0,
-    borderRadius: 25,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 1,
+    flex: 1, paddingVertical: 12, top: 0, borderRadius: 25, alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05, shadowRadius: 2, elevation: 1,
   },
-  authButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-  },
+  authButtonText: { fontSize: 16, fontWeight: '600' },
+  dim: { position: 'absolute', backgroundColor: 'rgba(0, 0, 0, 0)' },
 });
 
 export default WelcomeHomeScreen;

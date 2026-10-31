@@ -5,6 +5,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { useNavigation } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const Header = ({ language, toggleLanguage, showBackButton = false }) => {
   const { theme } = useTheme();
@@ -44,10 +46,10 @@ const Header = ({ language, toggleLanguage, showBackButton = false }) => {
         )}
         {!loading && user ? (
           <TouchableOpacity onPress={handleProfilePress} style={styles.profileContainer}>
-            <Image source={require('../assets/avator.png')} style={styles.profileImage} />
+            <Image source={normalizeImageSource(require('../assets/avator.png'))} style={styles.profileImage} />
           </TouchableOpacity>
         ) : (
-          <Image source={require('../assets/logo1.png')} style={styles.logo} resizeMode="contain" />
+          <Image source={normalizeImageSource(require('../assets/logo1.png'))} style={styles.logo} resizeMode="contain" />
         )}
         <Text style={[styles.appName, { color: theme.text }]}>Shaaka</Text>
       </View>

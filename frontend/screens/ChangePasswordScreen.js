@@ -4,6 +4,7 @@ import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '../constants';
 import { useTheme } from '../context/ThemeContext';
+import { showAdminFeedback } from '../utils/adminFeedback';
 
 export default function ChangePasswordScreen({ navigation, route, language = 'English' }) {
   const { theme } = useTheme();
@@ -21,6 +22,15 @@ export default function ChangePasswordScreen({ navigation, route, language = 'En
   const newPasswordRef = useRef(null);
   const confirmPasswordRef = useRef(null);
 
+  const reportError = (message) => {
+    if (adminMode) {
+      showAdminFeedback(rw ? 'Ikosa' : 'Error', message, 'error');
+      setError('');
+    } else {
+      setError(message);
+    }
+  };
+
   const getAuthToken = async () => {
     if (adminMode) {
       const adminToken = await AsyncStorage.getItem('adminToken');
@@ -31,21 +41,21 @@ export default function ChangePasswordScreen({ navigation, route, language = 'En
 
   const verifyCurrentPassword = async () => {
     if (!currentPassword) {
-      setError(rw ? 'Andika ijambo banga risanzwe.' : 'Enter your current password.');
+      reportError(rw ? 'Andika ijambo banga risanzwe.' : 'Enter your current password.');
       return;
     }
     setLoading(true);
     try {
       const token = await getAuthToken();
       if (!token) {
-        setError(rw ? 'Injira ubundi mbere.' : 'Please log in first.');
+        reportError(rw ? 'Injira ubundi mbere.' : 'Please log in first.');
         return;
       }
       await axios.post(`${BASE_URL}/api/auth/verify-current-password`, { currentPassword }, { headers: { Authorization: `Bearer ${token}` } });
       setError('');
       setStep(2);
     } catch (error) {
-      setError(error.response?.status === 401
+      reportError(error.response?.status === 401
         ? (rw ? 'Ijambo banga risanzwe si ryo.' : 'Current password is incorrect.')
         : (rw ? 'Kugenzura ijambo banga byanze.' : 'Could not verify your password.'));
     } finally { setLoading(false); }
@@ -53,29 +63,36 @@ export default function ChangePasswordScreen({ navigation, route, language = 'En
 
   const changePassword = async () => {
     if (!newPassword || !confirmPassword) {
-      setError(rw ? 'Andika kandi wemeze ijambo banga rishya.' : 'Enter and confirm your new password.');
+      reportError(rw ? 'Andika kandi wemeze ijambo banga rishya.' : 'Enter and confirm your new password.');
       return;
     }
     if (newPassword.length < 4 || /\s/.test(newPassword)) {
-      setError(rw ? 'Ijambo banga rigomba kugira inyuguti 4 kandi ntirigire umwanya.' : 'Password must be at least 4 characters without spaces.');
+      reportError(rw ? 'Ijambo banga rigomba kugira inyuguti 4 kandi ntirigire umwanya.' : 'Password must be at least 4 characters without spaces.');
       return;
     }
     if (newPassword !== confirmPassword) {
-      setError(rw ? 'Amagambo banga ntabwo ahuye.' : 'Passwords do not match.');
+      reportError(rw ? 'Amagambo banga ntabwo ahuye.' : 'Passwords do not match.');
       return;
     }
     setLoading(true);
     try {
       const token = await getAuthToken();
       if (!token) {
-        setError(rw ? 'Injira ubundi mbere.' : 'Please log in first.');
+        reportError(rw ? 'Injira ubundi mbere.' : 'Please log in first.');
         return;
       }
       await axios.put(`${BASE_URL}/api/auth/change-password`, { currentPassword, newPassword }, { headers: { Authorization: `Bearer ${token}` } });
-      Alert.alert(rw ? 'Byakunze' : 'Success', rw ? 'Ijambo banga ryahinduwe.' : 'Password changed successfully.');
-      navigation.goBack();
+      const message = rw ? 'Ijambo banga ryahinduwe.' : 'Password changed successfully.';
+      if (adminMode) {
+        showAdminFeedback(rw ? 'Byakunze' : 'Success', message, 'success', {
+          buttonAction: () => navigation.goBack(),
+        });
+      } else {
+        Alert.alert(rw ? 'Byakunze' : 'Success', message);
+        navigation.goBack();
+      }
     } catch (error) {
-      setError(error.response?.data?.message || (rw ? 'Guhindura ijambo banga byanze.' : 'Password change failed.'));
+      reportError(error.response?.data?.message || (rw ? 'Guhindura ijambo banga byanze.' : 'Password change failed.'));
     } finally { setLoading(false); }
   };
 

@@ -1,3 +1,6 @@
+
+import { getImageUri, normalizeImageSource } from '../utils/imageUrl';
+import { getPostImages } from '../utils/postMedia';
 // screens/PostDetailScreen.js
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
@@ -15,6 +18,7 @@ import {
   FlatList,
   Modal,
   StatusBar,
+  Animated,
   useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -27,12 +31,22 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import SharedBottomNav from '../components/SharedBottomNav';
 import VideoPost from '../components/VideoPost';
+import VideoBackground from '../components/VideoBackground';
+import { requestVideoBackground } from '../services/videoBackgroundService';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import OnlineStatusDot from '../components/OnlineStatusDot';
+import useOnlineUsers from '../hooks/useOnlineUsers';
 import { Video, ResizeMode } from '../utils/expoAvCompat';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as ScreenOrientation from 'expo-screen-orientation';
 
 const { width, height } = Dimensions.get('window');
+
+// Image container heights:
+//   NORMAL   – default size (same as original layout)
+//   EXPANDED – only when the user taps the image
+const NORMAL_IMAGE_HEIGHT = 320;
+const EXPANDED_IMAGE_HEIGHT = Math.min(Math.round(height * 0.55), 500);
 
 let loadingLogo;
 try {
@@ -42,12 +56,11 @@ try {
 }
 
 const PROFILE_IMAGE = require('../assets/profile1.png');
-const FALLBACK_IMAGE = { uri: 'https://via.placeholder.com/400' };
 const getImageSource = (img) => {
   if (!img) return PROFILE_IMAGE;
-  if (typeof img === 'string') return { uri: img };
-  if (typeof img === 'object' && img.uri) return img;
-  if (typeof img === 'object' && img.url) return { uri: img.url };
+  if (typeof img === 'number') return img;
+  const uri = getImageUri(img);
+  if (uri) return typeof img === 'object' ? { ...img, uri } : { uri };
   return PROFILE_IMAGE;
 };
 const normalizePost = (post) => ({
@@ -57,7 +70,8 @@ const normalizePost = (post) => ({
   productName: post.productName || post.category || 'Product',
   username: post.username || post.user?.username || 'User',
   userAvatar: post.userAvatar || post.user?.avatar,
-  houseImages: post.houseImages || [],
+  userAvatarVariants: post.userAvatarVariants || post.user?.avatarVariants || [],
+  houseImages: getPostImages(post),
   contactNumber1: post.contactNumber1 || post.contactNumbers?.[0] || '',
   contactNumber2: post.contactNumber2 || post.contactNumbers?.[1] || '',
   priceNegotiable: post.priceNegotiable || false,
@@ -155,7 +169,7 @@ const translations = {
 };
 
 // --- VIDEO PREVIEW MODAL (Different from Image Preview) ---
-const VideoPreviewModal = ({ visible, videoUrl, onClose, theme, productName, t = translations.English }) => {
+const VideoPreviewModal = ({ visible, videoUrl, videoId, onClose, theme, productName, t = translations.English }) => {
   const videoRef = useRef(null);
   const controlsTimeout = useRef(null);
   const seekTrackWidth = useRef(0);
@@ -300,6 +314,25 @@ const VideoPreviewModal = ({ visible, videoUrl, onClose, theme, productName, t =
   const duration = status?.durationMillis || 0;
   const position = status?.positionMillis || 0;
   const progressWidth = duration > 0 ? `${(position / duration) * 100}%` : '0%';
+  const [background, setBackground] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    setBackground(null);
+    if (!visible || !videoUrl || duration <= 0) return () => { active = false; };
+
+    requestVideoBackground({
+      uri: videoUrl,
+      cacheKey: videoId,
+      duration: duration / 1000,
+    }).then(result => {
+      if (active) setBackground(result);
+    }).catch(error => {
+      console.warn('Could not prepare the video background:', error.name || 'Unknown error');
+    });
+
+    return () => { active = false; };
+  }, [visible, videoUrl, videoId, duration]);
 
   if (!videoUrl) return null;
 
@@ -340,10 +373,16 @@ const VideoPreviewModal = ({ visible, videoUrl, onClose, theme, productName, t =
             },
           ]}
         >
-          <Video
+           <VideoBackground
+             frameUri={background?.frameUri}
+             duration={background?.duration}
+             active={visible && isPlaying}
+           />
+
+           <Video
             ref={videoRef}
             source={{ uri: videoUrl }}
-            style={styles.videoPlayer}
+            style={[styles.videoPlayer, background?.frameUri ? { opacity: 0.96 } : null]}
             resizeMode={ResizeMode.CONTAIN}
             shouldPlay={isPlaying}
             isMuted={isMuted}
@@ -427,8 +466,12 @@ const formatTime = (milliseconds) => {
 };
 
 // --- AUTO-SLIDING IMAGE SLIDER ---
-const AutoSlidingImageSlider = ({ images, navigation, title, description, listing }) => {
+// Default height stays NORMAL (320). When the user taps the image,
+// it animates up to EXPANDED_IMAGE_HEIGHT. Tap again to collapse.
+const AutoSlidingImageSlider = ({ images }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const animatedHeight = useRef(new Animated.Value(NORMAL_IMAGE_HEIGHT)).current;
   const flatListRef = useRef(null);
   const scrollTimer = useRef(null);
   const isDragging = useRef(false);
@@ -482,12 +525,24 @@ const AutoSlidingImageSlider = ({ images, navigation, title, description, listin
     startAutoScroll();
   };
 
+  const toggleExpanded = useCallback(() => {
+    const nextExpanded = !isExpanded;
+    const toValue = nextExpanded ? EXPANDED_IMAGE_HEIGHT : NORMAL_IMAGE_HEIGHT;
+    setIsExpanded(nextExpanded);
+    Animated.timing(animatedHeight, {
+      toValue,
+      duration: 280,
+      useNativeDriver: false,
+    }).start();
+  }, [isExpanded, animatedHeight]);
+
   if (!images || images.length === 0) return null;
 
   return (
-    <View style={styles.sliderContainer}>
+    <Animated.View style={[styles.sliderContainer, { height: animatedHeight }]}>
       <FlatList
         ref={flatListRef}
+        style={{ flex: 1 }}
         data={images}
         horizontal
         pagingEnabled
@@ -498,9 +553,22 @@ const AutoSlidingImageSlider = ({ images, navigation, title, description, listin
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
         renderItem={({ item }) => (
-          <Image source={getImageSource(item)} style={styles.houseImage} resizeMode="cover" />
+          <TouchableOpacity
+            activeOpacity={1}
+            onPress={toggleExpanded}
+            style={{ width, height: '100%' }}
+          >
+            <Image
+              source={normalizeImageSource(getImageSource(item))}
+
+
+              style={{ width, height: '100%' }}
+              resizeMode="cover"
+            />
+          </TouchableOpacity>
         )}
       />
+
       {images.length > 1 && (
         <View style={styles.dotsContainer}>
           {images.map((_, idx) => (
@@ -508,32 +576,76 @@ const AutoSlidingImageSlider = ({ images, navigation, title, description, listin
           ))}
         </View>
       )}
-    </View>
+
+      {/* Expand / collapse hint button */}
+      <TouchableOpacity
+        style={styles.expandHintBtn}
+        onPress={toggleExpanded}
+        activeOpacity={0.7}
+      >
+        <Ionicons
+          name={isExpanded ? 'contract-outline' : 'expand-outline'}
+          size={18}
+          color="#FFFFFF"
+        />
+      </TouchableOpacity>s
+    </Animated.View>
   );
 };
 
 // --- VIDEO PREVIEW THUMBNAIL (for inline display) ---
-const VideoPreviewThumbnail = ({ videoUrl, onPress, t }) => {
-  const [thumbnailUri, setThumbnailUri] = useState(null);
+const VideoPreviewThumbnail = ({ videoUrl, videoId, videoThumbnail, onPress, t }) => {
+  const savedThumbnailUri = getImageUri(videoThumbnail);
+  const [thumbnailUri, setThumbnailUri] = useState(savedThumbnailUri);
+  const [backgroundFrameUri, setBackgroundFrameUri] = useState(savedThumbnailUri);
 
   useEffect(() => {
-    // Generate thumbnail from video
-    const generateThumbnail = async () => {
+    let active = true;
+    setThumbnailUri(savedThumbnailUri);
+    setBackgroundFrameUri(savedThumbnailUri);
+    if (!videoUrl) return () => { active = false; };
+
+    const prepareVideoCover = async () => {
+      let frameUri = savedThumbnailUri;
       try {
-        const { uri } = await VideoThumbnails.getThumbnailAsync(videoUrl, {
-          time: 3000,
-          quality: 0.8,
-        });
-        setThumbnailUri(uri);
+        if (!frameUri) {
+          const thumbnail = await VideoThumbnails.getThumbnailAsync(videoUrl, {
+            time: 3000,
+            quality: 0.8,
+          });
+          frameUri = thumbnail.uri;
+        }
       } catch (error) {
-        console.log('Error generating thumbnail:', error);
+        try {
+          const thumbnail = await VideoThumbnails.getThumbnailAsync(videoUrl, {
+            time: 1000,
+            quality: 0.5,
+          });
+          frameUri = thumbnail.uri;
+        } catch (fallbackError) {
+          console.warn('Could not generate the post video cover:', fallbackError.name || error.name || 'Unknown error');
+        }
+      }
+
+      if (!active || !frameUri) return;
+      setThumbnailUri(frameUri);
+      setBackgroundFrameUri(frameUri);
+
+      try {
+        const background = await requestVideoBackground({
+          uri: videoUrl,
+          cacheKey: videoId,
+          thumbnailUri: frameUri,
+        });
+        if (active) setBackgroundFrameUri(background.frameUri || frameUri);
+      } catch (error) {
+        console.warn('Could not prepare the post video background:', error.name || 'Unknown error');
       }
     };
 
-    if (videoUrl) {
-      generateThumbnail();
-    }
-  }, [videoUrl]);
+    prepareVideoCover();
+    return () => { active = false; };
+  }, [videoUrl, videoId, savedThumbnailUri]);
 
   return (
     <TouchableOpacity
@@ -543,8 +655,17 @@ const VideoPreviewThumbnail = ({ videoUrl, onPress, t }) => {
       accessibilityLabel={t.previewVideo}
       style={styles.videoThumbnailContainer}
     >
+      <VideoBackground
+        frameUri={backgroundFrameUri}
+        duration={3}
+        active={Boolean(backgroundFrameUri)}
+      />
       {thumbnailUri ? (
-        <Image source={{ uri: thumbnailUri }} style={styles.videoThumbnail} resizeMode="cover" />
+        <Image
+          source={normalizeImageSource({ uri: thumbnailUri })}
+          style={styles.videoThumbnail}
+          resizeMode="contain"
+        />
       ) : (
         <View style={[styles.videoThumbnailPlaceholder, { backgroundColor: '#000000' }]}>
           <Ionicons name="videocam" size={40} color="#FFFFFF" />
@@ -576,6 +697,12 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
   const [house, setHouse] = useState(null);
   const [postNotFound, setPostNotFound] = useState(false);
   const [activeTab, setActiveTab] = useState('Contact');
+  const sellerPresenceId = house?.user?._id || house?.user?.id || house?.userId || house?.user;
+  const sellerPresenceKey = typeof sellerPresenceId === 'object'
+    ? sellerPresenceId?._id || sellerPresenceId?.id || sellerPresenceId?.userId
+    : sellerPresenceId;
+  const onlineUsers = useOnlineUsers(sellerPresenceId ? [sellerPresenceId] : []);
+  const isSellerOnline = Boolean(sellerPresenceKey && onlineUsers[String(sellerPresenceKey)]);
 
   useEffect(() => {
     if (authUser) {
@@ -803,16 +930,6 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
   const sellerId = house.user?._id || house.user?.id || house.userId || house.user;
   const viewerId = currentUser?._id || authUser?._id || authUser?.id;
   const isOwnPost = Boolean(viewerId && sellerId && String(viewerId) === String(sellerId));
-  const previewListing = {
-    title: productName,
-    price,
-    location,
-    sellerName,
-    sellerAvatar,
-    contactNumber: callNumber,
-    thumbnail: house.houseImages?.[0],
-  };
-
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['bottom']}>
       <View style={{ flex: 1 }}>
@@ -820,6 +937,8 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
         {house.videoUrl && (
           <VideoPreviewThumbnail
             videoUrl={house.videoUrl}
+            videoId={house.videoId || house._id || house.id}
+            videoThumbnail={house.videoThumbnail || house.thumbnail}
             t={t}
             onPress={() => navigation.navigate('BuyPost', {
               activeTab: 'videos',
@@ -829,14 +948,10 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
           />
         )}
 
-        {/* Inline image slider; enlarged image preview is disabled here. */}
+        {/* Inline image slider – normal by default, expands on tap. */}
         {!house.videoUrl && (
           <AutoSlidingImageSlider
             images={house.houseImages}
-            navigation={navigation}
-            title={productName}
-            description={description}
-            listing={previewListing}
           />
         )}
 
@@ -871,7 +986,14 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
         >
           {/* Owner Pill */}
           <View style={[styles.ownerPill, { backgroundColor: theme.background, borderColor: theme.border }]}>
-            <Image source={getImageSource(sellerAvatar)} style={styles.ownerAvatar} />
+            <View style={styles.ownerAvatarWrap}>
+              <Image
+                source={normalizeImageSource(getImageSource(sellerAvatar))}
+
+                style={styles.ownerAvatarImage}
+              />
+              <OnlineStatusDot visible={isSellerOnline} />
+            </View>
             <View>
               <Text style={[styles.ownerName, { color: theme.text }]}>{sellerName}</Text>
               <Text style={[styles.ownerLabel, { color: theme.textSecondary }]}>{t.productOwner}</Text>
@@ -933,26 +1055,27 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
               // Build replyPost object just like in BuyPostScreen
               const sellerId = house.user?._id || house.user;
               const replyPost = {
-                postId: house._id,
+                postId: String(house._id || house.id || ''),
+                contextType: 'post',
                 title: house.productName || house.title || 'Product',
                 description: house.description || '',
                 image: (house.houseImages && house.houseImages.length > 0)
-                  ? (typeof house.houseImages[0] === 'string' ? house.houseImages[0] : house.houseImages[0]?.uri || house.houseImages[0])
-                  : null,
-                  price: house.price ?? null,
-                  amount: house.amount || '',
+                  ? (typeof house.houseImages[0] === 'string' ? house.houseImages[0] : house.houseImages[0]?.uri || house.houseImages[0]?.url || house.houseImages[0]?.src || '')
+                  : (typeof house.image === 'string' ? house.image : house.image?.uri || house.image?.url || house.image?.src || ''),
+                price: house.price ?? null,
+                amount: house.amount || '',
                 location: house.location || '',
-                  category: house.category || '',
-                  bedrooms: house.bedrooms ?? null,
-                  bathrooms: house.bathrooms ?? null,
-                  size: house.size ?? null,
-                  priceNegotiable: !!house.priceNegotiable,
-                  contactNumbers: house.contactNumbers || [],
-                  houseImages: house.houseImages || [],
-                  videoUrl: house.videoUrl || '',
-                  videoThumbnail: house.videoThumbnail || '',
-                  username: house.username || '',
-                  userAvatar: house.userAvatar || house.user?.avatar || '',
+                category: house.category || '',
+                bedrooms: house.bedrooms ?? null,
+                bathrooms: house.bathrooms ?? null,
+                size: house.size ?? null,
+                priceNegotiable: !!house.priceNegotiable,
+                contactNumbers: house.contactNumbers || [],
+                houseImages: house.houseImages || [],
+                videoUrl: house.videoUrl || '',
+                videoThumbnail: house.videoThumbnail || house.thumbnail || '',
+                username: house.username || sellerName || '',
+                userAvatar: house.userAvatar || house.user?.avatar || '',
                 ownerId: sellerId,
                 timestamp: house.createdAt || new Date().toISOString(),
               };
@@ -960,7 +1083,7 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
                 sellerId: sellerId,
                 sellerName: sellerName,
                 sellerPhone: callNumber,
-                postId: house._id,
+                postId: String(house._id || house.id || ''),
                 postTitle: productName,
                 sellerAvatar: sellerAvatar,
                 language: language,
@@ -1024,9 +1147,8 @@ const styles = StyleSheet.create({
   loadingImage: { width: 110, height: 110 },
   loadingText: { marginTop: 22, fontSize: 16 },
 
-  // Slider
-  sliderContainer: { width: '100%', height: 320 },
-  houseImage: { width: width, height: 320 },
+  // Slider – height is animated (NORMAL_IMAGE_HEIGHT ↔ EXPANDED_IMAGE_HEIGHT)
+  sliderContainer: { width: '100%', overflow: 'hidden' },
   dotsContainer: {
     position: 'absolute',
     Top:0,
@@ -1038,6 +1160,17 @@ const styles = StyleSheet.create({
   },
   dot: { width: 10, height: 8, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.5)', },
   activeDot: { backgroundColor: '#ffffff', width: 20, height: 8 },
+  expandHintBtn: {
+    position: 'absolute',
+    bottom: 10,
+    right: 10,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
 
   // Video Thumbnail (Inline)
   videoThumbnailContainer: {
@@ -1269,7 +1402,8 @@ const styles = StyleSheet.create({
     marginBottom: 20,
     marginTop: 8,
   },
-  ownerAvatar: { width: 40, height: 40, borderRadius: 20, marginRight: 12 },
+  ownerAvatarWrap: { width: 40, height: 40, marginRight: 12 },
+  ownerAvatarImage: { width: 40, height: 40, borderRadius: 20 },
   ownerName: { fontSize: 14, fontWeight: '600' },
   ownerLabel: { fontSize: 11 },
 

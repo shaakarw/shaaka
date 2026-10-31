@@ -1,5 +1,17 @@
-﻿import React, { useCallback } from 'react';
-import { View, TouchableOpacity, StyleSheet } from 'react-native';
+// components/BottomBar.js
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useMemo,
+} from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -7,18 +19,81 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { useAuth } from '../context/AuthContext';
 import { useTabMode } from '../context/TabModeContext';
+import { useTheme } from '../context/ThemeContext';
 import { showGlobalBottomSheet } from '../context/BottomSheetContext';
+import ScreenTutorialOverlay from './ScreenTutorialOverlay';
+import useScreenTutorial from '../hooks/useScreenTutorial';
 
 const BAR_ROUTES = ['WelcomeHome', 'Search', 'BuyPost', 'Locate', 'AddShop', 'Message', 'AddPost', 'Settings'];
 
-const BottomBar = ({ state, navigation, theme, stackRouteName }) => {
+// ---- Tutorial config ---------------------------------------------------------
+const BOTTOMBAR_TUTORIAL_DELAY_MS = 800;
+const BOTTOMBAR_TUTORIAL_PADDING = 0;
+// No dim — screen stays fully visible
+
+// -----------------------------------------------------------------------------
+
+const TAB_COPY = {
+  WelcomeHome: {
+    English: { title: 'Home', body: 'Return to the home screen to see trending products.' },
+    Kinyarwanda: { title: 'Ahabanza', body: "Garuka ku rupapuro rw'ibanze urebe ibikunzwe." },
+  },
+  Search: {
+    English: { title: 'Search', body: 'Search for products and services across Shaaka.' },
+    Kinyarwanda: { title: 'Shakisha', body: 'Shakisha ibicuruzwa na serivisi muri Shaaka.' },
+  },
+  BuyPost: {
+    English: { title: 'Shop', body: 'Browse all products for sale on Shaaka.' },
+    Kinyarwanda: { title: 'Gura', body: 'Reba ibicuruzwa byose bigurishwa kuri Shaaka.' },
+  },
+  Locate: {
+    English: { title: 'Map', body: 'Find shops and places near you on the map.' },
+    Kinyarwanda: { title: 'Ikarita', body: "Shaka amaduka n'ahantu hafi yawe ku ikarita." },
+  },
+  AddShop: {
+    English: { title: 'Add shop', body: 'Add your own shop so customers can find you.' },
+    Kinyarwanda: { title: 'Ongeraho iduka', body: 'Ongeraho iduka ryawe kugira ngo abakiriya bagushake.' },
+  },
+  Message: {
+    English: { title: 'Messages', body: 'Chat with buyers and sellers.' },
+    Kinyarwanda: { title: 'Ubutumwa', body: "Ganira n'abagura n'abagurisha." },
+  },
+};
+
+const PLUS_COPY = {
+  shopMode: {
+    English: {
+      title: 'Add a product',
+      body: 'Tap here to add a new product you want to sell on Shaaka.',
+    },
+    Kinyarwanda: {
+      title: 'Ongeraho igicuruzwa',
+      body: 'Kanda hano wongere igicuruzwa gishya ushaka kugurisha kuri Shaaka.',
+    },
+  },
+  locateMode: {
+    English: {
+      title: 'Add a place',
+      body: 'Tap here to add a shop or place so customers can find you on the map.',
+    },
+    Kinyarwanda: {
+      title: 'Ongeraho ahantu',
+      body: "Kanda hano wongere iduka cyangwa ahantu kugira ngo abakiriya bagushake ku ikarita.",
+    },
+  },
+};
+
+const BottomBar = ({ state, navigation, theme, stackRouteName, language = 'English' }) => {
   const { tabMode } = useTabMode();
   const { user } = useAuth();
+  const { isDarkMode } = useTheme();
   const insets = useSafeAreaInsets();
   const currentRoute = stackRouteName
     ? { name: stackRouteName, key: stackRouteName }
     : state.routes[state.index];
-  const currentBuyPostTab = currentRoute?.name === 'BuyPost' ? currentRoute?.params?.activeTab || 'ushaka' : null;
+
+  const tabRefs = useRef({});
+  const createBtnRef = useRef(null);
 
   const checkExistingShopBeforeAdd = useCallback(async () => {
     try {
@@ -67,9 +142,6 @@ const BottomBar = ({ state, navigation, theme, stackRouteName }) => {
     return false;
   }, [user]);
 
-  if (!currentRoute || !BAR_ROUTES.includes(currentRoute.name)) return null;
-  if (currentRoute.name === 'BuyPost' && !['ushaka', 'videos'].includes(currentBuyPostTab)) return null;
-
   const alwaysVisible = ['WelcomeHome', 'Message'];
   const conditionalTabs = tabMode === 'shopMode' ? ['Search', 'BuyPost'] : ['Locate', 'AddShop'];
   const visibleTabNames = [...alwaysVisible, ...conditionalTabs];
@@ -78,8 +150,39 @@ const BottomBar = ({ state, navigation, theme, stackRouteName }) => {
     : ['WelcomeHome', 'Locate', 'AddShop', 'Message'];
   const visibleRoutes = order
     .filter((name) => visibleTabNames.includes(name))
-    .map((name) => stackRouteName ? { name, key: name } : state.routes.find((route) => route.name === name))
+    .map((name) => (stackRouteName ? { name, key: name } : state.routes.find((route) => route.name === name)))
     .filter(Boolean);
+
+  const barVisible = currentRoute && BAR_ROUTES.includes(currentRoute.name);
+  const [showTutorial, finishTutorial] = useScreenTutorial(
+    `bottombar-${currentRoute?.name || 'hidden'}`,
+    Boolean(barVisible && currentRoute?.name === 'WelcomeHome'),
+    BOTTOMBAR_TUTORIAL_DELAY_MS
+  );
+
+  const tutorialSteps = useMemo(() => {
+    if (!barVisible) return [];
+    const steps = visibleRoutes.map((r) => {
+      const copy = TAB_COPY[r.name]?.[language] || TAB_COPY[r.name]?.English || {};
+      return {
+        getTarget: () => tabRefs.current[r.name],
+        title: copy.title || r.name,
+        body: copy.body || '',
+      };
+    });
+    const plusCopy = PLUS_COPY[tabMode]?.[language] || PLUS_COPY[tabMode]?.English;
+    if (plusCopy) {
+      steps.push({
+        getTarget: () => createBtnRef.current,
+        title: plusCopy.title,
+        body: plusCopy.body,
+      });
+    }
+    return steps;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [barVisible, visibleRoutes.map((r) => r.name).join('|'), language, tabMode]);
+
+  if (!barVisible) return null;
 
   const getIcon = (routeName, isFocused) => {
     switch (routeName) {
@@ -120,6 +223,7 @@ const BottomBar = ({ state, navigation, theme, stackRouteName }) => {
     return (
       <TouchableOpacity
         key={route.key}
+        ref={(el) => { tabRefs.current[route.name] = el; }}
         onPress={onPress}
         activeOpacity={0.7}
         style={styles.tabItem}
@@ -167,22 +271,41 @@ const BottomBar = ({ state, navigation, theme, stackRouteName }) => {
   );
 
   return (
-    <View style={[styles.tabBar, { backgroundColor: theme.background, borderTopColor: theme.border, paddingBottom: Math.max(insets.bottom, 10) }]}>
-      {tabMode === 'locateMode' ? (
-        <>
-          {visibleRoutes.map(renderTab)}
-          {settingsShortcut}
-        </>
-      ) : (
-        <>
-          {visibleRoutes.slice(0, midIndex).map(renderTab)}
-          <TouchableOpacity onPress={handleCreatePress} activeOpacity={1} style={styles.tabItem} accessibilityRole="button" accessibilityLabel="Create post">
-            <Ionicons name="add" size={40} color="#47ae87" />
-          </TouchableOpacity>
-          {visibleRoutes.slice(midIndex).map(renderTab)}
-        </>
-      )}
-    </View>
+    <>
+      <View style={[styles.tabBar, { backgroundColor: theme.background, borderTopColor: theme.border, paddingBottom: Math.max(insets.bottom, 10) }]}>
+        {tabMode === 'locateMode' ? (
+          <>
+            {visibleRoutes.map(renderTab)}
+            {settingsShortcut}
+          </>
+        ) : (
+          <>
+            {visibleRoutes.slice(0, midIndex).map(renderTab)}
+            <TouchableOpacity
+              ref={createBtnRef}
+              onPress={handleCreatePress}
+              activeOpacity={1}
+              style={styles.tabItem}
+              accessibilityRole="button"
+              accessibilityLabel="Create post"
+            >
+              <Ionicons name="add" size={40} color="#47ae87" />
+            </TouchableOpacity>
+            {visibleRoutes.slice(midIndex).map(renderTab)}
+          </>
+        )}
+      </View>
+
+      <ScreenTutorialOverlay
+        visible={showTutorial}
+        steps={tutorialSteps}
+        isDarkMode={isDarkMode}
+        language={language}
+        onFinish={finishTutorial}
+        padding={BOTTOMBAR_TUTORIAL_PADDING}
+        dimOpacity={0}
+      />
+    </>
   );
 };
 

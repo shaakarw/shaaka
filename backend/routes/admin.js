@@ -4,7 +4,9 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');   // ✅ already imported
 const User = require('../models/User');
+const AppSetting = require('../models/AppSetting');
 const adminController = require('../controllers/adminController');
+const storageService = require('../services/storage/storageService');
 const { normalizeForAuth } = require('../utils/phoneNormalizer');
 
 // ---------- Admin verification middleware ----------
@@ -73,6 +75,20 @@ router.post('/login', async (req, res) => {
 // ---------- All routes below require admin ----------
 router.use(verifyAdmin);
 
+router.get('/tutorial-image', async (req, res) => {
+  try {
+    const setting = await AppSetting.findOne({ key: 'tutorialimage' }).lean();
+    const url = setting?.value ? storageService.getPublicMediaUrl(setting.value) : null;
+    return res.json({
+      success: true,
+      tutorialImage: url ? { url, updatedAt: setting.updatedAt } : null,
+    });
+  } catch (error) {
+    console.error('Could not load admin tutorial image:', error);
+    return res.status(500).json({ success: false, message: 'Could not load tutorial image.' });
+  }
+});
+
 // Dashboard stats
 router.get('/stats', adminController.getDashboardStats);
 
@@ -92,6 +108,7 @@ router.put('/posts/:postId/restore', adminController.restorePost);
 
 // Shops
 router.get('/shops', adminController.getShops);
+router.delete('/mall-shops/:shopId', adminController.deleteMallShop);
 router.delete('/shops/:shopId', adminController.deleteShop);
 router.put('/shops/:shopId/stop', adminController.stopShop);
 router.put('/shops/:shopId/restore', adminController.restoreShop);

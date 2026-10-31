@@ -1,3 +1,4 @@
+
 // screens/AdminUserScreen.js
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
@@ -27,6 +28,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import AdminScreenHeader from '../components/AdminScreenHeader';
+import { showAdminFeedback } from '../utils/adminFeedback';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width, height } = Dimensions.get('window');
 const CARD_MARGIN = 6;
@@ -250,10 +254,6 @@ const AdminUserScreen = ({ navigation, language }) => {
   const headerRef = useRef(null);
   const [headerHeight, setHeaderHeight] = useState(0);
 
-  const [statusModalVisible, setStatusModalVisible] = useState(false);
-  const [statusTitle, setStatusTitle] = useState('');
-  const [statusMessage, setStatusMessage] = useState('');
-
   // ---------- PanResponder (improved) ----------
   const panResponder = useRef(
     PanResponder.create({
@@ -287,9 +287,7 @@ const AdminUserScreen = ({ navigation, language }) => {
   const getToken = async () => AsyncStorage.getItem('adminToken');
 
   const showStatus = (title, message) => {
-    setStatusTitle(title);
-    setStatusMessage(message);
-    setStatusModalVisible(true);
+    showAdminFeedback(title, message, title === t.error ? 'error' : 'success', { buttonText: t.ok });
   };
 
   // ---------- Fetch users ----------
@@ -310,14 +308,14 @@ const AdminUserScreen = ({ navigation, language }) => {
         setUsers(userList);
         setFilteredUsers(userList);
       } else {
-        Alert.alert(t.error, 'Failed to fetch users.');
+        showAdminFeedback(t.error, 'Failed to fetch users.', 'error');
       }
     } catch (error) {
       console.error('Fetch users error:', error);
       if (error.response?.status === 401) {
         navigation.replace('AdminLogin');
       } else {
-        Alert.alert(t.error, 'An error occurred while fetching users.');
+        showAdminFeedback(t.error, 'An error occurred while fetching users.', 'error');
       }
     } finally {
       setRefreshing(false);
@@ -345,16 +343,16 @@ const AdminUserScreen = ({ navigation, language }) => {
         setDetailsError(false);
       } else {
         setDetailsError(true);
-        Alert.alert(t.error, res.data.message || 'Failed to fetch user details.');
+        showAdminFeedback(t.error, res.data.message || 'Failed to fetch user details.', 'error');
       }
     } catch (err) {
       console.error('Fetch user details error:', err);
       setDetailsError(true);
       if (err.response?.status === 404) {
         setUserDetails(selectedUser);
-        Alert.alert('Info', 'Could not load full details. Showing basic info.');
+        showAdminFeedback('Info', 'Could not load full details. Showing basic info.');
       } else {
-        Alert.alert(t.error, 'Could not load user details.');
+        showAdminFeedback(t.error, 'Could not load user details.', 'error');
       }
     } finally {
       setDetailsLoading(false);
@@ -398,7 +396,7 @@ const AdminUserScreen = ({ navigation, language }) => {
             showStatus(t.success, t.userBlocked);
             if (userDetails) setUserDetails({ ...userDetails, blocked: true });
           } catch (e) {
-            Alert.alert(t.error, 'Failed to block user.');
+            showAdminFeedback(t.error, 'Failed to block user.', 'error');
           }
         },
       },
@@ -423,7 +421,7 @@ const AdminUserScreen = ({ navigation, language }) => {
             showStatus(t.success, t.userUnblocked);
             if (userDetails) setUserDetails({ ...userDetails, blocked: false });
           } catch (e) {
-            Alert.alert(t.error, 'Failed to unblock user.');
+            showAdminFeedback(t.error, 'Failed to unblock user.', 'error');
           }
         },
       },
@@ -446,7 +444,7 @@ const AdminUserScreen = ({ navigation, language }) => {
             closeSheet();
             fetchUsers();
           } catch (e) {
-            Alert.alert(t.error, 'Failed to delete user.');
+            showAdminFeedback(t.error, 'Failed to delete user.', 'error');
           }
         },
       },
@@ -619,7 +617,7 @@ const AdminUserScreen = ({ navigation, language }) => {
       <View ref={headerRef} onLayout={onHeaderLayout} style={styles.fixedHeader}>
         <View style={styles.sheetAvatarSection}>
           {data.avatar ? (
-            <Image source={{ uri: data.avatar }} style={styles.sheetAvatar} />
+            <Image source={normalizeImageSource({ uri: data.avatar })} style={styles.sheetAvatar} />
           ) : (
             <View style={[styles.sheetAvatarPlaceholder, { backgroundColor: theme.border }]}>
               <Text style={[styles.sheetAvatarInitials, { color: theme.text }]}>{initials}</Text>
@@ -818,7 +816,7 @@ const AdminUserScreen = ({ navigation, language }) => {
       >
         <View style={styles.avatarContainer}>
           {item.avatar ? (
-            <Image source={{ uri: item.avatar }} style={styles.avatar} />
+            <Image source={normalizeImageSource({ uri: item.avatar })} style={styles.avatar} />
           ) : (
             <View style={[styles.avatarPlaceholder, { backgroundColor: theme.border }]}>
               <Text style={[styles.avatarInitials, { color: theme.text }]}>{initials}</Text>
@@ -892,7 +890,7 @@ const AdminUserScreen = ({ navigation, language }) => {
 
   // ---------- Main render ----------
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['left', 'right', 'bottom']}>
       {/* Header */}
       <AdminScreenHeader
         title={t.users}
@@ -914,19 +912,6 @@ const AdminUserScreen = ({ navigation, language }) => {
       ) : (
         renderUsersList()
       )}
-
-      {/* Status Modal */}
-      <Modal transparent visible={statusModalVisible} animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { backgroundColor: theme.background, borderColor: theme.border }]}>
-            <Text style={[styles.modalTitle, { color: theme.text }]}>{statusTitle}</Text>
-            <Text style={[styles.modalText, { color: theme.textSecondary }]}>{statusMessage}</Text>
-            <TouchableOpacity style={[styles.modalButton, { backgroundColor: theme.accent }]} onPress={() => setStatusModalVisible(false)}>
-              <Text style={styles.modalButtonText}>{t.ok}</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
 
       {/* Bottom Sheet (overlay now transparent) */}
       <Modal transparent visible={sheetVisible} animationType="none" onRequestClose={closeSheet}>
@@ -997,11 +982,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: 12,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 2,
   },
   avatarContainer: { marginBottom: 6 },
   avatar: { width: 56, height: 56, borderRadius: 28 },

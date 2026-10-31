@@ -21,6 +21,10 @@ function collectStorageKeys(urls) {
 function getPostStorageKeys(post) {
   return [
     ...(post.houseImageStorageKeys || []),
+    ...(post.houseImageVariants || []).flatMap(image => [
+      image.originalStorageKey,
+      ...Object.values(image.variants || {}).map(variant => variant.storageKey),
+    ]),
     ...collectStorageKeys(post.houseImages || []),
     post.videoStorageKey,
     post.videoThumbnailStorageKey,
@@ -44,9 +48,20 @@ function getPlaceStorageKeys(place) {
   const imageUrls = place.images ? Object.values(place.images) : [];
   const productImageUrls = (place.products || []).flatMap(product => product.images || []);
   const productKeys = (place.products || []).flatMap(product => product.imageStorageKeys || []);
+  const imageVariantKeys = [
+    ...(place.imageVariants || []).flatMap(image => [
+      image.originalStorageKey,
+      ...Object.values(image.variants || {}).map(variant => variant.storageKey),
+    ]),
+    ...(place.products || []).flatMap(product => (product.imageVariants || []).flatMap(image => [
+      image.originalStorageKey,
+      ...Object.values(image.variants || {}).map(variant => variant.storageKey),
+    ])),
+  ];
   return [
     ...(Object.values(place.imageStorageKeys || {})),
     ...productKeys,
+    ...imageVariantKeys,
     ...collectStorageKeys([...imageUrls, ...productImageUrls]),
   ].filter(storageService.isStorageKey);
 }
@@ -107,7 +122,7 @@ async function deletePlaceWithCleanup(placeId) {
   if (!place) return;
 
   const keys = getPlaceStorageKeys(place);
-  const relatedPosts = await Post.find({ user: place.userId }).select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey videoThumbnail videoThumbnailStorageKey').lean();
+  const relatedPosts = await Post.find({ user: place.userId }).select('_id houseImages houseImageStorageKeys houseImageVariants videoUrl videoStorageKey videoThumbnail videoThumbnailStorageKey').lean();
   const postIds = relatedPosts.map(post => post._id);
   for (const post of relatedPosts) keys.push(...getPostStorageKeys(post));
 
@@ -134,7 +149,15 @@ async function deleteMallShopWithCleanup(shopId) {
     ...(shop.products || []).flatMap(product => product.images || []),
   ]).concat(
     shop.frontImageStorageKey || '',
-    ...(shop.products || []).flatMap(product => product.imageStorageKeys || [])
+    ...(shop.products || []).flatMap(product => product.imageStorageKeys || []),
+    ...(shop.imageVariants || []).flatMap(image => [
+      image.originalStorageKey,
+      ...Object.values(image.variants || {}).map(variant => variant.storageKey),
+    ]),
+    ...(shop.products || []).flatMap(product => (product.imageVariants || []).flatMap(image => [
+      image.originalStorageKey,
+      ...Object.values(image.variants || {}).map(variant => variant.storageKey),
+    ]))
   );
   const shopMessages = await Message.find({
     $or: [{ postId: String(shopId) }, { 'replyPost.postId': shopId }],
@@ -146,7 +169,7 @@ async function deleteMallShopWithCleanup(shopId) {
     message.replyPost?.postId ? String(message.replyPost.postId) : '',
   ]).filter(id => id && mongoose.Types.ObjectId.isValid(id)))];
   const relatedPosts = await Post.find({ _id: { $in: relatedPostIds } })
-    .select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey videoThumbnail videoThumbnailStorageKey').lean();
+    .select('_id houseImages houseImageStorageKeys houseImageVariants videoUrl videoStorageKey videoThumbnail videoThumbnailStorageKey').lean();
   for (const post of relatedPosts) keys.push(...getPostStorageKeys(post));
 
   for (const postId of relatedPostIds) await deleteMessagesForPost(postId);
@@ -163,7 +186,7 @@ async function deleteShopWithCleanup(shopId) {
   if (!shop) return;
 
   const keys = getPlaceStorageKeys(shop);
-  const relatedPosts = await Post.find({ user: shop.userId }).select('_id houseImages houseImageStorageKeys videoUrl videoStorageKey videoThumbnail videoThumbnailStorageKey').lean();
+  const relatedPosts = await Post.find({ user: shop.userId }).select('_id houseImages houseImageStorageKeys houseImageVariants videoUrl videoStorageKey videoThumbnail videoThumbnailStorageKey').lean();
   const postIds = relatedPosts.map(post => post._id);
   for (const post of relatedPosts) keys.push(...getPostStorageKeys(post));
 

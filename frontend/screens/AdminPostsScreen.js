@@ -1,3 +1,4 @@
+
 // screens/AdminPostsScreen.js
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
@@ -26,6 +27,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import AdminScreenHeader from '../components/AdminScreenHeader';
+import { showAdminFeedback } from '../utils/adminFeedback';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width, height } = Dimensions.get('window');
 const CARD_MARGIN = 6;
@@ -111,11 +115,6 @@ const AdminPostsScreen = ({ navigation, language }) => {
   const [selectedPost, setSelectedPost] = useState(null);
   const [sheetVisible, setSheetVisible] = useState(false);
 
-  // Status modal
-  const [statusModalVisible, setStatusModalVisible] = useState(false);
-  const [statusTitle, setStatusTitle] = useState('');
-  const [statusMessage, setStatusMessage] = useState('');
-
   // Image Carousel
   const [carouselVisible, setCarouselVisible] = useState(false);
   const [carouselImages, setCarouselImages] = useState([]);
@@ -165,9 +164,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
   const getToken = async () => AsyncStorage.getItem('adminToken');
 
   const showStatus = (title, message) => {
-    setStatusTitle(title);
-    setStatusMessage(message);
-    setStatusModalVisible(true);
+    showAdminFeedback(title, message, title === t.error ? 'error' : 'success', { buttonText: t.ok });
   };
 
   // ---------- Open Carousel (smooth) ----------
@@ -213,14 +210,14 @@ const AdminPostsScreen = ({ navigation, language }) => {
         setPosts(postList);
         setFilteredPosts(sortPosts(postList));
       } else {
-        Alert.alert(t.error, 'Failed to fetch posts.');
+        showAdminFeedback(t.error, 'Failed to fetch posts.', 'error');
       }
     } catch (error) {
       console.error('Fetch posts error:', error);
       if (error.response?.status === 401) {
         navigation.replace('AdminLogin');
       } else {
-        Alert.alert(t.error, 'An error occurred while fetching posts.');
+        showAdminFeedback(t.error, 'An error occurred while fetching posts.', 'error');
       }
     } finally {
       setRefreshing(false);
@@ -254,7 +251,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
 
   // ---------- Handlers ----------
   const handleDeletePost = (postId) => {
-    if (!postId) { Alert.alert(t.error, 'No post ID provided.'); return; }
+    if (!postId) { showAdminFeedback(t.error, 'No post ID provided.', 'error'); return; }
     Alert.alert(t.delete, t.deleteConfirm, [
       { text: t.cancel, style: 'cancel' },
       {
@@ -270,7 +267,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
             closeSheet();
             fetchPosts();
           } catch (e) {
-            Alert.alert(t.error, 'Failed to delete post.');
+            showAdminFeedback(t.error, 'Failed to delete post.', 'error');
           }
         },
       },
@@ -278,7 +275,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
   };
 
   const handleStopPost = (postId) => {
-    if (!postId) { Alert.alert(t.error, 'No post ID provided.'); return; }
+    if (!postId) { showAdminFeedback(t.error, 'No post ID provided.', 'error'); return; }
     Alert.alert(t.stop, t.stopConfirm, [
       { text: t.cancel, style: 'cancel' },
       {
@@ -293,7 +290,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
             closeSheet();
             fetchPosts();
           } catch (e) {
-            Alert.alert(t.error, 'Failed to stop post.');
+            showAdminFeedback(t.error, 'Failed to stop post.', 'error');
           }
         },
       },
@@ -301,7 +298,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
   };
 
   const handleRestorePost = (postId) => {
-    if (!postId) { Alert.alert(t.error, 'No post ID provided.'); return; }
+    if (!postId) { showAdminFeedback(t.error, 'No post ID provided.', 'error'); return; }
     Alert.alert(t.restore, t.restoreConfirm, [
       { text: t.cancel, style: 'cancel' },
       {
@@ -316,7 +313,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
             closeSheet();
             fetchPosts();
           } catch (e) {
-            Alert.alert(t.error, 'Failed to restore post.');
+            showAdminFeedback(t.error, 'Failed to restore post.', 'error');
           }
         },
       },
@@ -337,7 +334,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
       fetchPosts();
     } catch (error) {
       console.error('Toggle trending error:', error);
-      Alert.alert(t.error, 'Failed to update Trending status. Please try again.');
+      showAdminFeedback(t.error, 'Failed to update Trending status. Please try again.', 'error');
     }
   };
 
@@ -362,29 +359,6 @@ const AdminPostsScreen = ({ navigation, language }) => {
       setSelectedPost(null);
     });
   };
-
-  // ---------- Render modals ----------
-  const renderStatusModal = () => (
-    <Modal transparent visible={statusModalVisible} animationType="fade">
-      <View style={styles.modalOverlay}>
-        <View
-          style={[
-            styles.modalContent,
-            { backgroundColor: theme.background, borderColor: theme.border },
-          ]}
-        >
-          <Text style={[styles.modalTitle, { color: theme.text }]}>{statusTitle}</Text>
-          <Text style={[styles.modalText, { color: theme.textSecondary }]}>{statusMessage}</Text>
-          <TouchableOpacity
-            style={[styles.modalButton, { backgroundColor: theme.accent }]}
-            onPress={() => setStatusModalVisible(false)}
-          >
-            <Text style={styles.modalButtonText}>{t.ok}</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
-  );
 
   // ---------- Smooth Carousel ----------
   const renderCarousel = () => (
@@ -411,7 +385,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
           keyExtractor={(_, index) => index.toString()}
           renderItem={({ item }) => (
             <View style={styles.carouselSlide}>
-              <Image source={{ uri: item }} style={styles.carouselImage} resizeMode="contain" />
+              <Image source={normalizeImageSource({ uri: item })} style={styles.carouselImage} resizeMode="contain" />
             </View>
           )}
           initialScrollIndex={carouselIndex}
@@ -446,9 +420,10 @@ const AdminPostsScreen = ({ navigation, language }) => {
     if (!selectedPost) return null;
     const isStopped = selectedPost.status === 'stopped';
     const isTrending = selectedPost.trending || false;
-    const imageUrl = (selectedPost.houseImages && selectedPost.houseImages.length > 0)
-      ? selectedPost.houseImages[0]
-      : null;
+    const imageUrl = selectedPost.videoThumbnail ||
+      (selectedPost.houseImages && selectedPost.houseImages.length > 0
+        ? selectedPost.houseImages[0]
+        : null);
 
     return (
       <Modal
@@ -490,12 +465,17 @@ const AdminPostsScreen = ({ navigation, language }) => {
                 activeOpacity={0.9}
               >
                 {imageUrl ? (
-                  <Image source={{ uri: imageUrl }} style={styles.sheetImage} resizeMode="cover" />
+                  <Image source={normalizeImageSource({ uri: imageUrl })} style={styles.sheetImage} resizeMode="cover" />
                 ) : (
                   <View style={[styles.sheetImagePlaceholder, { backgroundColor: theme.border }]}>
                     <Ionicons name="image-outline" size={40} color={theme.textSecondary} />
                   </View>
                 )}
+                {selectedPost.videoUrl || selectedPost.videoHlsUrl ? (
+                  <View style={styles.videoBadge}>
+                    <Ionicons name="play" size={18} color="#fff" />
+                  </View>
+                ) : null}
                 {selectedPost.houseImages && selectedPost.houseImages.length > 1 && (
                   <View style={styles.sheetImageCount}>
                     <Text style={styles.sheetImageCountText}>
@@ -556,7 +536,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
                 >
                   <Ionicons
                     name={isTrending ? 'flame' : 'flame-outline'}
-                    size={22}
+                    size={18}
                     color="#fff"
                   />
                   <Text style={styles.sheetActionText}>
@@ -569,7 +549,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
                     style={[styles.sheetActionBtn, { backgroundColor: theme.accent }]}
                     onPress={() => handleRestorePost(selectedPost._id)}
                   >
-                    <Ionicons name="play-circle-outline" size={22} color="#fff" />
+                    <Ionicons name="play-circle-outline" size={18} color="#fff" />
                     <Text style={styles.sheetActionText}>{t.restore}</Text>
                   </TouchableOpacity>
                 ) : (
@@ -577,7 +557,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
                     style={[styles.sheetActionBtn, { backgroundColor: theme.textSecondary }]}
                     onPress={() => handleStopPost(selectedPost._id)}
                   >
-                    <Ionicons name="pause-circle-outline" size={22} color="#fff" />
+                    <Ionicons name="pause-circle-outline" size={18} color="#fff" />
                     <Text style={styles.sheetActionText}>{t.stop}</Text>
                   </TouchableOpacity>
                 )}
@@ -585,7 +565,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
                   style={[styles.sheetActionBtn, { backgroundColor: '#dc3545' }]}
                   onPress={() => handleDeletePost(selectedPost._id)}
                 >
-                  <Ionicons name="trash-outline" size={22} color="#fff" />
+                  <Ionicons name="trash-outline" size={18} color="#fff" />
                   <Text style={styles.sheetActionText}>{t.delete}</Text>
                 </TouchableOpacity>
               </View>
@@ -598,7 +578,8 @@ const AdminPostsScreen = ({ navigation, language }) => {
 
   // ---------- Render item ----------
   const renderPostItem = ({ item }) => {
-    const imageUrl = (item.houseImages && item.houseImages.length > 0) ? item.houseImages[0] : null;
+    const imageUrl = item.videoThumbnail ||
+      (item.houseImages && item.houseImages.length > 0 ? item.houseImages[0] : null);
     const isStopped = item.status === 'stopped';
     const isFeatured = item.featured || false;
     const statusColor = isStopped ? theme.textSecondary : theme.accent;
@@ -628,7 +609,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
           activeOpacity={0.9}
         >
           {imageUrl ? (
-            <Image source={{ uri: imageUrl }} style={styles.postImage} resizeMode="cover" />
+            <Image source={normalizeImageSource({ uri: imageUrl })} style={styles.postImage} resizeMode="cover" />
           ) : (
             <View style={[styles.postImagePlaceholder, { backgroundColor: theme.border }]}>
               <Ionicons name="image-outline" size={30} color={theme.textSecondary} />
@@ -639,6 +620,11 @@ const AdminPostsScreen = ({ navigation, language }) => {
               <Ionicons name="star" size={12} color="#000" />
             </View>
           )}
+          {item.videoUrl || item.videoHlsUrl ? (
+            <View style={styles.videoBadge}>
+              <Ionicons name="play" size={16} color="#fff" />
+            </View>
+          ) : null}
           {item.houseImages && item.houseImages.length > 1 && (
             <View style={styles.imageCountBadge}>
               <Text style={styles.imageCountText}>+{item.houseImages.length - 1}</Text>
@@ -731,7 +717,7 @@ const AdminPostsScreen = ({ navigation, language }) => {
 
   // ---------- Main render ----------
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['left', 'right', 'bottom']}>
       {/* Header with Refresh Button */}
       <AdminScreenHeader
         title={t.posts}
@@ -755,7 +741,6 @@ const AdminPostsScreen = ({ navigation, language }) => {
       )}
 
       {/* Modals */}
-      {renderStatusModal()}
       {renderBottomSheet()}
       {renderCarousel()}
     </SafeAreaView>
@@ -806,11 +791,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: 10,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 2,
     position: 'relative',
   },
   gridTitle: { fontSize: 13, fontWeight: '600', textAlign: 'center', marginBottom: 2 },
@@ -846,6 +826,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 10,
+  },
+  videoBadge: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   imageCountText: { color: '#fff', fontSize: 10, fontWeight: '600' },
 
@@ -965,6 +956,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 12,
+    paddingHorizontal: 15,
     borderRadius: 14,
     gap: 6,
   },

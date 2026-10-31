@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
@@ -20,19 +21,23 @@ import axios from 'axios';
 import { Ionicons } from '@expo/vector-icons';
 import { BASE_URL } from '../constants';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import OnlineStatusDot from '../components/OnlineStatusDot';
+import useOnlineUsers from '../hooks/useOnlineUsers';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const MESSAGES_KEY = '@user_messages';
 const DEFAULT_AVATAR = require('../assets/profile1.png');
 
 const Bubble = ({ item, isMine, theme }) => (
   <View style={[styles.bubbleRow, isMine ? { justifyContent: 'flex-end' } : { justifyContent: 'flex-start' }]}>
-    {!isMine && <Image source={item.senderAvatar ? { uri: item.senderAvatar } : DEFAULT_AVATAR} style={styles.avatar} />}
+    {!isMine && <Image source={normalizeImageSource(item.senderAvatar ? { uri: item.senderAvatar } : DEFAULT_AVATAR)} style={styles.avatar} />}
     <View style={[styles.bubble, isMine ? { backgroundColor: '#0ea44a' } : { backgroundColor: theme.cardBackground, borderWidth: 1, borderColor: '#e6e6e6' }]}>
-      {item.imageUrl ? <Image source={{ uri: item.imageUrl }} style={styles.bubbleImage} /> : null}
+      {item.imageUrl ? <Image source={normalizeImageSource({ uri: item.imageUrl })} style={styles.bubbleImage} /> : null}
       {item.text ? <Text style={[styles.bubbleText, isMine ? { color: '#fff' } : { color: theme.text }]}>{item.text}</Text> : null}
       <Text style={[styles.timeText, isMine ? { color: 'rgba(255,255,255,0.8)' } : { color: theme.textSecondary }]}>{new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
     </View>
-    {isMine && <Image source={item.senderAvatar ? { uri: item.senderAvatar } : DEFAULT_AVATAR} style={styles.avatar} />}
+    {isMine && <Image source={normalizeImageSource(item.senderAvatar ? { uri: item.senderAvatar } : DEFAULT_AVATAR)} style={styles.avatar} />}
   </View>
 );
 
@@ -45,6 +50,8 @@ const InstagramChatScreen = ({ route, navigation }) => {
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
   const listRef = useRef(null);
+  const onlineUsers = useOnlineUsers(sellerId ? [sellerId] : []);
+  const isSellerOnline = Boolean(onlineUsers[String(sellerId)]);
 
   useEffect(() => { loadCurrentUser(); }, []);
 
@@ -144,8 +151,13 @@ const InstagramChatScreen = ({ route, navigation }) => {
           <Ionicons name="arrow-back" size={24} color={theme.text} />
         </TouchableOpacity>
         <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-          <Image source={sellerAvatar ? { uri: sellerAvatar } : DEFAULT_AVATAR} style={styles.headerAvatar} />
-          <Text style={[styles.headerName, { color: theme.text }]}>{sellerName}</Text>
+          <View style={styles.headerAvatarWrap}>
+            <Image source={normalizeImageSource(sellerAvatar ? { uri: sellerAvatar } : DEFAULT_AVATAR)} style={styles.headerAvatar} />
+            <OnlineStatusDot visible={isSellerOnline} />
+          </View>
+          <View>
+            <Text style={[styles.headerName, { color: theme.text }]}>{sellerName}</Text>
+          </View>
         </View>
       </View>
 
@@ -160,7 +172,7 @@ const InstagramChatScreen = ({ route, navigation }) => {
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}>
         {selectedImage ? (
           <View style={styles.previewRow}>
-            <Image source={{ uri: selectedImage }} style={styles.previewImage} />
+            <Image source={normalizeImageSource({ uri: selectedImage })} style={styles.previewImage} />
             <TouchableOpacity onPress={() => setSelectedImage(null)} style={styles.removeBtn}><Ionicons name="close" size={18} color="#fff" /></TouchableOpacity>
           </View>
         ) : null}
@@ -183,7 +195,8 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1 },
-  headerAvatar: { width: 40, height: 40, borderRadius: 20, marginRight: 8 },
+  headerAvatarWrap: { position: 'relative', marginRight: 8 },
+  headerAvatar: { width: 40, height: 40, borderRadius: 20 },
   headerName: { fontSize: 16, fontWeight: '600' },
   bubbleRow: { flexDirection: 'row', alignItems: 'flex-end', marginVertical: 6 },
   avatar: { width: 36, height: 36, borderRadius: 18, marginHorizontal: 8 },

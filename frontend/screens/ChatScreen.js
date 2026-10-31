@@ -1,3 +1,5 @@
+
+
 // screens/ChatScreen.js
 import React, { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
 import {
@@ -38,6 +40,8 @@ import { offlineDatabase } from '../services/offlineDatabase';
 import { networkStatus } from '../services/networkStatus';
 import { syncManager } from '../services/syncManager';
 import { logDebug } from '../utils/debugLogger';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const CHAT_POLICY = {
@@ -74,8 +78,6 @@ const CHAT_DECK_SLIDE_DURATION = 5000; // auto-slide duration per image (ms)
 const translations = {
   English: {
     loading: 'Please wait while loading the chat',
-    online: 'Online',
-    offline: 'Offline',
     typing: 'Typing...',
     reply: 'Reply',
     copy: 'Copy',
@@ -121,8 +123,6 @@ const translations = {
     youReplied: 'You replied to',
     replied: 'replied',
     edited: 'Edited',
-    noMessagesYet: 'No messages yet',
-    startConversation: 'Start a conversation from a listing',
     you: 'You',
     success: 'Success',
     ok: 'OK',
@@ -143,8 +143,6 @@ const translations = {
   },
   Kinyarwanda: {
     loading: 'Nyamuneka tegereza ubutumwa buze',
-    online: 'Ari kumurongo',
-    offline: 'Ntari kumurongo',
     typing: 'Arikwa wandika...',
     reply: 'Subiza',
     copy: 'Koracopi',
@@ -190,8 +188,6 @@ const translations = {
     youReplied: 'Wasubije',
     replied: 'yasubije',
     edited: 'Byahinduwe',
-    noMessagesYet: 'Nta butumwa',
-    startConversation: 'Tangira ikiganiro uhereye ku gicuruzwa',
     you: 'Wowe',
     success: 'Byakunze',
     ok: 'Sawa',
@@ -223,6 +219,14 @@ const extractFirstURL = (text) => {
   return null;
 };
 
+// ---------- Helper: validate an image URI ----------
+const isValidImageUri = (uri) => {
+  if (!uri || typeof uri !== 'string') return false;
+  const trimmed = uri.trim();
+  if (!trimmed) return false;
+  return /^(https?:\/\/|file:\/\/|data:image\/|content:\/\/|blob:|ph:\/\/|assets-library:\/\/)/i.test(trimmed);
+};
+
 // ---------- Helper: resolve images list from message ----------
 const resolveMessageImages = (item) => {
   if (!item) return [];
@@ -233,12 +237,12 @@ const resolveMessageImages = (item) => {
   return [];
 };
 
-// ---------- Helper: prefetch reply-post cover images (requirement 4) ----------
+// ---------- Helper: prefetch reply-post cover images ----------
 const prefetchReplyPostCovers = async (messagesToCheck = []) => {
   const coverUris = Array.from(new Set(
     messagesToCheck
       .map(message => resolveReplyCoverUri(message?.replyPost || message?.replyPostContext))
-      .filter(uri => typeof uri === 'string' && /^https?:\/\//i.test(uri))
+      .filter(uri => isValidImageUri(uri) && /^https?:\/\//i.test(uri))
   ));
 
   await Promise.all(coverUris.map(async uri => {
@@ -298,17 +302,16 @@ const getReplyVideoUrl = (post) => {
 };
 
 // ---------- Helper: resolve the cover URI for a replied post ----------
-// Combines getPostCoverUri (video / shop / place / post) with defensive
-// fallbacks for post objects coming from BuyPostScreen (any field name /
-// value shape), and finally falls back to a Cloudinary video poster.
 const resolveReplyCoverUri = (post) => {
   if (!post) return null;
 
-  // 1) Shared resolver
-  const shared = getPostCoverUri(post);
-  if (shared) return shared;
+  try {
+    const shared = getPostCoverUri(post);
+    if (isValidImageUri(shared)) return shared.trim();
+  } catch (e) {
+    // ignore — fall through to the manual candidate scan
+  }
 
-  // 2) Defensive fallbacks — BuyPostScreen may pass one of these
   const candidates = [
     post.image,
     post.imageUrl,
@@ -328,28 +331,29 @@ const resolveReplyCoverUri = (post) => {
     post.video?.poster,
     post.streetImage,
     post.street,
+    post.photo,
+    post.picture,
+    post.pic,
+    post.mainImage,
+    post.featuredImage,
+    post.primaryImage,
   ];
   for (const c of candidates) {
     const u = pickImageUri(c);
-    if (u) return u;
+    if (isValidImageUri(u)) return u;
   }
 
-  // 3) Last resort: Cloudinary video poster
-  return getCloudinaryVideoCover(getReplyVideoUrl(post));
+  const videoCover = getCloudinaryVideoCover(getReplyVideoUrl(post));
+  return isValidImageUri(videoCover) ? videoCover : null;
 };
 
 // ---------- ReplyCoverImage ----------
-// Self-contained: dark placeholder with the right icon until the image is
-// actually displayed; retries failed loads; falls back to a generated video
-// thumbnail when only a videoUrl is available.
 const ReplyPostImage = ({ uri, videoUrl, style, iconName = 'image-outline', iconSize = 20 }) => {
   const [generatedCover, setGeneratedCover] = useState(null);
-  const [isLoaded, setIsLoaded] = useState(false);
   const [hasError, setHasError] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const retryTimerRef = useRef(null);
 
-  // Generate a video thumbnail when there is a video but no static URI
   useEffect(() => {
     setGeneratedCover(null);
     if (!videoUrl || uri) return undefined;
@@ -365,9 +369,7 @@ const ReplyPostImage = ({ uri, videoUrl, style, iconName = 'image-outline', icon
 
   const cover = uri || generatedCover;
 
-  // Reset load state whenever the actual cover changes
   useEffect(() => {
-    setIsLoaded(false);
     setHasError(false);
     setAttempt(0);
     if (retryTimerRef.current) {
@@ -386,26 +388,24 @@ const ReplyPostImage = ({ uri, videoUrl, style, iconName = 'image-outline', icon
     retryTimerRef.current = setTimeout(() => {
       retryTimerRef.current = null;
       setHasError(false);
-      setIsLoaded(false);
       setAttempt(a => a + 1);
     }, 1500);
   };
 
-  const showPlaceholder = !cover || !isLoaded || hasError;
+  const showFallback = !isValidImageUri(cover) || hasError;
 
   return (
     <View style={style}>
-      {cover && (
+      {isValidImageUri(cover) && (
         <Image
           key={`${cover}_${attempt}`}
-          source={{ uri: cover }}
+          source={normalizeImageSource({ uri: cover })}
           style={StyleSheet.absoluteFillObject}
           resizeMode="cover"
-          onLoad={() => setIsLoaded(true)}
           onError={handleError}
         />
       )}
-      {showPlaceholder && (
+      {showFallback && (
         <View style={[StyleSheet.absoluteFillObject, styles.chatImageFallback]}>
           <Ionicons name={iconName} size={iconSize} color="#9aa0a6" />
         </View>
@@ -429,7 +429,7 @@ const ChatImage = ({ uri, style }) => {
 
   return (
     <Image
-      source={{ uri }}
+      source={normalizeImageSource({ uri })}
       style={style}
       resizeMode="cover"
       onError={(event) => {
@@ -487,7 +487,7 @@ const TypingIndicator = ({ theme, avatar }) => {
 
   return (
     <View style={[styles.typingBubble, { backgroundColor: theme.cardBackground || '#e0e0e000' }]}>
-      <Image source={avatar || DEFAULT_AVATAR} style={styles.typingAvatar} />
+      <Image source={normalizeImageSource(avatar || DEFAULT_AVATAR)} style={styles.typingAvatar} />
       <Animated.View style={[styles.typingDot, { backgroundColor: theme.textSecondary, transform: [{ translateY: dot1 }] }]} />
       <Animated.View style={[styles.typingDot, { backgroundColor: theme.textSecondary, transform: [{ translateY: dot2 }] }]} />
       <Animated.View style={[styles.typingDot, { backgroundColor: theme.textSecondary, transform: [{ translateY: dot3 }] }]} />
@@ -589,12 +589,10 @@ const ChatImageDeck = memo(({ images, theme, messageId, onLongPressImage }) => {
 
   const currentIndex = images.length ? activeIndex % images.length : 0;
 
-  // Reset when the message changes
   useEffect(() => {
     setActiveIndex(0);
   }, [messageId]);
 
-  // Auto-advance animation — restarts whenever the active card changes
   useEffect(() => {
     if (!images.length || images.length < 2) return undefined;
 
@@ -635,7 +633,6 @@ const ChatImageDeck = memo(({ images, theme, messageId, onLongPressImage }) => {
   return (
     <View style={styles.chatDeckContainer}>
       <View style={styles.chatDeck}>
-        {/* glow behind the active card */}
         <View
           pointerEvents="none"
           style={[
@@ -786,12 +783,12 @@ const removeCachedMessage = async messageId => {
 };
 
 // ============================================================
-// ReplyPostCard — resolves the correct image (video / shop /
-// place / post from BuyPostScreen) with a dark placeholder,
-// retry-on-fail, and sender/receiver-coloured text/details.
+// ReplyPostCard — pending reply bar (composer)
+// Shows ONLY the media-type icon — no image thumbnail.
 // ============================================================
-const ReplyPostCard = ({ post, color, imageRadiusStyle, onPress }) => {
+const ReplyPostCard = ({ post, color, theme, imageRadiusStyle, onPress }) => {
   if (!post) return null;
+
   const title =
     post.title ||
     post.productName ||
@@ -805,7 +802,7 @@ const ReplyPostCard = ({ post, color, imageRadiusStyle, onPress }) => {
   const isPlace = post.contextType === 'place' || !!post.placeId;
   const isVideo = !!getReplyVideoUrl(post) || post.type === 'video';
 
-  const placeholderIcon = isShop
+  const iconName = isShop
     ? 'storefront-outline'
     : isPlace
     ? 'location-outline'
@@ -814,8 +811,8 @@ const ReplyPostCard = ({ post, color, imageRadiusStyle, onPress }) => {
     : 'image-outline';
 
   const resolvedColor = color || '#a9a9a9';
-  const coverUri = resolveReplyCoverUri(post);
-  const videoUrl = getReplyVideoUrl(post);
+  const isDark = isDarkColor(theme?.background || '#ffffff') || isDarkColor(theme?.cardBackground || '#ffffff');
+  const iconTileBg = isDark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.06)';
 
   return (
     <TouchableOpacity
@@ -823,13 +820,16 @@ const ReplyPostCard = ({ post, color, imageRadiusStyle, onPress }) => {
       onPress={onPress}
       activeOpacity={0.7}
     >
-      <ReplyPostImage
-        uri={coverUri}
-        videoUrl={videoUrl}
-        style={[styles.replyPostThumb, imageRadiusStyle]}
-        iconName={placeholderIcon}
-        iconSize={20}
-      />
+      <View
+        style={[
+          styles.replyPostThumb,
+          styles.replyPostThumbIcon,
+          { backgroundColor: iconTileBg },
+          imageRadiusStyle,
+        ]}
+      >
+        <Ionicons name={iconName} size={22} color={resolvedColor} />
+      </View>
       <View style={styles.replyPostInfo}>
         <Text style={[styles.replyPostTitle, { color: resolvedColor }]} numberOfLines={1}>
           {title}
@@ -841,6 +841,79 @@ const ReplyPostCard = ({ post, color, imageRadiusStyle, onPress }) => {
         ) : null}
       </View>
       <Ionicons name="chevron-forward" size={16} color={resolvedColor} />
+    </TouchableOpacity>
+  );
+};
+
+// ============================================================
+// ReplyPostImageCard — Reels-style Overlay Quote for sent messages
+// ============================================================
+const ReplyPostImageCard = ({ post, theme, isMe, onPress }) => {
+  if (!post) return null;
+
+  const postOwnerName = post.username || post.userName || post.shopName || post.placeName || 'Product';
+  const postOwnerAvatarUri = pickImageUri(post.userAvatar) || pickImageUri(post.user?.avatar);
+  const coverUri = resolveReplyCoverUri(post);
+
+  const title = post.title || post.productName || post.postTitle || post.name || 'Product';
+  const amountText = post.amount || (post.price != null ? `RWF ${post.price.toLocaleString()}` : '');
+  const locationText = post.location || '';
+  const descriptionText = post.description || '';
+
+  const isDark = isDarkColor(theme.background);
+  const cardBg = isDark ? '#1c1c1e' : '#f2f2f7';
+
+  const cardRadiusStyle = {
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    borderBottomLeftRadius: isMe ? 16 : 0,
+    borderBottomRightRadius: isMe ? 0 : 16,
+  };
+
+  return (
+    <TouchableOpacity
+      style={[styles.instaPostCard, cardRadiusStyle, { backgroundColor: cardBg }]}
+      onPress={onPress}
+      activeOpacity={0.85}
+    >
+      <View style={styles.instaPostImageWrapper}>
+        {coverUri ? (
+          <Image source={normalizeImageSource({ uri: coverUri })} style={styles.instaPostImage} />
+        ) : (
+          <View style={[styles.instaPostImage, { backgroundColor: '#333', justifyContent: 'center', alignItems: 'center' }]}>
+            <Ionicons name="image-outline" size={32} color="#888" />
+          </View>
+        )}
+
+        <View style={styles.instaPostTopOverlay}>
+          {postOwnerAvatarUri ? (
+            <Image source={normalizeImageSource({ uri: postOwnerAvatarUri })} style={styles.instaPostAvatar} />
+          ) : (
+            <View style={[styles.instaPostAvatar, { backgroundColor: '#888', justifyContent: 'center', alignItems: 'center' }]}>
+               <Ionicons name="person" size={14} color="#fff" />
+            </View>
+          )}
+          <Text style={styles.instaPostUsername} numberOfLines={1}>
+            {postOwnerName}
+          </Text>
+        </View>
+
+        <View style={styles.reelsOverlay}>
+          <Text style={styles.reelsOverlayTitle} numberOfLines={1}>{title}</Text>
+          {!!amountText && (
+            <Text style={styles.reelsOverlayAmount} numberOfLines={1}>{amountText}</Text>
+          )}
+          {!!locationText && (
+            <View style={styles.reelsOverlayLocationRow}>
+              <Ionicons name="location-outline" size={10} color="#e0e0e0" />
+              <Text style={styles.reelsOverlayLocation} numberOfLines={1}>{locationText}</Text>
+            </View>
+          )}
+          {!!descriptionText && (
+            <Text style={styles.reelsOverlayDescription} numberOfLines={2}>{descriptionText}</Text>
+          )}
+        </View>
+      </View>
     </TouchableOpacity>
   );
 };
@@ -869,21 +942,12 @@ const MessageItem = memo(({
   const hasReplyPost = !!replyPostContext;
   const url = extractFirstURL(item.text);
 
-  // Resolve images for this message
   const messageImages = useMemo(() => resolveMessageImages(item), [item]);
   const hasMultipleImages = messageImages.length > 1;
   const hasImageContent = messageImages.length > 0;
 
   const bubbleBackground = 'transparent';
   const borderBottomColor = isMe ? '#47ae87' : '#a9a9a9';
-
-  // Sender/receiver border-radius policy
-  const replyMediaRadiusStyle = {
-    borderTopLeftRadius: 6,
-    borderTopRightRadius: 6,
-    borderBottomLeftRadius: isMe ? 6 : 0,
-    borderBottomRightRadius: isMe ? 0 : 6,
-  };
 
   const textColor = theme.text || '#000000';
   const subTextColor = 'rgba(0,0,0,0.5)';
@@ -971,7 +1035,7 @@ const MessageItem = memo(({
               style={styles.headerAvatarContainer}
               onPress={() => navigation.navigate('Profile', { userId: sellerId, username: sellerName })}
             >
-              <Image source={avatarSource} style={styles.messageAvatar} />
+              <Image source={normalizeImageSource(avatarSource)} style={styles.messageAvatar} />
             </TouchableOpacity>
           </View>
         )}
@@ -1012,120 +1076,122 @@ const MessageItem = memo(({
           )}
 
           {hasReplyPost && (
-            <ReplyPostCard
+            <ReplyPostImageCard
               post={replyPostContext}
-              color={borderBottomColor}
-              imageRadiusStyle={replyMediaRadiusStyle}
+              theme={theme}
+              isMe={isMe}
               onPress={() => onReplyPostPress && onReplyPostPress(replyPostContext)}
             />
           )}
 
-          <TouchableOpacity
-            activeOpacity={hasMultipleImages ? 1 : 0.7}
-            onPress={handlePress}
-            onLongPress={handleLongPress}
-            style={[
-              styles.messageBubble,
-              {
-                backgroundColor: bubbleBackground,
-                borderBottomWidth: 1,
-                borderLeftWidth: hasImageContent ? 0 : 0.5,
-                borderRightWidth: hasImageContent ? 0 : 0.5,
-                borderRightColor: borderBottomColor,
-                borderLeftColor: borderBottomColor,
-                borderBottomColor: borderBottomColor,
-                borderBottomLeftRadius: 18,
-                borderBottomRightRadius: 18,
-                borderTopLeftRadius: (isReplied || hasReplyPost) && !isMe ? 0 : 18,
-                borderTopRightRadius: (isReplied || hasReplyPost) && isMe ? 0 : 18,
-              },
-            ]}
-          >
-            {hasMultipleImages ? (
-              <View style={styles.multiImageWrapper}>
-                <ChatImageDeck
-                  images={messageImages}
-                  theme={theme}
-                  messageId={item._id}
-                  onLongPressImage={() => onDoubleTap(item)}
-                />
-                {item.text ? (
-                  <Text style={[styles.messageText, styles.imageCaption, { color: textColor }]}>
-                    {item.text}
-                  </Text>
-                ) : null}
-              </View>
-            ) : item.imageUrl ? (
-              <View>
-                <ChatImage uri={item.imageUrl} style={styles.messageImage} />
-                {item.text ? (
-                  <Text style={[styles.messageText, styles.imageCaption, { color: textColor }]}>
-                    {item.text}
-                  </Text>
-                ) : null}
-              </View>
-            ) : item.videoUrl ? (
-              <View>
-                <Text style={[styles.messageText, { color: textColor }]}>
-                  {t.videoCall || 'Video'}
-                </Text>
-                <Text style={[styles.messageText, { color: '#007AFF', textDecorationLine: 'underline' }]}>
-                  {item.videoUrl}
-                </Text>
-                {item.text ? (
-                  <Text style={[styles.messageText, styles.imageCaption, { color: textColor }]}>
-                    {item.text}
-                  </Text>
-                ) : null}
-              </View>
-            ) : item.audioUrl ? (
-              <TouchableOpacity
-                style={styles.audioButton}
-                onPress={() => playAudio(item.audioUrl, item._id)}
-              >
-                <Ionicons
-                  name={playingAudioId === item._id ? 'pause-circle' : 'play-circle'}
-                  size={32}
-                  color={textColor}
-                />
-                <Text style={[styles.audioDuration, { color: textColor }]}>
-                  {formatDuration(item.audioDuration)}
-                </Text>
-              </TouchableOpacity>
-            ) : (
-              <View>
-                {url ? (
-                  <Text style={[styles.messageText, { color: '#007AFF', textDecorationLine: 'underline' }]}>
-                    {item.text}
-                  </Text>
-                ) : (
+          {(!!item.text || hasImageContent || !!item.videoUrl || !!item.audioUrl) && (
+            <TouchableOpacity
+              activeOpacity={hasMultipleImages ? 1 : 0.7}
+              onPress={handlePress}
+              onLongPress={handleLongPress}
+              style={[
+                styles.messageBubble,
+                {
+                  backgroundColor: bubbleBackground,
+                  borderBottomWidth: 1,
+                  borderLeftWidth: hasImageContent ? 0 : 0.5,
+                  borderRightWidth: hasImageContent ? 0 : 0.5,
+                  borderRightColor: borderBottomColor,
+                  borderLeftColor: borderBottomColor,
+                  borderBottomColor: borderBottomColor,
+                  borderBottomLeftRadius: isMe ? 18 : 0,
+                  borderBottomRightRadius: isMe ? 0 : 18,
+                  borderTopLeftRadius: (isReplied || hasReplyPost) && !isMe ? 0 : 18,
+                  borderTopRightRadius: (isReplied || hasReplyPost) && isMe ? 0 : 18,
+                },
+              ]}
+            >
+              {hasMultipleImages ? (
+                <View style={styles.multiImageWrapper}>
+                  <ChatImageDeck
+                    images={messageImages}
+                    theme={theme}
+                    messageId={item._id}
+                    onLongPressImage={() => onDoubleTap(item)}
+                  />
+                  {item.text ? (
+                    <Text style={[styles.messageText, styles.imageCaption, { color: textColor }]}>
+                      {item.text}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : item.imageUrl ? (
+                <View>
+                  <ChatImage uri={item.imageUrl} style={styles.messageImage} />
+                  {item.text ? (
+                    <Text style={[styles.messageText, styles.imageCaption, { color: textColor }]}>
+                      {item.text}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : item.videoUrl ? (
+                <View>
                   <Text style={[styles.messageText, { color: textColor }]}>
-                    {item.text}
+                    {t.videoCall || 'Video'}
                   </Text>
-                )}
-                {item.isEdited && (
-                  <Text style={[styles.editedBadge, { color: subTextColor }]}>
-                    {t.edited}
+                  <Text style={[styles.messageText, { color: '#007AFF', textDecorationLine: 'underline' }]}>
+                    {item.videoUrl}
                   </Text>
-                )}
-              </View>
-            )}
+                  {item.text ? (
+                    <Text style={[styles.messageText, styles.imageCaption, { color: textColor }]}>
+                      {item.text}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : item.audioUrl ? (
+                <TouchableOpacity
+                  style={styles.audioButton}
+                  onPress={() => playAudio(item.audioUrl, item._id)}
+                >
+                  <Ionicons
+                    name={playingAudioId === item._id ? 'pause-circle' : 'play-circle'}
+                    size={32}
+                    color={textColor}
+                  />
+                  <Text style={[styles.audioDuration, { color: textColor }]}>
+                    {formatDuration(item.audioDuration)}
+                  </Text>
+                </TouchableOpacity>
+              ) : (
+                <View>
+                  {url ? (
+                    <Text style={[styles.messageText, { color: '#007AFF', textDecorationLine: 'underline' }]}>
+                      {item.text}
+                    </Text>
+                  ) : (
+                    <Text style={[styles.messageText, { color: textColor }]}>
+                      {item.text}
+                    </Text>
+                  )}
+                  {item.isEdited && (
+                    <Text style={[styles.editedBadge, { color: subTextColor }]}>
+                      {t.edited}
+                    </Text>
+                  )}
+                </View>
+              )}
 
-            {isMe && (
-              <View style={styles.readReceiptContainer}>
-                {item.read ? (
-                  <Ionicons name="checkmark-done" size={14} color={'gray'} />
-                ) : (
-                  <Ionicons name="checkmark-outline" size={14} color={'gray'} />
-                )}
-              </View>
-            )}
-          </TouchableOpacity>
+              {isMe && (
+                <View style={styles.readReceiptContainer}>
+                  {item.read ? (
+                    <Ionicons name="checkmark-done" size={14} color={'gray'} />
+                  ) : (
+                    <Ionicons name="checkmark-outline" size={14} color={'gray'} />
+                  )}
+                </View>
+              )}
+            </TouchableOpacity>
+          )}
         </View>
 
         {isMe && (
           <View style={styles.avatarWrapper}>
-            <Image source={avatarSource} style={styles.messageAvatar} />
+            <Image source={normalizeImageSource(avatarSource)} style={styles.messageAvatar} />
           </View>
         )}
       </View>
@@ -1254,21 +1320,15 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   const [isNearBottom, setIsNearBottom] = useState(true);
 
-  // Daily limit state – remainingImages
   const [remainingImages, setRemainingImages] = useState(1);
   const [userImagesPerMessage, setUserImagesPerMessage] = useState(CHAT_POLICY.imagesPerMessage);
-
-  // Upgrade modal state
   const [upgradeModalVisible, setUpgradeModalVisible] = useState(false);
 
   const [typingPostId, setTypingPostId] = useState('');
   const typingPostIdRef = useRef('');
   const currentUserIdRef = useRef(null);
 
-  // Track which seller messages we've already marked as read (for polling)
   const markedAsReadRef = useRef(new Set());
-
-  // Auto-clear the "typing…" indicator if the stop event is lost
   const typingClearTimerRef = useRef(null);
 
   // ---------- useEffect hooks ----------
@@ -1360,7 +1420,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     } catch (e) {}
   }, []);
 
-  // ---------- Lifecycle ----------
   useEffect(() => {
     loadCurrentUser();
     return () => {
@@ -1377,7 +1436,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     };
   }, []);
 
-  // ---------- Fetch user limits and usage ----------
   const fetchUserLimitsAndUsage = useCallback(async () => {
     try {
       const token = await getChatAuthToken(adminModeRef.current);
@@ -1407,19 +1465,10 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   }, [currentUser, fetchUserLimitsAndUsage]);
 
-  const showUpgradeModal = useCallback(() => {
-    setUpgradeModalVisible(true);
-  }, []);
-
   const closeUpgradeModal = useCallback(() => {
     setUpgradeModalVisible(false);
   }, []);
 
-  const handleUpgradePress = useCallback(() => {
-    setUpgradeModalVisible(false);
-  }, []);
-
-  // ---------- Online status & avatar ----------
   const fetchSellerOnlineStatus = useCallback(async () => {
     if (isDemoChat || !sellerId) return;
     try {
@@ -1527,7 +1576,7 @@ const ChatScreen = ({ route, navigation, language }) => {
           String(updatedMessage.senderId) === String(sellerId) &&
           String(updatedMessage.receiverId) === String(currentUserIdRef.current || '')
         );
-        if (!sameChat || String(updatedMessage.postId || '') !== String(postId || '')) return;
+        if (!sameChat) return;
         setMessages(previous => mergeMessages(previous, [updatedMessage]));
         offlineDatabase.putRecord('messages', updatedMessage._id, updatedMessage, { priority: 'high', protected: true })
           .catch(error => console.warn('Could not update cached chat message:', error.message));
@@ -1543,7 +1592,7 @@ const ChatScreen = ({ route, navigation, language }) => {
           String(incoming.senderId) === String(currentUserIdRef.current || '') &&
           String(incoming.receiverId) === String(sellerId)
         );
-        if (!sameChat || String(incoming.postId || '') !== String(postId || '')) return;
+        if (!sameChat) return;
         setMessages(previous => mergeMessages(previous, [incoming]));
         if (String(incoming.senderId) === String(sellerId)) {
           markAsRead(incoming._id);
@@ -1636,10 +1685,10 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   useEffect(() => {
     if (!currentUser) return;
+    setMessages([]);
     loadMessages();
-  }, [currentUser, isDemoChat]);
+  }, [currentUser?._id, sellerId, isDemoChat]);
 
-  // ---------- Load current user ----------
   const loadCurrentUser = async () => {
     try {
       const token = await getChatAuthToken(adminModeRef.current);
@@ -1752,15 +1801,17 @@ const ChatScreen = ({ route, navigation, language }) => {
     const allMessages = records.map(record => record.value);
     const currentUserId = currentUser._id || currentUser.phone;
     const filtered = allMessages
-      .filter(
-        (msg) =>
-          String(msg.postId) === String(postId) &&
-          msg.postUser === sellerName &&
-          (msg.senderId === sellerId ||
-            msg.senderId === currentUserId ||
-            msg.receiverId === sellerId ||
-            msg.receiverId === currentUserId)
-      )
+      .filter((msg) => {
+        const senderId = String(msg.senderId || '');
+        const receiverId = String(msg.receiverId || '');
+        const me = String(currentUserId || '');
+        const seller = String(sellerId || '');
+        const belongsToThread =
+          (senderId === me && receiverId === seller) ||
+          (senderId === seller && receiverId === me);
+
+        return belongsToThread;
+      })
       .map(toChatMessage)
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     return enhanceReplies(filtered);
@@ -1835,7 +1886,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   };
 
-  // ---------- Live polling: fetch new messages every 1 second ----------
   const pollNewMessages = useCallback(async () => {
     if (isDemoChat) return;
     if (!currentUser?._id || !sellerId) return;
@@ -1956,11 +2006,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     sendTyping(false);
   }, [sendTyping]);
 
-  const processPendingMessages = async () => {
-    return syncManager.run('chat-open');
-  };
-
-  // ---------- Send message ----------
   const handleSendPress = async () => {
     if (sendInFlightRef.current) return;
     sendInFlightRef.current = true;
@@ -2183,7 +2228,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   };
 
-  // ---------- Edit & Unsend ----------
   const editMessage = async (messageId, newText) => {
     try {
       const token = await getChatAuthToken(adminModeRef.current);
@@ -2275,7 +2319,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     });
   };
 
-  // ---------- Image picker ----------
   const uploadImages = async (assets) => {
     if (!assets || assets.length === 0) return;
     console.log('SELECTED IMAGE:', assets);
@@ -2452,7 +2495,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   };
 
-  // ---------- Audio player ----------
   const playAudio = useCallback(async (audioUrl, messageId) => {
     try {
       if (soundRef.current) {
@@ -2479,7 +2521,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   }, [playingAudioId]);
 
-  // ---------- Helper functions ----------
   const isOwnMessage = useCallback((message) => {
     const userId = currentUser?._id || currentUser?.phone;
     return message.senderId === userId;
@@ -2520,7 +2561,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     return (currentTime - prevTime) / (1000 * 60) > 30;
   }, []);
 
-  // ---------- Action sheet ----------
   const handleDoubleTap = useCallback((message) => {
     setActionMessage(message);
     setActionModalVisible(true);
@@ -2555,7 +2595,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   }, [actionMessage, showChatNotice, t]);
 
-  // ---------- Modals ----------
   const renderActionModal = () => {
     if (!actionMessage) return null;
     const isOwn = isOwnMessage(actionMessage);
@@ -2645,7 +2684,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     );
   };
 
-  // ---------- Navigate to PostDetail ----------
   const navigateToPostDetail = useCallback((postContext) => {
     if (!postContext) return;
     if (postContext.contextType === 'shop') {
@@ -2679,20 +2717,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   }, [navigation]);
 
-  // ---------- Empty state ----------
-  const renderEmptyState = () => (
-    <View style={styles.emptyContainer}>
-      <Ionicons name="chatbubble-outline" size={60} color={theme.textSecondary} />
-      <Text style={[styles.emptyText, { color: theme.textSecondary }]}>
-        {t.noMessagesYet}
-      </Text>
-      <Text style={[styles.emptySubtext, { color: theme.textSecondary }]}>
-        {t.startConversation}
-      </Text>
-    </View>
-  );
-
-  // ---------- RenderItem ----------
   const renderItem = useCallback(({ item, index }) => {
     const prevMsg = index > 0 ? messages[index - 1] : null;
     const showTimestamp = shouldShowTimestamp(item, prevMsg);
@@ -2744,7 +2768,6 @@ const ChatScreen = ({ route, navigation, language }) => {
     navigateToPostDetail
   ]);
 
-  // ---------- Auto‑scroll ----------
   useEffect(() => {
     if (!loading && messages.length > 0 && flatListRef.current) {
       setTimeout(() => {
@@ -2790,7 +2813,7 @@ const ChatScreen = ({ route, navigation, language }) => {
               style={styles.headerAvatarContainer}
               onPress={() => navigation.navigate('Profile', { userId: sellerId, username: sellerName })}
             >
-              <Image source={sellerAvatarSource} style={styles.headerAvatarImage} />
+              <Image source={normalizeImageSource(sellerAvatarSource)} style={styles.headerAvatarImage} />
               {isOnline && (
                 <Animated.View style={[styles.onlineDot, { transform: [{ scale: pulseAnim }] }]} />
               )}
@@ -2802,9 +2825,11 @@ const ChatScreen = ({ route, navigation, language }) => {
                 onPress={() => navigation.navigate('Profile', { userId: sellerId, username: sellerName })}
               >
                 <Text style={[styles.headerTitle, { color: theme.text }]}>{sellerName}</Text>
-                <Text style={[styles.headerSubtitle, { color: theme.textSecondary }]}>
-                  {otherTyping ? t.typing : (isOnline ? t.online : t.offline)}
-                </Text>
+                {otherTyping && (
+                  <Text style={[styles.headerSubtitle, { color: theme.textSecondary }]}>
+                    {t.typing}
+                  </Text>
+                )}
               </TouchableOpacity>
             </View>
           </View>
@@ -2817,7 +2842,7 @@ const ChatScreen = ({ route, navigation, language }) => {
         </View>
 
         <ImageBackground
-          source={chatBackground}
+          source={normalizeImageSource(chatBackground)}
           style={styles.chatBackground}
           resizeMode="cover"
         >
@@ -2828,10 +2853,7 @@ const ChatScreen = ({ route, navigation, language }) => {
             keyExtractor={(item) => item._id}
             renderItem={renderItem}
             style={styles.chatList}
-            contentContainerStyle={[
-              styles.chatListContent,
-              messages.length === 0 && styles.chatListContentEmpty,
-            ]}
+            contentContainerStyle={styles.chatListContent}
             onLayout={() => flatListRef.current?.scrollToEnd({ animated: false })}
             onContentSizeChange={handleContentSizeChange}
             refreshing={refreshing}
@@ -2844,7 +2866,6 @@ const ChatScreen = ({ route, navigation, language }) => {
             windowSize={21}
             updateCellsBatchingPeriod={50}
             onEndReachedThreshold={0.5}
-            ListEmptyComponent={renderEmptyState}
           />
         </ImageBackground>
 
@@ -2872,21 +2893,22 @@ const ChatScreen = ({ route, navigation, language }) => {
                 </Text>
               )}
             </View>
-            <TouchableOpacity onPress={() => setReplyTo(null)}>
+            <TouchableOpacity onPress={() => setReplyTo(null)} style={styles.replyBarCloseButton}>
               <Ionicons name="close" size={24} color={theme.textSecondary} />
             </TouchableOpacity>
           </View>
         )}
 
-        {/* Reply to Post bar (composer) */}
+        {/* Reply to Post bar (composer) — icon only, no image */}
         {replyPost && (
           <View style={[styles.replyBar, { backgroundColor: theme.cardBackground, borderTopColor: theme.border, borderBottomColor: theme.border }]}>
             <ReplyPostCard
               post={replyPost}
               color={theme.text}
+              theme={theme}
               onPress={() => navigateToPostDetail(replyPost)}
             />
-            <TouchableOpacity onPress={clearReplyPost}>
+            <TouchableOpacity onPress={clearReplyPost} style={styles.replyBarCloseButton}>
               <Ionicons name="close" size={24} color={theme.textSecondary} />
             </TouchableOpacity>
           </View>
@@ -2898,7 +2920,7 @@ const ChatScreen = ({ route, navigation, language }) => {
             <View style={styles.selectedImageRow}>
               {selectedImages.map((img) => (
                 <View key={img.uri} style={styles.selectedImagePreviewContainer}>
-                  <Image source={{ uri: img.uri }} style={styles.selectedImagePreview} />
+                  <Image source={normalizeImageSource({ uri: img.uri })} style={styles.selectedImagePreview} />
                   <TouchableOpacity onPress={() => setSelectedImages(prev => prev.filter(i => i.uri !== img.uri))} style={styles.removeImageButton}>
                     <Ionicons name="close" size={18} color="#fff" />
                   </TouchableOpacity>
@@ -3039,7 +3061,6 @@ const styles = StyleSheet.create({
   overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   chatList: { flex: 1, backgroundColor: 'transparent' },
   chatListContent: { padding: 16, paddingBottom: 20, flexGrow: 1 },
-  chatListContentEmpty: { justifyContent: 'center' },
   timestampContainer: { alignItems: 'center', marginVertical: 16 },
   timestampText: { fontSize: 12, fontWeight: '500', opacity: 0.7 },
   messageRowWrapper: { flexDirection: 'row', marginBottom: 12 },
@@ -3148,16 +3169,19 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     minHeight: 60,
     backgroundColor: 'transparent',
+    flex: 1,
   },
   replyPostThumb: {
     width: 48,
     height: 48,
-    borderRadius: 6,
+    borderRadius: 8,
     marginRight: 10,
-    backgroundColor: '#292929',
     justifyContent: 'center',
     alignItems: 'center',
     overflow: 'hidden',
+  },
+  replyPostThumbIcon: {
+    // background provided inline (theme-adaptive)
   },
   replyPostThumbFallback: {},
   replyPostInfo: {
@@ -3198,6 +3222,13 @@ const styles = StyleSheet.create({
   replyBarMessage: { fontSize: 14, marginTop: 2 },
   replyBarImageContainer: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
   replyBarImage: { width: 30, height: 30, borderRadius: 4 },
+  replyBarCloseButton: {
+    paddingLeft: 12,
+    paddingVertical: 4,
+    paddingRight: 2,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   composerContainer: { flexShrink: 0, paddingHorizontal: 16, paddingVertical: 8, borderTopWidth: 1 },
   inputContainer: { flexDirection: 'row', alignItems: 'flex-end' },
   characterCounter: { alignSelf: 'flex-end', marginTop: 4, fontSize: 11 },
@@ -3310,15 +3341,91 @@ const styles = StyleSheet.create({
   upgradeModalUpgradeButton: { borderWidth: 0 },
   upgradeModalButtonText: { fontSize: 16, fontWeight: '600' },
 
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 60,
-    paddingHorizontal: 40,
+  instaPostCard: {
+    width: 250,
+    overflow: 'hidden',
+    marginBottom: 6,
   },
-  emptyText: { marginTop: 12, fontSize: 18, fontWeight: '500', textAlign: 'center' },
-  emptySubtext: { marginTop: 6, fontSize: 14, textAlign: 'center' },
+  instaPostImageWrapper: {
+    width: '100%',
+    aspectRatio: 1,
+    backgroundColor: '#000',
+    position: 'relative',
+  },
+  instaPostImage: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'cover',
+  },
+  instaPostTopOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(0, 0, 0, 0.44)',
+  },
+  instaPostAvatar: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    marginRight: 8,
+  },
+  instaPostUsername: {
+    fontSize: 12,
+    fontWeight: '700',
+    flex: 1,
+    color: '#fff',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  reelsOverlay: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  reelsOverlayTitle: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '800',
+    marginBottom: 2,
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  reelsOverlayAmount: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 2,
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  reelsOverlayLocationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
+  reelsOverlayLocation: {
+    color: '#e0e0e0',
+    fontSize: 11,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  reelsOverlayDescription: {
+    color: '#e0e0e0',
+    fontSize: 11,
+    lineHeight: 15,
+  },
 });
 
 export default ChatScreen;

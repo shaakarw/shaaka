@@ -11,6 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { BASE_URL } from '../constants';
 import AdminScreenHeader from '../components/AdminScreenHeader';
+import { showAdminFeedback } from '../utils/adminFeedback';
 
 const PAGE_SIZE = 20;
 const CATEGORIES = ['Food', 'Retail', 'Agriculture', 'Technology', 'Services', 'Other'];
@@ -106,7 +107,9 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
         await AsyncStorage.removeItem('adminToken');
         navigation.replace('AdminLogin');
       } else {
-        setError(requestError.response?.data?.message || requestError.message || 'Could not load business ideas.');
+        const message = requestError.response?.data?.message || requestError.message || 'Could not load business ideas.';
+        setError(message);
+        showAdminFeedback('Could not load business ideas', message, 'error');
       }
     } finally {
       if (requestId === latestRequest.current) {
@@ -173,15 +176,16 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
       setFormVisible(false);
       setEditing(null);
       await loadIdeas(1);
-      Alert.alert('Saved', editing ? 'Business idea changes were saved.' : published ? 'Business idea published.' : 'Business idea saved as a draft.');
+      showAdminFeedback('Saved', editing ? 'Business idea changes were saved.' : published ? 'Business idea published.' : 'Business idea saved as a draft.', 'success');
     } catch (saveError) {
       if ([401, 403].includes(saveError.response?.status)) {
         await AsyncStorage.removeItem('adminToken');
         navigation.replace('AdminLogin');
       } else if (saveError.response?.data?.errors) {
         setErrors(saveError.response.data.errors);
+        showAdminFeedback('Could not save', saveError.response?.data?.message || 'Please review the highlighted fields.', 'error');
       } else {
-        Alert.alert('Could not save', saveError.response?.data?.message || saveError.message || 'Please try again.');
+        showAdminFeedback('Could not save', saveError.response?.data?.message || saveError.message || 'Please try again.', 'error');
       }
     } finally {
       setSaving(false);
@@ -198,12 +202,12 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
       });
       if (!response.data?.success) throw new Error(response.data?.message || 'Status could not be changed.');
       await loadIdeas(page);
-      Alert.alert('Updated', published ? 'Business idea published.' : 'Business idea unpublished.');
+      showAdminFeedback('Updated', published ? 'Business idea published.' : 'Business idea unpublished.', 'success');
     } catch (statusError) {
       if ([401, 403].includes(statusError.response?.status)) {
         await AsyncStorage.removeItem('adminToken');
         navigation.replace('AdminLogin');
-      } else Alert.alert('Could not update status', statusError.response?.data?.message || statusError.message);
+      } else showAdminFeedback('Could not update status', statusError.response?.data?.message || statusError.message, 'error');
     }
   };
 
@@ -218,12 +222,12 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
         });
         if (!response.data?.success) throw new Error(response.data?.message || 'Idea was not deleted.');
         await loadIdeas(1);
-        Alert.alert('Deleted', 'Business idea deleted.');
+        showAdminFeedback('Deleted', 'Business idea deleted.', 'success');
       } catch (deleteError) {
         if ([401, 403].includes(deleteError.response?.status)) {
           await AsyncStorage.removeItem('adminToken');
           navigation.replace('AdminLogin');
-        } else Alert.alert('Could not delete', deleteError.response?.data?.message || deleteError.message);
+        } else showAdminFeedback('Could not delete', deleteError.response?.data?.message || deleteError.message, 'error');
       }
     } },
   ]);
@@ -260,7 +264,7 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
 
   const renderForm = () => (
     <Modal visible={formVisible} animationType="slide" onRequestClose={() => !saving && setFormVisible(false)}>
-      <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
+      <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['left', 'right', 'bottom']}>
         <AdminScreenHeader title={editing ? 'Edit Business Idea' : 'Add Business Idea'} theme={theme} onBack={() => !saving && setFormVisible(false)} />
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <ScrollView contentContainerStyle={styles.formContent} keyboardShouldPersistTaps="handled">
@@ -380,7 +384,7 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
   ) : null;
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['left', 'right', 'bottom']}>
       <AdminScreenHeader title="Business Ideas Management" theme={theme} onBack={() => navigation.goBack()} actionIcon="add" actionLabel="Add Business Idea" onAction={openCreate} />
       <View style={styles.subtitleRow}>
         <Text style={[styles.subtitle, { color: theme.textSecondary, flex: 1 }]}>Create, manage, and publish business opportunities for the community.</Text>
@@ -413,7 +417,7 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
           <Text style={{ color: theme.textSecondary, fontSize: 12 }}>Sort by</Text>
           {['newest', 'oldest', 'name'].map((value) => <TouchableOpacity key={value} onPress={() => setSort(value)} style={[styles.sortButton, { borderColor: sort === value ? theme.accent : theme.border }]}><Text style={{ color: sort === value ? theme.accent : theme.textSecondary, fontSize: 12 }}>{value[0].toUpperCase() + value.slice(1)}</Text></TouchableOpacity>)}
         </View>
-        {!!error && <View style={styles.errorBox}><Text style={{ color: theme.text, textAlign: 'center' }}>{error}</Text><Button label="Retry" onPress={() => loadIdeas(1)} theme={theme} /></View>}
+        {!!error && <View style={styles.errorBox}><Button label="Retry" onPress={() => loadIdeas(1)} theme={theme} /></View>}
         {loading && !ideas.length ? <ActivityIndicator size="large" color={theme.accent} style={{ margin: 35 }} /> : null}
         {!loading && !error && !ideas.length ? <View style={styles.empty}><Ionicons name="bulb-outline" size={38} color={theme.textSecondary} /><Text style={{ color: theme.text, fontWeight: '700', marginTop: 8 }}>No business ideas found</Text><Text style={{ color: theme.textSecondary, marginTop: 4 }}>Add an idea or adjust your filters.</Text></View> : null}
         {ideas.map(renderIdea)}

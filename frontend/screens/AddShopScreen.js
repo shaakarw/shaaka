@@ -1,3 +1,4 @@
+
 // screens/AddShopScreen.js
 // A "full mall-selection screen" for the AddShop tab.
 // Fetches all shopping malls (places with category 'shoppingmall') and lets the
@@ -25,6 +26,8 @@ import { BASE_URL } from '../constants';
 import { useFocusEffect } from '@react-navigation/native';
 import MobileNavigation from '../components/MobileNavigation';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const MALL_CATEGORY = 'shoppingmall';
 
@@ -236,7 +239,7 @@ export default function AddShopScreen({ navigation, route, language = 'English' 
         onPress={() => handleSelectMall(item)}
       >
         {image ? (
-          <Image source={{ uri: image }} style={styles.mallImage} resizeMode="cover" />
+          <Image source={normalizeImageSource({ uri: image })} style={styles.mallImage} resizeMode="cover" />
         ) : (
           <View style={[styles.mallImagePlaceholder, { backgroundColor: borderColor }]}>
             <MaterialCommunityIcons name="shopping" size={40} color={secondaryText} />

@@ -1,3 +1,4 @@
+
 ﻿// screens/SearchScreen.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
@@ -8,15 +9,16 @@ import {
   StyleSheet,
   TouchableOpacity,
   ActivityIndicator,
-  Image,
-  Animated,
   Dimensions,
   RefreshControl,
   Keyboard,
-  ScrollView,
-  PanResponder,
+  ScrollView, Image,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
+import { useIsFocused } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { showAppAlert } from '../context/MessageSheetContext';
@@ -27,7 +29,10 @@ import { BASE_URL } from '../constants';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
 import ProductHeroDeck from '../components/ProductHeroDeck';
 import { getUserDisplayName } from '../utils/userIdentity';
-
+import { getImageUri, normalizeImageSource } from '../utils/imageUrl';
+import { getPostCoverUri, getPostImages } from '../utils/postMedia';
+import OnlineStatusDot from '../components/OnlineStatusDot';
+import useOnlineUsers from '../hooks/useOnlineUsers';
 // ========== Helper functions ==========
 const shuffleArray = (array) => {
   const copy = [...array];
@@ -58,7 +63,7 @@ const mapPost = (post) => ({
   location: post.location || 'Unknown location',
   description: post.description || 'No description provided.',
   productName: post.productName || 'Product',
-  houseImages: post.houseImages || [],
+  houseImages: getPostImages(post),
   videoUrl: post.videoUrl || post.videoHlsUrl || post.video?.url || '',
   videoThumbnail: post.videoThumbnail || post.video?.thumbnail || '',
   videoLink: post.videoLink || '',
@@ -74,17 +79,6 @@ const mapPost = (post) => ({
   trending: post.trending || false,
 });
 
-const getVideoCover = (videoUrl, videoThumbnail) => {
-  if (videoThumbnail) return videoThumbnail;
-  if (!videoUrl || !videoUrl.includes('res.cloudinary.com')) return null;
-  const [urlWithoutQuery] = videoUrl.split('?');
-  const uploadMarker = '/video/upload/';
-  if (!urlWithoutQuery.includes(uploadMarker)) return null;
-  return urlWithoutQuery
-    .replace(uploadMarker, '/video/upload/so_5/')
-    .replace(/\.[^/.]+$/, '.jpg');
-};
-
 const sortFeedPosts = (posts, shuffleNonFeatured = false) => {
   const featured = posts.filter((p) => p.featured);
   const nonFeatured = posts.filter((p) => !p.featured);
@@ -98,23 +92,24 @@ const sortFeedPosts = (posts, shuffleNonFeatured = false) => {
 };
 // ================================================================
 
-const { width, height: screenHeight } = Dimensions.get('window');
+const { width } = Dimensions.get('window');
 const RECENT_SEARCHES_KEY = '@recent_searches';
 const SEARCH_FEED_CACHE_KEY = '@search_feed_cache';
 const PAGE_SIZE = 20;
 const SECTION_WIDTH = width;
 const AUTO_SLIDE_INTERVAL = 10000;
-const SEARCH_INPUT_TOP = 8;
-const SEARCH_CONTENT_TOP_PADDING = 72;
-
-// Draggable eye toggle (shows/hides the search input)
-const EYE_BUTTON_SIZE = 52;
-const EYE_BUTTON_MARGIN = 8;
-const EYE_BUTTON_MIN_TOP = 80;
-const EYE_BUTTON_BOTTOM_PADDING = 100;
 
 // ---------- Hero-deck section (3 cards sliding) ----------
-const HeroDeckSection = ({ posts, theme, isDarkMode, onPressPost, onPressUser }) => {
+// NOTE: `paused` is forwarded to ProductHeroDeck so its internal
+// auto-advance / image-change timer stops while the tutorial is showing.
+const HeroDeckSection = ({
+  posts,
+  theme,
+  isDarkMode,
+  onPressPost,
+  onPressUser,
+  paused = false,
+}) => {
   const colors = {
     background: theme.background,
     cardBackground: theme.cardBackground || (isDarkMode ? '#1C1C1E' : '#FFFFFF'),
@@ -142,6 +137,7 @@ const HeroDeckSection = ({ posts, theme, isDarkMode, onPressPost, onPressUser })
         colors={colors}
         onPressProduct={onPressPost}
         onPressUserProfile={onPressUser}
+        paused={paused} // ← pauses internal image-change / auto-advance
       />
     </View>
   );
@@ -150,20 +146,24 @@ const HeroDeckSection = ({ posts, theme, isDarkMode, onPressPost, onPressUser })
 const SearchScreen = ({ navigation, route, language }) => {
   const { theme, isDarkMode } = useTheme();
   const { user: authUser } = useAuth();
+  const insets = useSafeAreaInsets();
+  const isFocused = useIsFocused();
 
-  const bgColor = theme.background || (isDarkMode ? '#111111' : '#DDDDDD');
+  const bgColor = theme.background || (isDarkMode ? '#111111' : '#FFFFFF');
   const txtColor = theme.text || (isDarkMode ? '#FFFFFF' : '#111111');
   const subTextColor = theme.textSecondary || (isDarkMode ? '#9CA3AF' : '#6B7280');
-  const inputBgColor = isDarkMode ? '#202124' : '#FFFFFF';
+  const inputBgColor = isDarkMode ? '#1C1C1E' : '#F2F2F2';
   const softBorder = theme.border || (isDarkMode ? '#2C2C2E' : '#D7DDD8');
 
   const [searchQuery, setSearchQuery] = useState('');
   const [submittedQuery, setSubmittedQuery] = useState('');
+  const [recentSearches, setRecentSearches] = useState([]);
 
   const [allPosts, setAllPosts] = useState([]);
   const [trendingPosts, setTrendingPosts] = useState([]);
   const [searchResults, setSearchResults] = useState([]);
   const [matchedUsers, setMatchedUsers] = useState([]);
+  const onlineUsers = useOnlineUsers(matchedUsers.map(user => user.userId));
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
@@ -177,83 +177,8 @@ const SearchScreen = ({ navigation, route, language }) => {
   const leftScreenRef = useRef(false);
   const firstAuthRunRef = useRef(true);
 
-  useEffect(() => {
-    if (authUser) {
-      setCurrentUser(authUser);
-      setIsLoggedIn(true);
-    } else {
-      setCurrentUser(null);
-      setIsLoggedIn(false);
-    }
-  }, [authUser]);
-
-  // --- Search bar visibility (replaces showBackToTop) ---
-  const [searchBarVisible, setSearchBarVisible] = useState(true);
   const heroScrollRef = useRef(null);
   const [activeSectionIndex, setActiveSectionIndex] = useState(0);
-
-  // --- Draggable eye button state ---
-  const eyePosRef = useRef({
-    x: width - EYE_BUTTON_SIZE - EYE_BUTTON_MARGIN - 10,
-    y: screenHeight - EYE_BUTTON_SIZE - EYE_BUTTON_BOTTOM_PADDING,
-  });
-  const eyeDragStartRef = useRef({ x: 0, y: 0 });
-  const eyePos = useRef(new Animated.ValueXY(eyePosRef.current)).current;
-  const eyePanResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => false,
-      onStartShouldSetPanResponderCapture: () => false,
-      onMoveShouldSetPanResponder: (_, gs) =>
-        Math.abs(gs.dx) > 4 || Math.abs(gs.dy) > 4,
-      onMoveShouldSetPanResponderCapture: (_, gs) =>
-        Math.abs(gs.dx) > 4 || Math.abs(gs.dy) > 4,
-      onPanResponderGrant: () => {
-        eyeDragStartRef.current = { ...eyePosRef.current };
-      },
-      onPanResponderMove: (_, gs) => {
-        const nx = Math.max(
-          0,
-          Math.min(width - EYE_BUTTON_SIZE, eyeDragStartRef.current.x + gs.dx)
-        );
-        const ny = Math.max(
-          EYE_BUTTON_MIN_TOP,
-          Math.min(
-            screenHeight - EYE_BUTTON_SIZE - 20,
-            eyeDragStartRef.current.y + gs.dy
-          )
-        );
-        eyePos.setValue({ x: nx, y: ny });
-      },
-      onPanResponderRelease: (_, gs) => {
-        const draggedX = Math.max(
-          0,
-          Math.min(width - EYE_BUTTON_SIZE, eyeDragStartRef.current.x + gs.dx)
-        );
-        const leftX = EYE_BUTTON_MARGIN;
-        const rightX = Math.max(0, width - EYE_BUTTON_SIZE - EYE_BUTTON_MARGIN);
-        const nx = draggedX + EYE_BUTTON_SIZE / 2 < width / 2 ? leftX : rightX;
-        const ny = Math.max(
-          EYE_BUTTON_MIN_TOP,
-          Math.min(
-            screenHeight - EYE_BUTTON_SIZE - 20,
-            eyeDragStartRef.current.y + gs.dy
-          )
-        );
-        eyePosRef.current = { x: nx, y: ny };
-        eyePos.setValue({ x: nx, y: ny });
-      },
-      onPanResponderTerminate: () => {},
-    })
-  ).current;
-
-  const handleEyePress = useCallback(() => {
-    if (searchBarVisible) {
-      Keyboard.dismiss();
-      setSearchBarVisible(false);
-    } else {
-      setSearchBarVisible(true);
-    }
-  }, [searchBarVisible]);
 
   // ---- 3-per-row trending grid (infinite loop) ----
   const [gridPosts, setGridPosts] = useState([]);
@@ -274,6 +199,7 @@ const SearchScreen = ({ navigation, route, language }) => {
       trending: 'Trending now',
       results: 'Products',
       users: 'Users',
+      recentSearches: 'Recent search',
     },
     Kinyarwanda: {
       loading: 'Turigutunganya page neza...',
@@ -287,10 +213,37 @@ const SearchScreen = ({ navigation, route, language }) => {
       trending: 'Ibikunzwe ubu',
       results: 'Ibicuruzwa',
       users: 'Abakoresha',
+      recentSearches: 'Ibyashakishijwe vuba',
     },
   };
 
   const t = translations[language] || translations.English;
+
+  // ---------- Recent Searches Logic ----------
+  useEffect(() => {
+    const loadRecent = async () => {
+      try {
+        const existing = await AsyncStorage.getItem(RECENT_SEARCHES_KEY);
+        if (existing) setRecentSearches(JSON.parse(existing));
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    loadRecent();
+  }, []);
+
+  const addRecentSearch = async (query) => {
+    try {
+      let list = [...recentSearches];
+      list = list.filter((item) => item.toLowerCase() !== query.toLowerCase());
+      list.unshift(query);
+      list = list.slice(0, 4);
+      setRecentSearches(list);
+      await AsyncStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(list));
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   // ---------- Stable helpers ----------
   const getToken = useCallback(async () => await AsyncStorage.getItem('userToken'), []);
@@ -399,10 +352,7 @@ const SearchScreen = ({ navigation, route, language }) => {
       if (!cachedValue) return;
 
       const cachedFeed = JSON.parse(cachedValue);
-      if (!Array.isArray(cachedFeed.posts)) {
-        console.error('Search feed cache is invalid.');
-        return;
-      }
+      if (!Array.isArray(cachedFeed.posts)) return;
 
       const cachedPosts = cachedFeed.posts.map(mapPost);
       const visiblePosts =
@@ -421,42 +371,16 @@ const SearchScreen = ({ navigation, route, language }) => {
     }
   }, [isLoggedIn, currentUser]);
 
-  const loadMorePosts = useCallback(async () => {
-    if (
-      loading ||
-      refreshing ||
-      loadingMoreRef.current ||
-      !hasMore ||
-      searchQuery.trim()
-    )
-      return;
-
-    loadingMoreRef.current = true;
-    setLoadingMore(true);
-    try {
-      await fetchPosts(page + 1);
-    } finally {
-      loadingMoreRef.current = false;
-      setLoadingMore(false);
-    }
-  }, [loading, refreshing, hasMore, searchQuery, page, fetchPosts]);
-
   const fetchPostsRef = useRef(fetchPosts);
   const checkLoginStatusRef = useRef(checkLoginStatus);
 
-  useEffect(() => {
-    fetchPostsRef.current = fetchPosts;
-  }, [fetchPosts]);
+  useEffect(() => { fetchPostsRef.current = fetchPosts; }, [fetchPosts]);
+  useEffect(() => { checkLoginStatusRef.current = checkLoginStatus; }, [checkLoginStatus]);
 
-  useEffect(() => {
-    checkLoginStatusRef.current = checkLoginStatus;
-  }, [checkLoginStatus]);
-
-  // ---------- Auto-slide every 10s ----------
+  // ---------- Auto-slide every 10s (outer section pager) ----------
   useEffect(() => {
     if (sectionGroups.length <= 1) return undefined;
     if (searchQuery.trim()) return undefined;
-
     const timer = setTimeout(() => {
       const next = (activeSectionIndex + 1) % sectionGroups.length;
       heroScrollRef.current?.scrollTo({
@@ -480,7 +404,6 @@ const SearchScreen = ({ navigation, route, language }) => {
   const runSearch = useCallback(
     (rawQuery) => {
       const q = (rawQuery || '').trim().toLowerCase();
-
       const candidates = allPosts;
       let productMatches = candidates;
       let userMatches = [];
@@ -512,9 +435,7 @@ const SearchScreen = ({ navigation, route, language }) => {
         userMatches = Array.from(userMap.values());
       }
 
-      productMatches.sort(
-        (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
-      );
+      productMatches.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
 
       setSearchResults(productMatches);
       setMatchedUsers(userMatches);
@@ -601,7 +522,6 @@ const SearchScreen = ({ navigation, route, language }) => {
 
   const loadMoreGridPosts = useCallback(() => {
     if (loadingMoreRef.current) return;
-
     const source = trendingPosts.length ? trendingPosts : allPosts;
     if (source.length === 0) return;
 
@@ -639,6 +559,14 @@ const SearchScreen = ({ navigation, route, language }) => {
     }
     setSubmittedQuery(q);
     runSearch(q);
+    addRecentSearch(q);
+    Keyboard.dismiss();
+  };
+
+  const handleRecentPress = (query) => {
+    setSearchQuery(query);
+    setSubmittedQuery(query);
+    runSearch(query);
     Keyboard.dismiss();
   };
 
@@ -665,10 +593,7 @@ const SearchScreen = ({ navigation, route, language }) => {
   // ---------- RENDERERS ----------
   const renderSearchResultItem = ({ item }) => (
     <TouchableOpacity
-      style={[
-        styles.resultItem,
-        { backgroundColor: 'transparent', borderWidth: 0 },
-      ]}
+      style={[styles.resultItem, { backgroundColor: 'transparent', borderWidth: 0 }]}
       onPress={() => handlePostPress(item)}
       activeOpacity={0.8}
     >
@@ -679,12 +604,9 @@ const SearchScreen = ({ navigation, route, language }) => {
           </View>
         ) : null}
         <Image
-          source={{
-            uri:
-              getVideoCover(item.videoUrl, item.videoThumbnail) ||
-              item.houseImages?.[0] ||
-              'https://via.placeholder.com/150',
-          }}
+          source={normalizeImageSource(getPostCoverUri(item)
+            ? { uri: getPostCoverUri(item) }
+            : require('../assets/house.png'))}
           style={styles.resultImage}
         />
       </View>
@@ -696,10 +618,7 @@ const SearchScreen = ({ navigation, route, language }) => {
           {item.location}
         </Text>
         {!!item.amount && (
-          <Text
-            style={[styles.resultAmount, { color: theme.login || '#47ae87' }]}
-            numberOfLines={1}
-          >
+          <Text style={[styles.resultAmount, { color: theme.login || '#47ae87' }]} numberOfLines={1}>
             {item.amount}
           </Text>
         )}
@@ -710,33 +629,21 @@ const SearchScreen = ({ navigation, route, language }) => {
 
   const renderUserResultItem = ({ item }) => (
     <TouchableOpacity
-      style={[
-        styles.userResultItem,
-        { backgroundColor: 'transparent', borderWidth: 0 },
-      ]}
-      onPress={() =>
-        navigation.navigate('Profile', {
-          userId: item.userId,
-          username: item.username,
-        })
-      }
+      style={[styles.userResultItem, { backgroundColor: 'transparent', borderWidth: 0 }]}
+      onPress={() => navigation.navigate('Profile', { userId: item.userId, username: item.username })}
       activeOpacity={0.8}
     >
       <View style={styles.userAvatarWrap}>
-        {item.avatar ? (
-          <Image source={{ uri: item.avatar }} style={styles.userAvatar} />
+        {getImageUri(item.avatar) ? (
+          <Image source={normalizeImageSource({ uri: getImageUri(item.avatar) })} style={styles.userAvatar} />
         ) : (
-          <View
-            style={[
-              styles.userAvatarFallback,
-              { backgroundColor: theme.login || '#47ae87' },
-            ]}
-          >
+          <View style={[styles.userAvatarFallback, { backgroundColor: theme.login || '#47ae87' }]}>
             <Text style={styles.userAvatarInitial}>
               {item.username.charAt(0).toUpperCase()}
             </Text>
           </View>
         )}
+        <OnlineStatusDot visible={Boolean(onlineUsers[String(item.userId)])} />
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text style={[styles.userName, { color: txtColor }]} numberOfLines={1}>
@@ -750,42 +657,28 @@ const SearchScreen = ({ navigation, route, language }) => {
     </TouchableOpacity>
   );
 
-  const renderGridItem = ({ item, index }) => {
-    const amountText =
-      item.amount ||
-      (item.price != null ? `RWF ${item.price.toLocaleString()}` : '');
-
+  const renderGridItem = ({ item }) => {
+    const amountText = item.amount || (item.price != null ? `RWF ${item.price.toLocaleString()}` : '');
     return (
-      <TouchableOpacity
-        style={styles.gridItem}
-        activeOpacity={0.85}
-        onPress={() => handlePostPress(item)}
-      >
+      <TouchableOpacity style={styles.gridItem} activeOpacity={0.85} onPress={() => handlePostPress(item)}>
         <View style={styles.gridImageWrap}>
           <Image
-            source={{
-              uri:
-                getVideoCover(item.videoUrl, item.videoThumbnail) ||
-                item.houseImages?.[0] ||
-                'https://via.placeholder.com/150',
-            }}
+            source={normalizeImageSource(getPostCoverUri(item)
+              ? { uri: getPostCoverUri(item) }
+              : require('../assets/house.png'))}
             style={styles.gridImage}
           />
-
           <View style={styles.gridImageShade} />
-
           {!!item.productName && (
             <Text style={styles.gridOverlayTitle} numberOfLines={2}>
               {item.productName}
             </Text>
           )}
-
           {item.videoUrl && (
             <View style={styles.gridVideoBadge}>
               <Ionicons name="videocam" size={12} color="#fff" />
             </View>
           )}
-
           {!!amountText && (
             <Text style={styles.gridOverlayAmount} numberOfLines={1}>
               {amountText}
@@ -796,158 +689,165 @@ const SearchScreen = ({ navigation, route, language }) => {
     );
   };
 
-  const renderSearchInput = () => (
-    <View
-      style={[
-        styles.searchContainer,
-        { backgroundColor: inputBgColor, borderColor: softBorder },
-      ]}
-    >
-      <Ionicons name="search" size={20} color={subTextColor} style={styles.searchIcon} />
-      <TextInput
-        style={[styles.searchInput, { color: txtColor }]}
-        placeholder={t.placeholder}
-        placeholderTextColor={subTextColor}
-        value={searchQuery}
-        onChangeText={setSearchQuery}
-        onSubmitEditing={handleSearchSubmit}
-        returnKeyType="search"
-        autoFocus={false}
-      />
-      {searchQuery !== '' && (
-        <TouchableOpacity onPress={handleClear} style={styles.clearBtn}>
-          <Ionicons name="close-circle" size={18} color={subTextColor} />
-        </TouchableOpacity>
-      )}
-    </View>
-  );
+  const renderSearchInput = () => {
+    return (
+      <View style={styles.searchInputWrapper}>
+        <View style={[styles.searchContainer, { backgroundColor: inputBgColor }]}>
+          <Ionicons name="search" size={20} color="#8E8E93" style={styles.searchIcon} />
+          <TextInput
+            style={[styles.searchInput, { color: txtColor }]}
+            placeholder={t.placeholder}
+            placeholderTextColor="#8E8E93"
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            onSubmitEditing={handleSearchSubmit}
+            returnKeyType="search"
+            autoFocus={false}
+          />
+          {searchQuery !== '' && (
+            <TouchableOpacity onPress={handleClear} style={styles.clearBtn}>
+              <Ionicons name="close-circle" size={18} color="#8E8E93" />
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+    );
+  };
+
+  const renderRecentSearches = () => {
+    if (recentSearches.length === 0 || searchQuery.trim() !== '') return null;
+
+    return (
+      <View style={styles.recentContainer}>
+        <Text style={[styles.recentTitle, { color: subTextColor }]}>
+          {t.recentSearches}
+        </Text>
+        {recentSearches.map((item, index) => (
+          <TouchableOpacity
+            key={`${item}-${index}`}
+            style={styles.recentItem}
+            onPress={() => handleRecentPress(item)}
+          >
+            <Text style={[styles.recentText, { color: txtColor }]}>{item}</Text>
+            <Ionicons name="return-up-back-outline" size={18} color={txtColor} />
+          </TouchableOpacity>
+        ))}
+      </View>
+    );
+  };
 
   const renderBrowseView = () => {
     if (sectionGroups.length === 0) {
       return (
-        <View style={styles.emptyBrowseContent}>
-          <View style={styles.center}>
-            <Ionicons name="flame-outline" size={48} color={subTextColor} />
-            <Text style={{ color: subTextColor, fontSize: 15, marginTop: 12 }}>
-              {t.noPosts}
-            </Text>
-          </View>
+        <View style={{ flex: 1 }}>
+          <ScrollView
+            style={{ flex: 1, backgroundColor: bgColor }}
+            contentContainerStyle={[styles.emptyBrowseContent, { paddingTop: insets.top }]}
+            showsVerticalScrollIndicator={false}
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={txtColor} />}
+          >
+            {renderSearchInput()}
+            {renderRecentSearches()}
+            <View style={styles.center}>
+              <Ionicons name="flame-outline" size={48} color={subTextColor} />
+              <Text style={{ color: subTextColor, fontSize: 15, marginTop: 12 }}>{t.noPosts}</Text>
+            </View>
+          </ScrollView>
         </View>
       );
     }
 
     const handleSectionScroll = (event) => {
       const offsetX = event.nativeEvent.contentOffset.x;
-      const index = Math.round(offsetX / SECTION_WIDTH);
-      setActiveSectionIndex(index);
+      setActiveSectionIndex(Math.round(offsetX / SECTION_WIDTH));
     };
 
     const ListHeader = (
-      <View>
-        <ScrollView
-          ref={heroScrollRef}
-          horizontal
-          pagingEnabled
-          showsHorizontalScrollIndicator={false}
-          onMomentumScrollEnd={handleSectionScroll}
-          decelerationRate="fast"
-          snapToInterval={SECTION_WIDTH}
-          snapToAlignment="start"
-        >
-          {sectionGroups.map((groupPosts, index) => (
-            <HeroDeckSection
-              key={`deck-${index}`}
-              posts={groupPosts}
-              theme={theme}
-              isDarkMode={isDarkMode}
-              onPressPost={handlePostPress}
-              onPressUser={handleUserPress}
-            />
-          ))}
-        </ScrollView>
+      <View style={{ paddingTop: insets.top }}>
+        {renderSearchInput()}
+        {renderRecentSearches()}
 
-        {sectionGroups.length > 1 && (
-          <View style={styles.sectionDotsRow}>
-            {sectionGroups.map((_, i) => (
-              <View
-                key={`dot-${i}`}
-                style={[
-                  styles.sectionDot,
-                  {
-                    backgroundColor:
-                      i === activeSectionIndex
-                        ? theme.text || '#47ae87'
-                        : subTextColor + '55',
-                    width: i === activeSectionIndex ? 18 : 6,
-                  },
-                ]}
+        <View>
+          <ScrollView
+            ref={heroScrollRef}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            onMomentumScrollEnd={handleSectionScroll}
+            decelerationRate="fast"
+            snapToInterval={SECTION_WIDTH}
+            snapToAlignment="start"
+          >
+            {sectionGroups.map((groupPosts, index) => (
+              <HeroDeckSection
+                key={`deck-${index}`}
+                posts={groupPosts}
+                theme={theme}
+                isDarkMode={isDarkMode}
+                onPressPost={handlePostPress}
+                onPressUser={handleUserPress}
               />
             ))}
-          </View>
-        )}
+          </ScrollView>
 
-        <Text
-          style={[
-            styles.sectionTitle,
-            { color: txtColor, marginHorizontal: 16, marginTop: 18, marginBottom: 10 },
-          ]}
-        >
+          {sectionGroups.length > 1 && (
+            <View style={styles.sectionDotsRow}>
+              {sectionGroups.map((_, i) => (
+                <View
+                  key={`dot-${i}`}
+                  style={[
+                    styles.sectionDot,
+                    {
+                      backgroundColor: i === activeSectionIndex ? theme.text || '#47ae87' : subTextColor + '55',
+                      width: i === activeSectionIndex ? 18 : 6,
+                    },
+                  ]}
+                />
+              ))}
+            </View>
+          )}
+        </View>
+
+        <Text style={[styles.sectionTitle, { color: txtColor, marginHorizontal: 16, marginTop: 18, marginBottom: 10 }]}>
           {t.trending}
         </Text>
       </View>
     );
 
     return (
-      <FlatList
-        key="browse-grid"
-        data={gridPosts}
-        keyExtractor={(item, index) => `grid-${item._id}-${index}`}
-        renderItem={renderGridItem}
-        numColumns={2}
-        columnWrapperStyle={styles.gridRow}
-        ListHeaderComponent={ListHeader}
-        contentContainerStyle={[
-          styles.gridContent,
-          { backgroundColor: bgColor },
-        ]}
-        showsVerticalScrollIndicator={false}
-        onEndReached={loadMoreGridPosts}
-        onEndReachedThreshold={0.6}
-        initialNumToRender={6}
-        maxToRenderPerBatch={8}
-        updateCellsBatchingPeriod={40}
-        windowSize={5}
-        removeClippedSubviews
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={txtColor}
-          />
-        }
-        ListFooterComponent={
-          loadingMore ? (
-            <ActivityIndicator
-              style={styles.loadMoreIndicator}
-              color={txtColor}
-            />
-          ) : null
-        }
-      />
+      <View style={{ flex: 1 }}>
+        <FlatList
+          key="browse-grid"
+          data={gridPosts}
+          keyExtractor={(item, index) => `grid-${item._id}-${index}`}
+          renderItem={renderGridItem}
+          numColumns={2}
+          columnWrapperStyle={styles.gridRow}
+          ListHeaderComponent={ListHeader}
+          contentContainerStyle={[styles.gridContent, { backgroundColor: bgColor }]}
+          showsVerticalScrollIndicator={false}
+          onEndReached={loadMoreGridPosts}
+          onEndReachedThreshold={0.6}
+          initialNumToRender={6}
+          maxToRenderPerBatch={8}
+          updateCellsBatchingPeriod={40}
+          windowSize={5}
+          removeClippedSubviews
+          keyboardShouldPersistTaps="handled"
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={txtColor} />}
+          ListFooterComponent={loadingMore ? <ActivityIndicator style={styles.loadMoreIndicator} color={txtColor} /> : null}
+        />
+      </View>
     );
   };
 
   const renderSearchResults = () => {
     const ListHeader = (
-      <View>
+      <View style={{ paddingTop: insets.top }}>
+        {renderSearchInput()}
         {matchedUsers.length > 0 && (
           <>
-            <Text
-              style={[
-                styles.sectionTitle,
-                { color: txtColor, marginHorizontal: 16, marginTop: 6, marginBottom: 6 },
-              ]}
-            >
+            <Text style={[styles.sectionTitle, { color: txtColor, marginHorizontal: 16, marginTop: 6, marginBottom: 6 }]}>
               {t.users}
             </Text>
             {matchedUsers.slice(0, 5).map((u) => (
@@ -957,12 +857,7 @@ const SearchScreen = ({ navigation, route, language }) => {
             ))}
           </>
         )}
-        <Text
-          style={[
-            styles.sectionTitle,
-            { color: txtColor, marginHorizontal: 16, marginTop: 12, marginBottom: 6 },
-          ]}
-        >
+        <Text style={[styles.sectionTitle, { color: txtColor, marginHorizontal: 16, marginTop: 12, marginBottom: 6 }]}>
           {t.results}
           {submittedQuery || searchQuery ? (
             <Text style={{ color: subTextColor, fontSize: 12, fontWeight: '500' }}>
@@ -979,17 +874,12 @@ const SearchScreen = ({ navigation, route, language }) => {
         data={searchResults}
         keyExtractor={(item, index) => `search-${item._id}-${index}`}
         renderItem={renderSearchResultItem}
-        contentContainerStyle={[
-          styles.listContent,
-          { backgroundColor: bgColor },
-        ]}
+        contentContainerStyle={[styles.listContent, { backgroundColor: bgColor }]}
         ListHeaderComponent={ListHeader}
         ListEmptyComponent={
           <View style={styles.center}>
             <Ionicons name="search-outline" size={48} color={subTextColor} />
-            <Text style={{ color: subTextColor, fontSize: 15, marginTop: 12 }}>
-              {t.noResults}
-            </Text>
+            <Text style={{ color: subTextColor, fontSize: 15, marginTop: 12 }}>{t.noResults}</Text>
           </View>
         }
         keyboardShouldPersistTaps="handled"
@@ -1005,64 +895,21 @@ const SearchScreen = ({ navigation, route, language }) => {
   const renderContent = () => {
     if (loading && allPosts.length === 0) {
       return (
-        <View style={styles.center}>
-          <ShaakaLoadingScreen
-            message={t.loading}
-            backgroundColor={bgColor}
-            textColor={txtColor}
-            compact
-          />
+        <View style={[styles.center, { backgroundColor: bgColor, paddingTop: insets.top }]}>
+          <ShaakaLoadingScreen message={t.loading} backgroundColor={bgColor} textColor={txtColor} compact />
         </View>
       );
     }
 
     const isSearching = searchQuery.trim() !== '';
-    if (isSearching) {
-      return renderSearchResults();
-    }
+    if (isSearching) return renderSearchResults();
     return renderBrowseView();
   };
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: bgColor }]} edges={['top']}>
+    <SafeAreaView style={[styles.container, { backgroundColor: bgColor }]} edges={['left', 'right', 'bottom']}>
       <View style={{ flex: 1 }}>
         {renderContent()}
-
-        {searchBarVisible && (
-          <View style={styles.searchInputOverlay}>
-            {renderSearchInput()}
-          </View>
-        )}
-
-        {/* === NEW: Draggable See/Unsee eye toggle === */}
-        <Animated.View
-          pointerEvents="box-none"
-          style={[
-            styles.floatingEyeButton,
-            {
-              transform: eyePos.getTranslateTransform(),
-              backgroundColor: isDarkMode ? '#111' : '#ddd',
-              borderColor: isDarkMode ? '#555' : '#999',
-            },
-          ]}
-          {...eyePanResponder.panHandlers}
-        >
-          <TouchableOpacity
-            onPress={handleEyePress}
-            activeOpacity={0.85}
-            style={styles.floatingEyeButtonInner}
-            accessibilityRole="button"
-            accessibilityLabel={
-              searchBarVisible ? 'Hide search input' : 'Show search input'
-            }
-          >
-            <Ionicons
-              name={searchBarVisible ? 'eye-off' : 'eye'}
-              size={24}
-              color={isDarkMode ? '#fff' : '#111'}
-            />
-          </TouchableOpacity>
-        </Animated.View>
       </View>
     </SafeAreaView>
   );
@@ -1072,33 +919,49 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 60 },
 
-  /* ---------- Search input ---------- */
+  /* ---------- Search Input ---------- */
+  searchInputWrapper: {
+    paddingHorizontal: 16,
+    paddingTop: 5,
+    paddingBottom: 12,
+  },
   searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    borderRadius: 14,
-    borderWidth: 1,
-    height: 48,
-    marginHorizontal: 16,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 2,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    height: 44,
+    width: '100%',
   },
-  searchInputOverlay: {
-    position: 'absolute',
-    top: SEARCH_INPUT_TOP,
-    left: 0,
-    right: 0,
-    zIndex: 10,
-    elevation: 10,
+  searchIcon: { marginRight: 8 },
+  searchInput: {
+    flex: 1,
+    fontSize: 16,
+    paddingVertical: 0,
   },
-  searchIcon: { marginRight: 10 },
-  searchInput: { flex: 1, fontSize: 16, paddingVertical: 0 },
   clearBtn: { marginLeft: 8, padding: 4 },
+
+  /* ---------- Recent Searches ---------- */
+  recentContainer: {
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+    marginTop: 10,
+  },
+  recentTitle: {
+    fontSize: 12,
+    fontWeight: '400',
+    marginBottom: 10,
+  },
+  recentItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  recentText: {
+    fontSize: 14,
+    fontWeight: '400',
+  },
 
   /* ---------- Section header ---------- */
   sectionTitle: {
@@ -1108,7 +971,7 @@ const styles = StyleSheet.create({
 
   /* ---------- Hero deck section ---------- */
   heroSection: {
-    paddingTop: 28,
+    paddingTop: 12,
     paddingLeft: 20,
     paddingRight: 20,
     paddingBottom: 12,
@@ -1153,13 +1016,12 @@ const styles = StyleSheet.create({
 
   /* ---------- 2-per-row product grid ---------- */
   gridContent: {
-    paddingTop: SEARCH_CONTENT_TOP_PADDING,
-    paddingBottom: 100,
+    paddingTop: 0,
+    paddingBottom: 0,
   },
   emptyBrowseContent: {
-    flex: 1,
-    paddingTop: SEARCH_CONTENT_TOP_PADDING,
-    paddingBottom: 100,
+    flexGrow: 1,
+    paddingBottom: 0,
   },
   gridRow: {
     justifyContent: 'space-between',
@@ -1227,8 +1089,8 @@ const styles = StyleSheet.create({
   /* ---------- Search result rows ---------- */
   listContent: {
     paddingHorizontal: 0,
-    paddingTop: SEARCH_CONTENT_TOP_PADDING,
-    paddingBottom: 100,
+    paddingTop: 0,
+    paddingBottom: 0,
   },
   resultItem: {
     flexDirection: 'row',
@@ -1304,30 +1166,6 @@ const styles = StyleSheet.create({
 
   /* ---------- Misc ---------- */
   loadMoreIndicator: { paddingVertical: 20 },
-
-  /* ---------- NEW: floating draggable eye toggle ---------- */
-  floatingEyeButton: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: EYE_BUTTON_SIZE,
-    height: EYE_BUTTON_SIZE,
-    borderRadius: EYE_BUTTON_SIZE / 2,
-    borderWidth: 1,
-    zIndex: 200,
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-  },
-  floatingEyeButtonInner: {
-    width: '100%',
-    height: '100%',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: EYE_BUTTON_SIZE / 2,
-  },
 });
 
 export default SearchScreen;

@@ -1,3 +1,4 @@
+
 // screens/ViewShopScreen.js
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
@@ -30,6 +31,11 @@ import { networkStatus } from '../services/networkStatus';
 import { offlineDatabase } from '../services/offlineDatabase';
 import { mediaCache } from '../services/mediaCache';
 import { compressImageForUpload } from '../utils/imageCompressor';
+import OnlineStatusDot from '../components/OnlineStatusDot';
+import useOnlineUsers from '../hooks/useOnlineUsers';
+import { getAddressText } from '../utils/address';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { height, width } = Dimensions.get('window');
 const MODAL_HEIGHT_80 = height * 0.7;
@@ -82,11 +88,14 @@ export default function ViewShopScreen({ route, navigation }) {
   const { showBottomSheet } = useBottomSheet();
   const { shopId } = route.params;
   const [shop, setShop] = useState(null);
+  const shopAddress = getAddressText(shop?.address);
   const [loading, setLoading] = useState(true);
   const [isFavorite, setIsFavorite] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [owner, setOwner] = useState(null);
+  const onlineOwnerId = owner?._id || shop?.ownerId?._id || shop?.ownerId || shop?.userId?._id || shop?.userId;
+  const onlineUsers = useOnlineUsers(onlineOwnerId ? [onlineOwnerId] : []);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -432,7 +441,7 @@ export default function ViewShopScreen({ route, navigation }) {
   const handleShare = async () => {
     if (!shop) return;
     const link = appShareLink || 'https://shaaka.app';
-    const message = `🛍️ ${shop.name}\n📍 ${shop.address || ''}\n🏢 ${shop.mallName || 'Shopping Mall'}\nCategory: ${shop.category || 'General'}\n\n${link}`;
+    const message = `🛍️ ${shop.name}\n📍 ${shopAddress}\n🏢 ${shop.mallName || 'Shopping Mall'}\nCategory: ${shop.category || 'General'}\n\n${link}`;
     await Share.share({ message });
   };
 
@@ -446,6 +455,29 @@ export default function ViewShopScreen({ route, navigation }) {
     const sellerName = owner?.name || owner?.username || shop.ownerName || 'Shop owner';
     const sellerPhone = owner?.phone || shop.phone || '';
     const contextId = shop?._id || shopId || `shop_${shop?.name || 'shop'}`;
+    const frontImage = shop?.images?.frontImage || shop?.images?.front || '';
+    const shopImage = typeof frontImage === 'string'
+      ? frontImage
+      : frontImage?.uri || frontImage?.url || '';
+    const replyPost = {
+      postId: String(contextId),
+      contextId: String(contextId),
+      contextType: 'shop',
+      shopId: String(contextId),
+      mallId: String(shop?.mallId?._id || shop?.mallId || ''),
+      title: shop?.name || 'Shop',
+      description: shop?.description || '',
+      image: shopImage,
+      images: shopImage ? [shopImage] : [],
+      location: shopAddress,
+      category: shop?.category || '',
+      lat: shop?.lat ?? null,
+      lon: shop?.lon ?? null,
+      ownerId: sellerId,
+      username: sellerName,
+      userAvatar: owner?.avatar || owner?.userAvatar || '',
+      timestamp: shop?.createdDate || new Date().toISOString(),
+    };
 
     if (!sellerId) {
       showStatusModal({ title: 'Error', message: 'Owner information is not available yet.', type: 'error' });
@@ -459,6 +491,7 @@ export default function ViewShopScreen({ route, navigation }) {
       postId: contextId,
       postTitle: shop.name || 'Shop',
       sellerAvatar: owner?.avatar || '',
+      replyPost,
     });
   };
 
@@ -591,6 +624,7 @@ export default function ViewShopScreen({ route, navigation }) {
 
       // Upload all images
       const imageUrls = [];
+      const imageVariants = [];
       for (const img of newProduct.images) {
         const compressedImage = await compressImageForUpload(img.uri, img.name || 'product.jpg');
         const formData = new FormData();
@@ -603,6 +637,7 @@ export default function ViewShopScreen({ route, navigation }) {
         });
         if (uploadRes.data.success) {
           imageUrls.push(uploadRes.data.url);
+          if (uploadRes.data.imageVariants) imageVariants.push(uploadRes.data.imageVariants);
         } else {
           throw new Error('Image upload failed');
         }
@@ -612,6 +647,7 @@ export default function ViewShopScreen({ route, navigation }) {
         name: newProduct.name.trim(),
         price: Number(newProduct.price.replace(/,/g, '')) || 0,
         images: imageUrls,
+        imageVariants,
       };
 
       const updatedProducts = [...(shop.products || []), newProductObj];
@@ -693,7 +729,11 @@ export default function ViewShopScreen({ route, navigation }) {
       <View style={[styles.productGridItem, { backgroundColor: isDarkMode ? '#2a2a2a' : '#fff' }]}>
         <View style={styles.productGridTouchable}>
           {firstImage ? (
-            <Image source={{ uri: firstImage }} style={styles.productGridImage} />
+            <Image
+              source={normalizeImageSource({ uri: firstImage, storageKey: item.imageStorageKeys?.[0] })}
+
+              style={styles.productGridImage}
+            />
           ) : (
             <View style={[styles.productImagePlaceholder, { backgroundColor: theme.border }]}>
               <Ionicons name="image-outline" size={40} color={theme.textSecondary} />
@@ -749,9 +789,9 @@ export default function ViewShopScreen({ route, navigation }) {
               <Ionicons name="business-outline" size={14} /> {shop.mallName}
             </Text>
           )}
-          {shop?.address && (
+          {shopAddress && (
             <Text style={[styles.stickyAddress, { color: theme.textSecondary }]} numberOfLines={1}>
-              <Ionicons name="location-outline" size={14} /> {shop.address}
+              <Ionicons name="location-outline" size={14} /> {shopAddress}
             </Text>
           )}
         </View>
@@ -861,6 +901,9 @@ export default function ViewShopScreen({ route, navigation }) {
 
   const displayOwner = owner || { _id: null, name: 'Shop Owner' };
   const ownerId = displayOwner._id || shop.ownerId?._id || shop.userId || null;
+  const ownerPresenceKey = typeof ownerId === 'object'
+    ? ownerId?._id || ownerId?.id || ownerId?.userId
+    : ownerId;
   const ownerName = displayOwner.name || displayOwner.username || 'Shop Owner';
   const ownerAvatar = displayOwner.avatar || null;
 
@@ -980,7 +1023,11 @@ export default function ViewShopScreen({ route, navigation }) {
                   {/* Cover image */}
                   {frontImage ? (
                     <View>
-                      <Image source={{ uri: frontImage }} style={styles.coverImage} />
+                      <Image
+                        source={normalizeImageSource({ uri: frontImage, storageKey: shop.frontImageStorageKey })}
+
+                        style={styles.coverImage}
+                      />
                     </View>
                   ) : (
                     <View style={[styles.coverPlaceholder, { backgroundColor: theme.border }]}>
@@ -1007,15 +1054,21 @@ export default function ViewShopScreen({ route, navigation }) {
                     activeOpacity={ownerId ? 0.7 : 1}
                     disabled={!ownerId}
                   >
-                    {ownerAvatar ? (
-                      <Image source={{ uri: ownerAvatar }} style={styles.ownerAvatar} />
-                    ) : (
-                      <View style={[styles.ownerAvatarPlaceholder, { backgroundColor: theme.border }]}>
-                        <Text style={[styles.ownerAvatarInitials, { color: theme.text }]}>
-                          {ownerName.charAt(0).toUpperCase()}
-                        </Text>
-                      </View>
-                    )}
+                    <View style={styles.ownerStatusAvatarWrap}>
+                      {ownerAvatar ? (
+                        <Image
+                          source={normalizeImageSource({ uri: ownerAvatar })}
+                          style={[styles.ownerAvatar, { marginRight: 0 }]}
+                        />
+                      ) : (
+                        <View style={[styles.ownerAvatarPlaceholder, { backgroundColor: theme.border, marginRight: 0 }]}>
+                          <Text style={[styles.ownerAvatarInitials, { color: theme.text }]}>
+                            {ownerName.charAt(0).toUpperCase()}
+                          </Text>
+                        </View>
+                      )}
+                      <OnlineStatusDot visible={Boolean(ownerPresenceKey && onlineUsers[String(ownerPresenceKey)])} size={14} />
+                    </View>
                     <View style={styles.ownerInfo}>
                       <Text style={[styles.ownerName, { color: theme.text }]}>{ownerName}</Text>
                     </View>
@@ -1066,10 +1119,12 @@ export default function ViewShopScreen({ route, navigation }) {
                       <Ionicons name="navigate" size={22} color="#fff" />
                       <Text style={styles.actionBtnText}>Directions</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity style={[styles.actionBtn, { backgroundColor: theme.accent }]} onPress={handleMessageOwner}>
-                      <Ionicons name="chatbubble-ellipses-outline" size={22} color="#fff" />
-                      <Text style={styles.actionBtnText}>Message</Text>
-                    </TouchableOpacity>
+                    {!isOwner && (
+                      <TouchableOpacity style={[styles.actionBtn, { backgroundColor: theme.accent }]} onPress={handleMessageOwner}>
+                        <Ionicons name="chatbubble-ellipses-outline" size={22} color="#fff" />
+                        <Text style={styles.actionBtnText}>Message</Text>
+                      </TouchableOpacity>
+                    )}
                     <TouchableOpacity style={[styles.actionBtn, { backgroundColor: theme.border }]} onPress={handleShare}>
                       <Ionicons name="share-social" size={22} color={theme.text} />
                       <Text style={[styles.actionBtnText, { color: theme.text }]}>Share</Text>
@@ -1212,7 +1267,7 @@ export default function ViewShopScreen({ route, navigation }) {
                 <View style={styles.modalImagePreviewList}>
                   {newProduct.images.map((img, idx) => (
                     <View key={idx} style={styles.modalImageWrapper}>
-                      <Image source={{ uri: img.uri }} style={styles.modalImagePreview} />
+                      <Image source={normalizeImageSource({ uri: img.uri })} style={styles.modalImagePreview} />
                       <TouchableOpacity style={styles.modalRemoveImageBtn} onPress={() => removeProductImage(idx)}>
                         <Ionicons name="close-circle" size={20} color="#353535" />
                       </TouchableOpacity>
@@ -1390,6 +1445,7 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     marginRight: 12,
   },
+  ownerStatusAvatarWrap: { position: 'relative', marginRight: 12 },
   ownerAvatarPlaceholder: {
     width: 50,
     height: 50,

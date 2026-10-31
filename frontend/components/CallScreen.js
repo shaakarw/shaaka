@@ -14,6 +14,8 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { useCall } from '../context/CallContext';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width, height } = Dimensions.get('window');
 const DEFAULT_AVATAR = require('../assets/profile.png');
@@ -58,13 +60,13 @@ const CallScreen = () => {
 
   return (
     <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
-      <ImageBackground source={chatBackground} style={styles.backgroundImage} resizeMode="cover">
+      <ImageBackground source={normalizeImageSource(chatBackground)} style={styles.backgroundImage} resizeMode="cover">
         <View style={[styles.overlay, { backgroundColor: theme.background, opacity: 0.7 }]} />
 
         {/* Header */}
         <SafeAreaView style={styles.header}>
           <View style={styles.headerLeft}>
-            <Image source={avatarSource} style={styles.headerAvatar} />
+            <Image source={normalizeImageSource(avatarSource)} style={styles.headerAvatar} />
             <View style={styles.headerInfo}>
               <Text style={[styles.headerName, { color: theme.text }]}>{callerName}</Text>
               <Text style={[styles.headerStatus, { color: theme.textSecondary }]}>
@@ -96,7 +98,7 @@ const CallScreen = () => {
             </View>
           ) : (
             <View style={styles.audioContent}>
-              <Image source={avatarSource} style={styles.audioAvatar} />
+              <Image source={normalizeImageSource(avatarSource)} style={styles.audioAvatar} />
               <Text style={[styles.audioName, { color: theme.text }]}>{callerName}</Text>
               <Text style={[styles.audioStatus, { color: theme.textSecondary }]}>
                 {formatDuration(callDuration)}

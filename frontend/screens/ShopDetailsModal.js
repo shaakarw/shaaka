@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import {
   View,
@@ -13,6 +14,8 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 export default function ShopDetailsModal({ visible, shop, onClose, onEdit, onDelete, currentUserId }) {
   const { theme } = useTheme();
@@ -83,7 +86,7 @@ export default function ShopDetailsModal({ visible, shop, onClose, onEdit, onDel
   );
 
   const renderImage = ({ item, index }) => (
-    <Image source={{ uri: item }} style={styles.galleryImage} />
+    <Image source={normalizeImageSource({ uri: item })} style={styles.galleryImage} />
   );
 
   const currentShop = isEditing ? editedShop : shop;

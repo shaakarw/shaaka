@@ -13,6 +13,8 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { useCall } from '../context/CallContext';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const WIDGET_SIZE = 80;
@@ -89,7 +91,7 @@ const FloatingCallWidget = () => {
             </View>
           </View>
         ) : (
-          <Image source={avatarSource} style={styles.avatar} />
+          <Image source={normalizeImageSource(avatarSource)} style={styles.avatar} />
         )}
 
         <View style={styles.info}>

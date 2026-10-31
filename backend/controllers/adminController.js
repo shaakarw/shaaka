@@ -2,18 +2,23 @@
 const User = require('../models/User');
 const Post = require('../models/Post');
 const Place = require('../models/Place');
+const MallShop = require('../models/MallShop');
 const Report = require('../models/Report');
 const BusinessIdea = require('../models/BusinessIdea');
 const mongoose = require('mongoose');
 const { computeAggregatedLimits, getActiveSubscriptions } = require('../utils/subscriptionHelpers_clean');
-const { deleteShopWithCleanup } = require('../utils/deletionCleanup');
+const { deleteMallShopWithCleanup, deleteShopWithCleanup } = require('../utils/deletionCleanup');
 
 // -------- DASHBOARD STATISTICS --------
 exports.getDashboardStats = async (req, res) => {
   try {
     const totalUsers = await User.countDocuments();
     const totalPosts = await Post.countDocuments();
-    const totalShops = await Place.countDocuments({ type: 'shop' });
+    const [placeShops, mallShops] = await Promise.all([
+      Place.countDocuments({ $or: [{ category: 'shop' }, { type: 'shop' }] }),
+      MallShop.countDocuments(),
+    ]);
+    const totalShops = placeShops + mallShops;
     const totalReports = await Report.countDocuments();
 
     const blockedUsers = await User.countDocuments({ blocked: true });
@@ -115,6 +120,10 @@ exports.getPosts = async (req, res) => {
       description: p.description,
       location: p.location,
       houseImages: p.houseImages || [],
+      videoUrl: p.videoUrl || '',
+      videoHlsUrl: p.videoHlsUrl || '',
+      videoThumbnail: p.videoThumbnail || '',
+      videoDuration: p.videoDuration || 0,
       price: p.price,
       featured: p.featured || false,
       trending: p.trending || false,
@@ -177,18 +186,47 @@ exports.restorePost = async (req, res) => {
 // -------- SHOPS (Place) --------
 exports.getShops = async (req, res) => {
   try {
-    const shops = await Place.find({ type: 'shop' }).populate('userId', 'username phone avatar').sort({ createdAt: -1 });
-    const formatted = shops.map(s => ({
+    const [placeShops, mallShops] = await Promise.all([
+      Place.find({ $or: [{ category: 'shop' }, { type: 'shop' }] })
+        .populate('userId', 'username phone avatar')
+        .sort({ createdAt: -1 }),
+      MallShop.find()
+        .populate('ownerId', 'username phone avatar')
+        .sort({ createdDate: -1 }),
+    ]);
+    const formattedPlaces = placeShops.map(s => ({
       _id: s._id,
       name: s.name,
-      location: s.location,
+      location: s.address?.full || [
+        s.address?.district,
+        s.address?.sector,
+        s.address?.cell,
+        s.address?.street,
+      ].filter(Boolean).join(', '),
+      phone: s.contact?.phone || '',
+      image: s.images?.streetImage || s.images?.street || s.images?.doorImage || '',
+      isMallShop: false,
       status: s.status || 'active',
       stopped: s.stopped || false,
       owner: s.userId ? { username: s.userId.username, phone: s.userId.phone, avatar: s.userId.avatar } : null,
       ownerName: s.userId ? s.userId.username : 'Unknown',
       createdAt: s.createdAt,
     }));
-    res.json({ success: true, shops: formatted });
+    const formattedMallShops = mallShops.map(s => ({
+      _id: s._id,
+      name: s.name,
+      location: [s.mallName, s.address].filter(Boolean).join(', '),
+      mallName: s.mallName || '',
+      phone: s.phone || '',
+      image: s.images?.frontImage || '',
+      isMallShop: true,
+      status: 'active',
+      stopped: false,
+      owner: s.ownerId ? { username: s.ownerId.username, phone: s.ownerId.phone, avatar: s.ownerId.avatar } : null,
+      ownerName: s.ownerId ? (s.ownerId.username || s.ownerId.name) : 'Unknown',
+      createdAt: s.createdDate,
+    }));
+    res.json({ success: true, shops: [...formattedPlaces, ...formattedMallShops] });
   } catch (err) {
     console.error('Get shops error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -208,6 +246,22 @@ exports.deleteShop = async (req, res) => {
     res.json({ success: true, message: 'Shop and all related data deleted successfully' });
   } catch (err) {
     console.error('Delete shop error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+exports.deleteMallShop = async (req, res) => {
+  try {
+    const { shopId } = req.params;
+    const shop = await MallShop.findById(shopId);
+    if (!shop) {
+      return res.status(404).json({ success: false, message: 'Shop not found' });
+    }
+
+    await deleteMallShopWithCleanup(shopId);
+    res.json({ success: true, message: 'Mall shop and related data deleted successfully' });
+  } catch (err) {
+    console.error('Delete mall shop error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

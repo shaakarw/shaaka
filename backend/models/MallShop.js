@@ -5,6 +5,18 @@ const productSchema = new mongoose.Schema({
   description: String,
   images: [String],
   imageStorageKeys: [{ type: String }],
+  imageVariants: [{
+    originalUrl: String,
+    originalStorageKey: String,
+    width: Number,
+    height: Number,
+    variants: {
+      tiny: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      small: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      medium: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      large: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+    },
+  }],
 });
 const mallShopSchema = new mongoose.Schema({
   mallId: { type: mongoose.Schema.Types.ObjectId, ref: 'Place', required: true },
@@ -24,6 +36,18 @@ const mallShopSchema = new mongoose.Schema({
   closingTime: String,
   // Front media image for mall shop
   images: { frontImage: String },
+  imageVariants: [{
+    originalUrl: String,
+    originalStorageKey: String,
+    width: Number,
+    height: Number,
+    variants: {
+      tiny: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      small: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      medium: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+      large: { url: String, storageKey: String, width: Number, height: Number, fileSize: Number },
+    },
+  }],
   frontImageStorageKey: { type: String, default: '' },
   storageProvider: { type: String, default: '' },
   products: [productSchema],

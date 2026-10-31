@@ -1,6 +1,13 @@
 import NetInfo from '@react-native-community/netinfo';
 
-let currentStatus = { isConnected: true, isInternetReachable: true, isOnline: true };
+let currentStatus = {
+  isConnected: true,
+  isInternetReachable: true,
+  isOnline: true,
+  type: 'unknown',
+  isConnectionExpensive: false,
+  cellularGeneration: null,
+};
 const listeners = new Set();
 let started = false;
 let unsubscribe = null;
@@ -9,7 +16,14 @@ let startPromise = null;
 const normalize = state => {
   const isConnected = state.isConnected !== false;
   const isInternetReachable = state.isInternetReachable !== false;
-  return { isConnected, isInternetReachable, isOnline: isConnected && isInternetReachable };
+  return {
+    isConnected,
+    isInternetReachable,
+    isOnline: isConnected && isInternetReachable,
+    type: state.type || 'unknown',
+    isConnectionExpensive: Boolean(state.details?.isConnectionExpensive),
+    cellularGeneration: state.details?.cellularGeneration || null,
+  };
 };
 
 export const networkStatus = {

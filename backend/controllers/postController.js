@@ -4,6 +4,8 @@ const Post = require('../models/Post');
 const User = require('../models/User');
 const SavedPost = require('../models/SavedPost');
 const storageService = require('../services/storage/storageService');
+const { processVideoBuffer } = require('../services/videoProcessing');
+const { uploadImageWithVariants } = require('../services/imageUpload');
 const { deletePostWithCleanup } = require('../utils/deletionCleanup');
 const { normalizeRwandaPhone, isValidRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
@@ -38,7 +40,7 @@ exports.createPost = async (req, res) => {
   const uploadedStorageKeys = [];
   try {
     const userId = req.user.id;
-    const user = await User.findById(userId).select('phone username avatar paymentHistory postUploadLimitPerDay allowVideoUpload videoUploadLimitPerDay');
+    const user = await User.findById(userId).select('phone username avatar avatarVariants paymentHistory postUploadLimitPerDay allowVideoUpload videoUploadLimitPerDay');
     if (!user) {
       console.error('User not found:', userId);
       return res.status(404).json({ success: false, message: 'User not found' });
@@ -63,7 +65,6 @@ exports.createPost = async (req, res) => {
 
     const imageFiles = (req.files && req.files.images) || [];
     const videoFile = req.files?.video?.[0];
-    const videoThumbnailFile = req.files?.thumbnail?.[0];
 
     if (videoFile) {
       if (user.allowVideoUpload !== true) {
@@ -147,10 +148,6 @@ exports.createPost = async (req, res) => {
     if (imageFiles.length === 0 && !videoFile) {
       return res.status(400).json({ success: false, message: 'Please attach at least one image or video to create a post.' });
     }
-    if (videoThumbnailFile && !videoFile) {
-      return res.status(400).json({ success: false, message: 'A video thumbnail requires an attached video.' });
-    }
-
     const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
     const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
     if (imageFiles.some(file => !file.buffer || file.buffer.length > MAX_IMAGE_BYTES)) {
@@ -159,36 +156,51 @@ exports.createPost = async (req, res) => {
     if (videoFile && (!videoFile.buffer || videoFile.buffer.length > MAX_VIDEO_BYTES)) {
       return res.status(400).json({ success: false, message: 'Video exceeds the 50 MB size limit.' });
     }
-    if (videoThumbnailFile && (!videoThumbnailFile.buffer || videoThumbnailFile.buffer.length > MAX_IMAGE_BYTES)) {
-      return res.status(400).json({ success: false, message: 'Video thumbnail exceeds the 3 MB size limit.' });
+
+    if (imageFiles.length > MAX_IMAGES_PER_POST) {
+      return res.status(400).json({
+        success: false,
+        message: `You can only upload up to ${MAX_IMAGES_PER_POST} images per post.`,
+      });
+    }
+
+    if (videoFile) {
+      console.info('[Post] Video upload started.', {
+        fileSize: videoFile.size || videoFile.buffer.length,
+        mimeType: videoFile.mimetype,
+      });
+    }
+    const videoProcessingResult = videoFile
+      ? await processVideoBuffer(videoFile.buffer)
+      : null;
+    if (videoFile && (
+      !videoProcessingResult ||
+      !Number.isFinite(videoProcessingResult.duration) ||
+      videoProcessingResult.duration <= 0
+    )) {
+      const error = new Error('Video duration could not be determined. Please select a valid video.');
+      error.statusCode = 422;
+      throw error;
     }
 
     // ---------- 7. Handle image uploads ----------
     const imageUrls = [];
     const houseImageStorageKeys = [];
+    const houseImageVariants = [];
     const postId = new Post()._id;
     if (imageFiles.length > 0) {
-      // 7a. Check per‑post image limit (constant 2)
-      if (imageFiles.length > MAX_IMAGES_PER_POST) {
-        return res.status(400).json({
-          success: false,
-          message: `You can only upload up to ${MAX_IMAGES_PER_POST} images per post.`,
-        });
-      }
-
-      // Upload each original image without re-encoding or reducing quality.
       for (const file of imageFiles) {
-        const result = await storageService.uploadMedia({
+        const uploaded = await uploadImageWithVariants({
           buffer: file.buffer,
           mimeType: file.mimetype,
           folder: `posts/${postId}/images`,
           maxBytes: MAX_IMAGE_BYTES,
-        });
-        uploadedStorageKeys.push(result.storageKey);
-        houseImageStorageKeys.push(result.storageKey);
-        imageUrls.push(storageService.getMediaUrl(result.storageKey, {
           origin: storageService.getRequestOrigin(req),
-        }));
+        });
+        uploadedStorageKeys.push(...uploaded.storageKeys);
+        houseImageStorageKeys.push(uploaded.original.storageKey);
+        imageUrls.push(uploaded.originalUrl);
+        houseImageVariants.push(uploaded.imageVariants);
       }
     }
 
@@ -199,7 +211,7 @@ exports.createPost = async (req, res) => {
     let videoThumbnailStorageKey = '';
     let videoId = '';
     let videoStorageKey = '';
-    let uploadedVideoDuration = Number(req.body.videoDuration) || 0;
+    const uploadedVideoDuration = videoProcessingResult?.duration ?? 0;
     if (videoFile) {
       const videoResult = await storageService.uploadMedia({
         buffer: videoFile.buffer,
@@ -208,24 +220,26 @@ exports.createPost = async (req, res) => {
         maxBytes: MAX_VIDEO_BYTES,
       });
       uploadedStorageKeys.push(videoResult.storageKey);
+      console.info('[Post] Video upload completed.', {
+        postId: String(postId),
+        fileSize: videoResult.fileSize,
+      });
       videoStorageKey = videoResult.storageKey;
       videoId = videoStorageKey;
       videoUrl = storageService.getMediaUrl(videoStorageKey, {
         origin: storageService.getRequestOrigin(req),
       });
-      if (videoThumbnailFile) {
-        const thumbnailResult = await storageService.uploadMedia({
-          buffer: videoThumbnailFile.buffer,
-          mimeType: videoThumbnailFile.mimetype,
-          folder: `posts/${postId}/thumbnails`,
-          maxBytes: MAX_IMAGE_BYTES,
-        });
-        uploadedStorageKeys.push(thumbnailResult.storageKey);
-        videoThumbnailStorageKey = thumbnailResult.storageKey;
-        videoThumbnail = storageService.getMediaUrl(videoThumbnailStorageKey, {
-          origin: storageService.getRequestOrigin(req),
-        });
-      }
+      const thumbnailResult = await storageService.uploadMedia({
+        buffer: videoProcessingResult.thumbnailBuffer,
+        mimeType: 'image/jpeg',
+        folder: `posts/${postId}/thumbnails`,
+        maxBytes: MAX_IMAGE_BYTES,
+      });
+      uploadedStorageKeys.push(thumbnailResult.storageKey);
+      videoThumbnailStorageKey = thumbnailResult.storageKey;
+      videoThumbnail = storageService.getMediaUrl(videoThumbnailStorageKey, {
+        origin: storageService.getRequestOrigin(req),
+      });
     }
 
     const postData = {
@@ -234,6 +248,7 @@ exports.createPost = async (req, res) => {
       username: user.username,
       userPhone: contactNumber1,
       userAvatar: user.avatar || '',
+      userAvatarVariants: user.avatarVariants || [],
       category,
       description,
       location,
@@ -242,6 +257,7 @@ exports.createPost = async (req, res) => {
       contactNumbers,
       houseImages: imageUrls,
       houseImageStorageKeys,
+      houseImageVariants,
       storageProvider: 'b2',
       videoUrl,
       videoHlsUrl,
@@ -250,6 +266,7 @@ exports.createPost = async (req, res) => {
       videoDuration: uploadedVideoDuration,
       videoThumbnail,
       videoThumbnailStorageKey,
+      videoThumbnailStatus: videoFile ? 'completed' : '',
       videoLink: req.body.videoLink || '',
       productName: productName || undefined,
     };
@@ -264,9 +281,17 @@ exports.createPost = async (req, res) => {
 
     // ---------- 9. Save post ----------
     const post = new Post(postData);
-    await post.save();
+    try {
+      await post.save();
+    } catch (error) {
+      console.error('[Post] Database insertion failed:', error.message);
+      throw error;
+    }
     uploadedStorageKeys.length = 0;
-    console.log('✅ Post saved successfully. ID:', post._id);
+    console.info('[Post] Database insertion completed.', {
+      postId: String(post._id),
+      videoDurationSeconds: post.videoDuration,
+    });
     try {
       await notifyUsers({
         type: 'NEW_POST',
@@ -324,7 +349,7 @@ exports.getAllPosts = async (req, res) => {
           .sort({ createdAt: -1, _id: -1 })
           .limit(batchSize)
           .select('-videoStorageKey -videoThumbnailStorageKey -houseImageStorageKeys')
-          .populate('user', 'username avatar blocked accountDeletionStatus')
+          .populate('user', 'username avatar avatarVariants blocked accountDeletionStatus')
           .lean();
         if (!candidates.length) break;
 
@@ -341,6 +366,7 @@ exports.getAllPosts = async (req, res) => {
             _id: creator._id,
             username: creator.username,
             avatar: creator.avatar,
+            avatarVariants: creator.avatarVariants || [],
           };
           posts.push(post);
           if (posts.length > limit) break;
@@ -380,7 +406,7 @@ exports.getAllPosts = async (req, res) => {
         .sort({ trending: -1, featured: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate('user', 'username avatar')
+        .populate('user', 'username avatar avatarVariants')
         .lean(),
       Post.countDocuments(filter),
     ]);
@@ -460,7 +486,7 @@ exports.getUserPosts = async (req, res) => {
     const userId = req.params.userId;
     const posts = await Post.find({ user: userId })
       .sort({ createdAt: -1 })
-      .populate('user', 'username avatar');
+      .populate('user', 'username avatar avatarVariants')
     res.json({ success: true, posts });
   } catch (error) {
     console.error('GET USER POSTS ERROR:', error);
@@ -472,7 +498,7 @@ exports.getUserPosts = async (req, res) => {
 // @route   GET /api/posts/:postId
 exports.getPostById = async (req, res) => {
   try {
-    const post = await Post.findById(req.params.postId).populate('user', 'username avatar');
+    const post = await Post.findById(req.params.postId).populate('user', 'username avatar avatarVariants');
     if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
     res.json({ success: true, post });
   } catch (error) {

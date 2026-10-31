@@ -1,5 +1,6 @@
+
 // screens/AddPostScreen.js
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -21,23 +22,24 @@ import { useTheme } from '../context/ThemeContext';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
-import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system/legacy';
-import { FFmpegKit, ReturnCode } from 'ffmpeg-kit-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
-import { useFocusEffect, useRoute } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { computeAggregatedLimits } from '../utils/subscriptionHelpers';
 import { normalizeRwandaPhone } from '../utils/phoneNormalizer';
 import { useAuth, useUserLimits } from '../context/AuthContext';
 import Logo from '../assets/logos.png';
 import { useBottomSheet } from '../context/BottomSheetContext';
-import VideoUploader from '../components/VideoUploader';
+import VideoUploader, { readSelectedVideoMetadata } from '../components/VideoUploader';
 import VideoPost from '../components/VideoPost';
 import TopBar from '../components/topbar';
-import { getVideoMetaData } from '../utils/videoCompressor';
 import { getMaxMediaHeight } from '../utils/mediaLimits';
+import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
+import useScreenTutorial from '../hooks/useScreenTutorial';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width } = Dimensions.get('window');
 
@@ -46,6 +48,12 @@ const MIN_IMAGE_HEIGHT = 300;
 const MAX_UPLOAD_MEDIA_HEIGHT = 600;
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 const MAX_VIDEO_DURATION_S = 90;
+
+const ADDPOST_TUTORIAL_ID = 'addpost';
+const ADDPOST_TUTORIAL_DELAY_MS = 700;
+
+// ---- Tutorial config ---------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 const prepareUploadFile = async (image) => {
   if (Platform.OS !== 'web') return image;
@@ -86,7 +94,6 @@ const translations = {
     postSuccess: 'Your post has been created successfully!',
     postFailed: 'Failed to post. Please try again.',
     preview: 'Preview',
-    edit: 'Edit',
     negotiable: 'Negotiable',
     fixed: 'Fixed',
     postCreated: 'Success!',
@@ -145,6 +152,21 @@ const translations = {
     login: 'Login',
     cancel: 'Cancel',
     uploadingWait: 'Please wait while uploading',
+    // Tutorial
+    tStep1GalleryTitle: 'Choose a photo',
+    tStep1GalleryBody: 'Tap here to pick photos of your product from your gallery. Clear photos sell faster.',
+    tStep1CameraTitle: 'Take a photo',
+    tStep1CameraBody: 'Or tap here to open your camera and take a new photo right now.',
+    tStep2NameTitle: 'Product name',
+    tStep2NameBody: 'Enter a short, clear name (max 20 letters) so buyers instantly understand what you are selling.',
+    tStep2DescTitle: 'Description',
+    tStep2DescBody: 'Describe your product in 10–30 words: condition, size, features. Better descriptions sell faster.',
+    tStep3PriceTitle: 'Price',
+    tStep3PriceBody: 'Set a fair price in RWF. Tap the checkbox below it if the price is negotiable.',
+    tStep3PhoneTitle: 'Contact number',
+    tStep3PhoneBody: 'Add your phone number so buyers can call you. WhatsApp is optional.',
+    tStep4PostTitle: 'Publish',
+    tStep4PostBody: 'Review everything above, then tap here to publish your product to Shaaka.',
   },
   Kinyarwanda: {
     subtitle: 'Sangiza ibicuruzwa byawe',
@@ -177,7 +199,6 @@ const translations = {
     postSuccess: 'Gutangaza byakozwe neza!',
     postFailed: 'Gutangaza byanze. Ongera ugerageze.',
     preview: 'Reba',
-    edit: 'Hindura',
     negotiable: 'Cyiraganirwaho',
     fixed: 'Ntabwo cyiganirwaho',
     postCreated: 'Byakunze!',
@@ -236,6 +257,21 @@ const translations = {
     login: 'Injira',
     cancel: 'Oya',
     uploadingWait: 'Nyabuneka tegereza mugihe dutangaza ',
+    // Tutorial
+    tStep1GalleryTitle: 'Hitamo ifoto',
+    tStep1GalleryBody: "Kanda hano uhitore amafoto y'igicuruzwa cyawe mu bwo ubitsemo. Amafoto meza agurisha vuba.",
+    tStep1CameraTitle: 'Fata ifoto',
+    tStep1CameraBody: 'Cyangwa kanda hano ufungure kamera ufate ifoto nshya ako kanya.',
+    tStep2NameTitle: "Izina ry'igicuruzwa",
+    tStep2NameBody: "Andika izina rigufi kandi risobanutse (inyuguti 20 ntarengwa) kugira ngo abagura bamenye icyo ugurisha.",
+    tStep2DescTitle: 'Ibisobanuro',
+    tStep2DescBody: "Sobanura igicuruzwa cyawe mu magambo 10-30: imiterere, ingano, ibiranga. Ibisobanuro byiza bigurisha vuba.",
+    tStep3PriceTitle: 'Igiciro',
+    tStep3PriceBody: "Shyiraho igiciro cyiza mu RWF. Kanda ku kabuto kari munsi niba igishobora kugurwa.",
+    tStep3PhoneTitle: "Numero ya telefone",
+    tStep3PhoneBody: "Shyiraho nimero ya telefone kugira ngo abagura baguhamagare. WhatsApp ni ubyifuzo gusa.",
+    tStep4PostTitle: 'Tangaza',
+    tStep4PostBody: 'Genzura ibyose hejuru, hanyuma kanda hano utangaze igicuruzwa cyawe kuri Shaaka.',
   },
 };
 
@@ -286,7 +322,7 @@ const SimplePostPreview = ({ productName, images, theme }) => {
   return (
     <View style={[styles.simplePreviewContainer, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
       {hasImage ? (
-        <Image source={{ uri: images[0].uri }} style={styles.simplePreviewImage} resizeMode="cover" />
+        <Image source={normalizeImageSource({ uri: images[0].uri })} style={styles.simplePreviewImage} resizeMode="contain" />
       ) : (
         <View style={[styles.simplePreviewImage, styles.placeholderBg, { backgroundColor: theme.border }]}>
           <Ionicons name="image-outline" size={40} color={theme.textSecondary} />
@@ -305,17 +341,22 @@ const SimplePostPreview = ({ productName, images, theme }) => {
 // ---------- Main Component ----------
 const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => {
   const { theme, isDarkMode } = useTheme();
+  const isFocused = useIsFocused();
   const { height: windowHeight } = useWindowDimensions();
   const maxMediaHeight = getMaxMediaHeight(windowHeight);
   const { refreshUser } = useAuth();
   const adminLimits = useUserLimits();
   const t = translations[language];
   const { showBottomSheet } = useBottomSheet();
-  const route = useRoute();
-  const cropFlowPendingRef = useRef(false);
 
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [videoValidating, setVideoValidating] = useState(false);
+  const videoValidationRef = useRef(false);
+  const updateVideoValidation = useCallback((value) => {
+    videoValidationRef.current = value;
+    setVideoValidating(value);
+  }, []);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState('');
   const [formData, setFormData] = useState({
@@ -333,51 +374,6 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
   const [whatsappSameAsCall, setWhatsappSameAsCall] = useState(false);
 
   const [priceDisplay, setPriceDisplay] = useState('');
-
-  useEffect(() => {
-    const editedMediaUri = route.params?.editedMediaUri || route.params?.croppedImageUri;
-    if (!editedMediaUri) return;
-
-    const applyEditedMedia = async () => {
-      try {
-        if (route.params?.editedMediaType === 'video' || route.params?.mediaType === 'video') {
-          const editedVideo = route.params?.editedVideo;
-          if (!editedVideo) {
-            throw new Error('The edited video details could not be restored.');
-          }
-          setFormData(prev => ({
-            ...prev,
-            images: [],
-            video: { ...editedVideo, uri: editedMediaUri },
-          }));
-        } else {
-          const processedImage = await processImageForUpload(editedMediaUri);
-          setFormData(prev => ({ ...prev, images: [processedImage], video: null }));
-        }
-        setStep(2);
-        setError('');
-      } catch (err) {
-        console.warn('Edited media processing failed:', err);
-        showBottomSheet({
-          type: 'error',
-          title: 'Media Error',
-          message: err.code === 'IMAGE_COMPRESSION_LIMIT'
-            ? t.imageCompressionLimit
-            : err.message || 'Unable to process this media. Please try again.',
-          buttonText: 'OK',
-        });
-      } finally {
-        navigation.setParams?.({
-          editedMediaUri: undefined,
-          editedMediaType: undefined,
-          editedVideo: undefined,
-          croppedImageUri: undefined,
-          mediaType: undefined,
-        });
-      }
-    };
-    applyEditedMedia();
-  }, [route.params?.editedMediaUri, route.params?.croppedImageUri]);
 
   useEffect(() => {
     if (!formData.price) {
@@ -406,13 +402,29 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
   const [showHint, setShowHint] = useState(false);
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
+  // ---- Tutorial state ----
+  const [showTutorial, finishTutorial] = useScreenTutorial(
+    ADDPOST_TUTORIAL_ID,
+    isFocused && !loading && !limitsLoading,
+    ADDPOST_TUTORIAL_DELAY_MS,
+    step
+  );
+
+  // ---- Tutorial refs (new) ----
+  const step1CameraRef = useRef(null);
+  const step1GalleryRef = useRef(null);
+  const productNameContainerRef = useRef(null);
+  const descriptionContainerRef = useRef(null);
+  const priceContainerRef = useRef(null);
+  const phoneContainerRef = useRef(null);
+  const step4PostRef = useRef(null);
+
   const videoUploadDisabled =
     limitsLoading ||
     !allowVideoUpload ||
     videoUploadLimitPerDay <= 0 ||
     videosToday >= videoUploadLimitPerDay;
 
-  // Hard block: user has hit a posting limit / cooldown
   const limitReached =
     !limitsLoading &&
     (remainingPosts <= 0 ||
@@ -441,7 +453,6 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
       }
       return (await response.blob()).size;
     }
-
     const info = await FileSystem.getInfoAsync(uri);
     if (!info.exists || typeof info.size !== 'number') {
       throw new Error('Unable to get the processed image size.');
@@ -507,7 +518,6 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
     throw error;
   };
 
-  // ---------- Fetch limits and usage ----------
   const fetchLimitsAndUsage = async () => {
     try {
       await refreshUser();
@@ -558,15 +568,12 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
 
   useFocusEffect(
     React.useCallback(() => {
-      const returningFromCrop = cropFlowPendingRef.current;
-      cropFlowPendingRef.current = false;
-      if (!returningFromCrop) {
-        setFormData(initialFormState);
-        setPriceDisplay('');
-        setStep(1);
-        setError('');
-        setLoading(false);
-      }
+      setFormData(initialFormState);
+      setPriceDisplay('');
+      setStep(1);
+      setError('');
+      setLoading(false);
+      updateVideoValidation(false);
       fetchLimitsAndUsage();
       checkLoginAndPrompt();
     }, [])
@@ -638,76 +645,49 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
     setError('');
   };
 
-  const trimVideo = async (uri) => {
-    if (Platform.OS === 'web') {
-      throw new Error('Automatic video trimming is not supported on web. Please choose a video that is 1 minute 30 seconds or shorter.');
-    }
-
-    const outputUri = `${FileSystem.cacheDirectory}trimmed_${Date.now()}.mp4`;
-    const session = await FFmpegKit.execute(
-      `-i "${uri}" -t ${MAX_VIDEO_DURATION_S} -map 0:v:0 -map 0:a? -c copy -movflags +faststart "${outputUri}"`
-    );
-    if (!ReturnCode.isSuccess(await session.getReturnCode())) {
-      throw new Error('Video trimming failed. Please choose another video.');
-    }
-
-    const metadata = await getVideoMetaData(outputUri);
-    const duration = Number(metadata.duration);
-    if (!Number.isFinite(duration) || duration <= 0 || duration > MAX_VIDEO_DURATION_S) {
-      throw new Error('The video could not be trimmed to 1 minute 30 seconds.');
-    }
-    const fileInfo = await FileSystem.getInfoAsync(outputUri);
-
-    return {
-      uri: outputUri,
-      type: 'video/mp4',
-      name: `post_${Date.now()}.mp4`,
-      ...metadata,
-      duration,
-      size: Number(fileInfo.size) || 0,
-    };
-  };
-
   const handleVideoChange = async (video, errorMessage) => {
     if (errorMessage) {
+      setFormData(prev => ({ ...prev, video: null }));
       setError(errorMessage);
       return;
     }
-    if (video) {
+    if (!video) {
+      setFormData(prev => ({ ...prev, video: null }));
+      setError('');
+      return;
+    }
+
+    updateVideoValidation(true);
+    try {
+      const videoDuration = Number(video.duration);
+      if (!Number.isFinite(videoDuration) || videoDuration <= 0) {
+        throw new Error('Unsupported video. Please select a valid video with a readable duration.');
+      }
+
       const videoHeight = Number(video.height);
       const minimumVideoHeight = Math.min(MIN_IMAGE_HEIGHT, maxMediaHeight);
       if (!Number.isFinite(videoHeight) || videoHeight < minimumVideoHeight) {
-        setError(t.videoTooShort.replace('{min}', minimumVideoHeight));
-        return;
+        throw new Error(t.videoTooShort.replace('{min}', minimumVideoHeight));
       }
 
-      let videoDuration = Number(video.duration);
-      if (!Number.isFinite(videoDuration) || videoDuration <= 0) {
-        const metadata = await getVideoMetaData(video.uri);
-        videoDuration = Number(metadata.duration);
-        video = { ...video, ...metadata, duration: videoDuration };
-      }
+      video = { ...video, duration: videoDuration };
       if (videoDuration > MAX_VIDEO_DURATION_S) {
-        setLoading(true);
-        try {
-          video = { ...video, ...(await trimVideo(video.uri)) };
-        } catch (e) {
-          setError(e.message || 'Video trimming failed. Please try another video.');
-          return;
-        } finally {
-          setLoading(false);
-        }
+        throw new Error('Video must be 1 minute 30 seconds or shorter. Please select a shorter video.');
       }
 
       const fileInfo = video.size ? null : await FileSystem.getInfoAsync(video.uri);
       const videoSize = Number(video.size) || Number(fileInfo?.size) || 0;
       if (videoSize > MAX_VIDEO_BYTES) {
-        setError('Video exceeds the 50 MB size limit. Please choose a smaller video.');
-        return;
+        throw new Error('Video exceeds the 50 MB size limit. Please choose a smaller video.');
       }
+      setFormData(prev => ({ ...prev, video, images: [] }));
+      setError('');
+    } catch (error) {
+      setFormData(prev => ({ ...prev, video: null }));
+      setError(error.message || 'Unsupported video. Please select a valid video with a readable duration.');
+    } finally {
+      updateVideoValidation(false);
     }
-    setFormData(prev => ({ ...prev, video, images: video ? [] : prev.images }));
-    setError('');
   };
 
   const handlePriceChange = (text) => {
@@ -751,35 +731,40 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
 
   const countWords = (text) => text.trim().split(/\s+/).filter(w => w.length > 0).length;
 
-  const openMediaEditor = (media) => {
-    if (!media?.uri) return;
-    cropFlowPendingRef.current = true;
-    navigation.navigate('EditScreen', {
-      imageUri: media.uri,
-      mediaType: media.type?.startsWith('video/') || media.mediaType === 'video' ? 'video' : 'image',
-      video: media.type?.startsWith('video/') || media.mediaType === 'video' ? media : undefined,
-      language,
-    });
-  };
-
   const handlePickedImage = async (asset) => {
     try {
-      const processed = await processImageForUpload(asset.uri, asset.exif);
-      setFormData(prev => ({ ...prev, images: [processed], video: null }));
+      const dimensions = await getImageDimensions(asset.uri);
+      let fileSize = 0;
+      if (Platform.OS !== 'web') {
+        try {
+          const info = await FileSystem.getInfoAsync(asset.uri);
+          if (info.exists) fileSize = info.size;
+        } catch (e) {}
+      }
+
+      const newImage = {
+        uri: asset.uri,
+        type: 'image/jpeg',
+        name: asset.fileName || `post_${Date.now()}.jpg`,
+        width: dimensions.width,
+        height: dimensions.height,
+        size: fileSize,
+        originalUri: asset.uri,
+        exif: asset.exif,
+      };
+
+      setFormData(prev => ({ ...prev, images: [newImage], video: null }));
     } catch (err) {
-      console.warn('Image processing failed:', err);
+      console.warn('Image picking failed:', err);
       showBottomSheet({
         type: 'error',
         title: 'Image Error',
-        message: err.code === 'IMAGE_COMPRESSION_LIMIT'
-          ? t.imageCompressionLimit
-          : 'Unable to process this image. Please try another image.',
+        message: 'Unable to load this image. Please try another image.',
         buttonText: 'OK',
       });
     }
   };
 
-  // ---------- Image pickers ----------
   const selectMultipleImages = async () => {
     if (limitReached) {
       showBottomSheet({
@@ -884,12 +869,19 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
     setFormData(prev => ({ ...prev, images: newImages }));
   };
 
-  // ---------- Validation ----------
   const validateStep = () => {
     switch (step) {
       case 1:
+        if (videoValidationRef.current) {
+          setError('Please wait while the video is being validated.');
+          return false;
+        }
         if (formData.images.length === 0 && !formData.video) {
           setError(t.selectMedia);
+          return false;
+        }
+        if (formData.video && (!Number.isFinite(Number(formData.video.duration)) || Number(formData.video.duration) <= 0)) {
+          setError('Unsupported video. Please select a valid video with a readable duration.');
           return false;
         }
         return true;
@@ -922,8 +914,11 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
     }
   };
 
-  // ---------- Navigation & Post ----------
   const nextStep = () => {
+    if (videoValidationRef.current) {
+      setError('Please wait while the video is being validated.');
+      return;
+    }
     if (limitsLoading) { setError(t.loadingLimits); return; }
     if (postCooldownHours > 0) {
       showBottomSheet({
@@ -966,6 +961,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
   const getToken = async () => await AsyncStorage.getItem('userToken');
 
   const handlePost = async () => {
+    if (loading || videoValidationRef.current) return;
     if (!validateStep()) return;
     if (limitsLoading) { setError(t.loadingLimits); return; }
     if (postCooldownHours > 0) {
@@ -1015,18 +1011,6 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
       return;
     }
 
-    try {
-      for (const image of formData.images) {
-        if (image.size && image.size > MAX_COMPRESSED_BYTES) {
-          setError('Image exceeds the 150 KB limit.');
-          return;
-        }
-      }
-    } catch (validationError) {
-      setError(validationError.message || t.mediaTooTall.replace('{max}', maxMediaHeight));
-      return;
-    }
-
     setLoading(true);
     setUploadProgress(0);
 
@@ -1043,22 +1027,29 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
         return;
       }
 
-      const imagesForUpload = await Promise.all(formData.images.map(async (image) => {
-        const dimensions = await getImageDimensions(image.uri);
-        if (dimensions.height <= MAX_UPLOAD_MEDIA_HEIGHT) return image;
-
-        return processImageForUpload(image.uri, null, MAX_UPLOAD_MEDIA_HEIGHT);
+      const imagesForUpload = await Promise.all(formData.images.map(async (image, idx) => {
+        try {
+          return await processImageForUpload(image.uri, image.exif || null, MAX_UPLOAD_MEDIA_HEIGHT);
+        } catch (err) {
+          if (err.code === 'IMAGE_COMPRESSION_LIMIT') {
+            throw new Error(`Image ${idx + 1} could not be compressed below 150 KB. Please edit or choose a smaller image.`);
+          }
+          throw err;
+        }
       }));
+
       let videoForUpload = formData.video;
       if (videoForUpload) {
-        let duration = Number(videoForUpload.duration);
-        if (!Number.isFinite(duration) || duration <= 0) {
-          const metadata = await getVideoMetaData(videoForUpload.uri);
-          duration = Number(metadata.duration);
-          videoForUpload = { ...videoForUpload, ...metadata, duration };
+        let metadata;
+        try {
+          metadata = await readSelectedVideoMetadata(videoForUpload.uri);
+        } catch {
+          throw new Error('Unsupported video. Please select a valid video with a readable duration.');
         }
+        const duration = Number(metadata.duration);
+        videoForUpload = { ...videoForUpload, ...metadata, duration };
         if (duration > MAX_VIDEO_DURATION_S) {
-          videoForUpload = { ...videoForUpload, ...(await trimVideo(videoForUpload.uri)) };
+          throw new Error('Video must be 1 minute 30 seconds or shorter. Please select a shorter video.');
         }
 
         const fileInfo = videoForUpload.size
@@ -1098,24 +1089,6 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
         }
         const videoUpload = await prepareUploadFile(videoForUpload);
         fd.append('video', videoUpload, videoForUpload.name || `video_${Date.now()}.mp4`);
-        fd.append('videoDuration', String(videoForUpload.duration || 0));
-        if (Platform.OS !== 'web') {
-          try {
-            const thumbnail = await VideoThumbnails.getThumbnailAsync(videoForUpload.uri, {
-              time: 1000,
-              quality: 0.7,
-            });
-            const uploadThumbnail = await prepareUploadFile({
-              uri: thumbnail.uri,
-              name: 'video-thumbnail.jpg',
-              type: 'image/jpeg',
-            });
-            if (!uploadThumbnail) throw new Error('Unable to prepare the video thumbnail for upload.');
-            fd.append('thumbnail', uploadThumbnail, 'video-thumbnail.jpg');
-          } catch (thumbnailError) {
-            console.warn('Could not generate a video thumbnail for upload:', thumbnailError);
-          }
-        }
       }
       if (formData.videoLink.trim()) {
         fd.append('videoLink', formData.videoLink.trim());
@@ -1178,6 +1151,61 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
     }
   };
 
+  // ---- Tutorial steps for the current step ----
+  const tutorialSteps = useMemo(() => {
+    if (loading || limitsLoading) return [];
+    const steps = [];
+
+    if (step === 1) {
+      steps.push(
+        {
+          getTarget: () => step1GalleryRef.current,
+          title: t.tStep1GalleryTitle,
+          body: t.tStep1GalleryBody,
+        },
+        {
+          getTarget: () => step1CameraRef.current,
+          title: t.tStep1CameraTitle,
+          body: t.tStep1CameraBody,
+        }
+      );
+    } else if (step === 2) {
+      steps.push(
+        {
+          getTarget: () => productNameContainerRef.current,
+          title: t.tStep2NameTitle,
+          body: t.tStep2NameBody,
+        },
+        {
+          getTarget: () => descriptionContainerRef.current,
+          title: t.tStep2DescTitle,
+          body: t.tStep2DescBody,
+        }
+      );
+    } else if (step === 3) {
+      steps.push(
+        {
+          getTarget: () => priceContainerRef.current,
+          title: t.tStep3PriceTitle,
+          body: t.tStep3PriceBody,
+        },
+        {
+          getTarget: () => phoneContainerRef.current,
+          title: t.tStep3PhoneTitle,
+          body: t.tStep3PhoneBody,
+        }
+      );
+    } else if (step === 4) {
+      steps.push({
+        getTarget: () => step4PostRef.current,
+        title: t.tStep4PostTitle,
+        body: t.tStep4PostBody,
+      });
+    }
+
+    return steps;
+  }, [step, t, loading, limitsLoading]);
+
   // ---------- Step indicator ----------
   const renderStepIndicator = () => (
     <View style={styles.stepIndicatorContainer}>
@@ -1205,7 +1233,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
       <View style={[styles.step4Container, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
         {previewImage ? (
           <View style={styles.step4HeroWrap}>
-            <Image source={{ uri: previewImage }} style={styles.step4HeroImage} resizeMode="cover" />
+            <Image source={normalizeImageSource({ uri: previewImage })} style={styles.step4HeroImage} resizeMode="contain" />
             <View style={styles.step4HeroShade} />
             <TouchableOpacity style={styles.step4FavoriteButton} accessibilityRole="button" accessibilityLabel="Save preview">
               <Ionicons name="heart-outline" size={22} color="#555" />
@@ -1265,7 +1293,12 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
               <Text style={[styles.step4PriceLabel, { color: theme.textSecondary }]}>Price</Text>
               <Text style={[styles.step4Price, { color: theme.text }]}>{formattedPrice}</Text>
             </View>
-            <TouchableOpacity style={[styles.step4PostButton, { backgroundColor: theme.accent }]} onPress={handlePost} disabled={loading}>
+            <TouchableOpacity
+              ref={step4PostRef}
+              style={[styles.step4PostButton, { backgroundColor: theme.accent }]}
+              onPress={handlePost}
+              disabled={loading || videoValidating}
+            >
               {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.step4PostButtonText}>{t.post}</Text>}
             </TouchableOpacity>
           </View>
@@ -1293,29 +1326,13 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
 
             <View style={styles.step3MediaHeader}>
               <Text style={[styles.step3SectionTitle, { color: theme.text }]}>{t.addImages}</Text>
-              <TouchableOpacity
-                style={[
-                  styles.step3HeaderEditButton,
-                  {
-                    borderColor: theme.border,
-                    backgroundColor: theme.cardBackground,
-                    opacity: formData.images.length || formData.video ? 1 : 0.45,
-                  },
-                ]}
-                onPress={() => openMediaEditor(formData.video || formData.images[0])}
-                disabled={!formData.images.length && !formData.video}
-                accessibilityRole="button"
-                accessibilityLabel="Edit selected media"
-              >
-                <Ionicons name="create-outline" size={16} color={theme.text} />
-                <Text style={[styles.step3HeaderEditText, { color: theme.text }]}>Edit</Text>
-              </TouchableOpacity>
             </View>
             <Text style={[styles.step3SectionSubtitle, { color: theme.textSecondary }]}>
               {t.maxImages.replace('{max}', maxImagesPerPost)}
             </Text>
             <View style={styles.step3ImageButtons}>
               <TouchableOpacity
+                ref={step1CameraRef}
                 style={[
                   styles.step3ImageButton,
                   {
@@ -1331,6 +1348,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
                 <Text style={[styles.step3ImageButtonText, { color: theme.text }]}>{t.takePhoto}</Text>
               </TouchableOpacity>
               <TouchableOpacity
+                ref={step1GalleryRef}
                 style={[
                   styles.step3ImageButton,
                   {
@@ -1349,6 +1367,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
             <VideoUploader
               value={formData.video}
               onChange={handleVideoChange}
+              onValidationChange={updateVideoValidation}
               videoLink={formData.videoLink}
               onVideoLinkChange={(videoLink) => handleChange('videoLink', videoLink)}
               theme={theme}
@@ -1359,12 +1378,8 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
                 <View style={styles.step3ImagePreviewContainer}>
                   {formData.images.map((item, index) => (
                     <View key={index} style={styles.step3ImagePreviewWrapper}>
-                      <Image source={{ uri: item.uri }} style={styles.step3ImagePreview} />
+                      <Image source={normalizeImageSource({ uri: item.uri })} style={styles.step3ImagePreview} resizeMode="contain" />
                       <View style={styles.step3ImageActions}>
-                        <TouchableOpacity style={styles.step3EditImageButton} onPress={() => openMediaEditor(item)}>
-                          <Ionicons name="create-outline" size={14} color={theme.text} />
-                          <Text style={[styles.step3EditImageText, { color: theme.text }]}>Edit</Text>
-                        </TouchableOpacity>
                         <TouchableOpacity style={styles.step3RemoveImageButton} onPress={() => removeImage(index)}>
                           <Ionicons name="close-circle" size={24} color="#d87428" />
                         </TouchableOpacity>
@@ -1384,7 +1399,10 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
           <>
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.productName}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}>
+              <View
+                ref={productNameContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}
+              >
                 <Ionicons name="pricetag-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={productNameRef}
@@ -1404,7 +1422,10 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
             </View>
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.description}</Text>
-              <View style={[styles.textAreaContainer, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}>
+              <View
+                ref={descriptionContainerRef}
+                style={[styles.textAreaContainer, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}
+              >
                 <TextInput
                   ref={descriptionRef}
                   style={[styles.textArea, { color: theme.text }]}
@@ -1456,7 +1477,10 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
             </View>
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.price}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}>
+              <View
+                ref={priceContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}
+              >
                 <Ionicons name="cash-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={priceRef}
@@ -1482,7 +1506,10 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
             <View style={[styles.divider, { backgroundColor: theme.border }]} />
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.contactNumberCall}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}>
+              <View
+                ref={phoneContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border, backgroundColor: theme.cardBackground }]}
+              >
                 <Ionicons name="call-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={phoneRef}
@@ -1557,7 +1584,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          <Image source={Logo} style={styles.logo} />
+          <Image source={normalizeImageSource(Logo)} style={styles.logo} />
 
           <View style={styles.header}>
             {step === 1 ? (
@@ -1631,17 +1658,26 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
           )}
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* ============ ADDPOST STEP TUTORIAL ============ */}
+      <ScreenTutorialOverlay
+        visible={showTutorial}
+        steps={tutorialSteps}
+        isDarkMode={isDarkMode}
+        language={language}
+        onFinish={finishTutorial}
+        padding={5}
+        dimOpacity={0}
+      />
     </View>
   );
 };
 
-// ---------- Styles ----------
+// ---------- Styles (unchanged) ----------
 const styles = StyleSheet.create({
   container: { flex: 1 },
 
-  uploadOverlay: {
-    flex: 1,
-  },
+  uploadOverlay: { flex: 1 },
   uploadOverlayContent: {
     flex: 1,
     justifyContent: 'center',
@@ -1654,10 +1690,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: 24,
   },
-  uploadProgressText: {
-    fontSize: 18,
-    fontWeight: '700',
-  },
+  uploadProgressText: { fontSize: 18, fontWeight: '700' },
   dancingDotsRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1665,11 +1698,7 @@ const styles = StyleSheet.create({
     gap: 10,
     height: 24,
   },
-  dancingDot: {
-    width: 11,
-    height: 11,
-    borderRadius: 6,
-  },
+  dancingDot: { width: 11, height: 11, borderRadius: 6 },
 
   keyboardView: { flex: 1 },
   scrollContent: {
@@ -1677,14 +1706,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingBottom: 20,
   },
-  scrollContentFullWidth: {
-    paddingHorizontal: 0,
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
+  scrollContentFullWidth: { paddingHorizontal: 0 },
+  buttonRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
   logo: { width: 80, height: 80, alignSelf: 'center', marginTop: 12 },
   header: { alignItems: 'center', marginBottom: 20 },
   subtitle: { fontSize: 13, textAlign: 'center' },
@@ -1741,16 +1764,6 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   step3SectionTitle: { fontSize: 18, fontWeight: '600' },
-  step3HeaderEditButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    borderWidth: 1,
-    borderRadius: 18,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-  },
-  step3HeaderEditText: { fontSize: 15, fontWeight: '600' },
   step3SectionSubtitle: { fontSize: 12, marginBottom: 16 },
   step3ImageButtons: {
     flexDirection: 'row',
@@ -1777,6 +1790,7 @@ const styles = StyleSheet.create({
     width: width * 0.38,
     height: width * 0.38,
     borderRadius: 12,
+    backgroundColor: '#000',
   },
   step3ImageActions: {
     position: 'absolute',
@@ -1784,22 +1798,8 @@ const styles = StyleSheet.create({
     right: 8,
     bottom: 8,
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-end',
     alignItems: 'center',
-  },
-  step3EditImageButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    color: '#fff',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 999,
-    backgroundColor: '#dddd',
-  },
-  step3EditImageText: {
-    fontSize: 11,
-    fontWeight: '600',
   },
   step3RemoveImageButton: {
     position: 'relative',
@@ -1820,7 +1820,7 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 0,
     borderBottomRightRadius: 0,
   },
-  step4HeroWrap: { height: 220, position: 'relative' },
+  step4HeroWrap: { height: 220, position: 'relative', backgroundColor: '#000' },
   step4HeroImage: { width: '100%', height: '100%' },
   step4HeroShade: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.04)' },
   step4FavoriteButton: {
@@ -1888,7 +1888,7 @@ const styles = StyleSheet.create({
   step4PostButtonText: { color: '#ffffff', fontSize: 16, fontWeight: '600' },
 
   simplePreviewContainer: { borderRadius: 12, overflow: 'hidden', borderWidth: 0 },
-  simplePreviewImage: { width: '100%', height: 200 },
+  simplePreviewImage: { width: '100%', height: 200, backgroundColor: '#000' },
   placeholderBg: { justifyContent: 'center', alignItems: 'center' },
   simplePreviewInfo: { padding: 12 },
   simplePreviewTitle: { fontSize: 18, fontWeight: '600', marginBottom: 4 },

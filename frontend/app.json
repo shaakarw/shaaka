@@ -34,6 +34,7 @@
       ],
       "@maplibre/maplibre-react-native",
       "expo-asset",
+      "./plugins/withAndroidEmulatorNetworkSecurity",
       [
         "expo-media-library",
         {
@@ -43,15 +44,6 @@
           "granularPermissions": [
             "photo"
           ]
-        }
-      ],
-      [
-        "expo-splash-screen",
-        {
-          "image": "./assets/icon.png",
-          "imageWidth": 200,
-          "resizeMode": "contain",
-          "backgroundColor": "#ffffff"
         }
       ],
       "expo-video",

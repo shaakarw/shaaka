@@ -1,5 +1,6 @@
+
 // screens/ForgotPasswordScreen.js
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -16,6 +17,7 @@ import {
   Modal,
   Animated,
 } from 'react-native';
+import { useIsFocused } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext';
 import { Ionicons } from '@expo/vector-icons';
 import { isValidRwandaPhone, normalizeRwandaPhone } from '../utils/phoneNormalizer';
@@ -23,8 +25,18 @@ import axios from 'axios';
 import { BASE_URL } from '../constants';
 import SharedBottomNav from '../components/SharedBottomNav';
 import Logo from '../assets/logos.png';
+import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
+import useScreenTutorial from '../hooks/useScreenTutorial';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 const { width } = Dimensions.get('window');
+
+// ---- Tutorial config ---------------------------------------------------------
+const FORGOT_TUTORIAL_ID = 'forgotpassword';
+const FORGOT_TUTORIAL_DELAY_MS = 700;
+
+// -----------------------------------------------------------------------------
 
 const translations = {
   English: {
@@ -58,7 +70,6 @@ const translations = {
     successButton: 'Go to Login',
     rememberPassword: 'I remember my password?',
     login: 'Login',
-   
     register: 'Register',
     checking: 'Verifying…',
     step2HintTitle: 'Recovery number',
@@ -73,6 +84,17 @@ const translations = {
       'Make it strong and something you will remember.',
       'Almost done — reset your access!',
     ],
+    // Tutorial
+    tStep1PhoneTitle: 'Your phone number',
+    tStep1PhoneBody: 'Enter the phone number you registered with (starts with 07).',
+    tStep1UserTitle: 'Your username',
+    tStep1UserBody: 'Enter the username tied to this phone. We use both to verify it is you.',
+    tStep2RecoveryTitle: 'Recovery number',
+    tStep2RecoveryBody: 'Enter the recovery number you set during registration. This proves the account is yours.',
+    tStep3PassTitle: 'New password',
+    tStep3PassBody: 'Choose a new password with at least 4 characters. Make it strong.',
+    tStep3ConfirmTitle: 'Confirm password',
+    tStep3ConfirmBody: 'Type the new password again so we can make sure it matches.',
   },
   Kinyarwanda: {
     title: 'Iyibutsa Ijambo banga',
@@ -105,7 +127,6 @@ const translations = {
     successButton: 'Kwinjira',
     rememberPassword: 'Nibuka ijambo banga ryanjye?',
     login: 'Injira',
-   
     register: 'Iyandikishe',
     checking: 'Igenzura…',
     step2HintTitle: 'Numero yo kwibutsa',
@@ -120,11 +141,23 @@ const translations = {
       'Rigire rikomeye kandi wibuke.',
       'Birarangiye — tangira gukoresha!',
     ],
+    // Tutorial
+    tStep1PhoneTitle: 'Nimero ya telefone',
+    tStep1PhoneBody: 'Andika nimero ya telefone wiyandikishije (itangira na 07).',
+    tStep1UserTitle: 'Izina ry’ukoresha',
+    tStep1UserBody: 'Andika izina rihuye niyi numero. Tukoresha byombi kugenzura ko ari wowe.',
+    tStep2RecoveryTitle: 'Numero yo kwibutsa',
+    tStep2RecoveryBody: 'Andika numero yo kwibutsa wasize wiyandikisha. Iri ni igihamya ko iyi konti ni iyawe.',
+    tStep3PassTitle: 'Ijambo banga rishya',
+    tStep3PassBody: 'Hitamo ijambo banga rishya rifite nibura inyuguti 4. Rigire rikomeye.',
+    tStep3ConfirmTitle: 'Emeza ijambo banga',
+    tStep3ConfirmBody: 'Ongera wandike ijambo banga rishya kugira ngo turebe ko bihuye.',
   },
 };
 
 const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
-  const { theme } = useTheme();
+  const { theme, isDarkMode } = useTheme();
+  const isFocused = useIsFocused();
   const t = translations[language];
 
   const [step, setStep] = useState(1);
@@ -154,6 +187,21 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
   const recoveryRef = useRef(null);
   const newPasswordRef = useRef(null);
   const confirmRef = useRef(null);
+
+  // ---- Tutorial refs ----
+  const phoneContainerRef = useRef(null);
+  const usernameContainerRef = useRef(null);
+  const recoveryContainerRef = useRef(null);
+  const newPasswordContainerRef = useRef(null);
+  const confirmContainerRef = useRef(null);
+
+  // ---- Tutorial state ----
+  const [showTutorial, finishTutorial] = useScreenTutorial(
+    FORGOT_TUTORIAL_ID,
+    isFocused && !loading,
+    FORGOT_TUTORIAL_DELAY_MS,
+    step
+  );
 
   useEffect(() => {
     if (!error) return;
@@ -203,7 +251,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
     };
   }, [step, t.step2HintMessages, t.step3HintMessages, fadeAnim]);
 
-  // Validation helpers
   const validatePhone = () => {
     const valid = formData.phone && isValidRwandaPhone(formData.phone);
     if (!valid) {
@@ -234,7 +281,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
     return true;
   };
 
-  // Input handlers
   const handlePhoneChange = (text) => {
     let digits = text.replace(/\D/g, '');
     if (!digits.startsWith('07')) digits = '07';
@@ -258,7 +304,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
     setRecoveryStatus({ checking: false, valid: false, message: '' });
   };
 
-  // Step 1: just store, no API call
   const step1Next = () => {
     if (!validatePhone() || !validateUsername()) {
       setError(t.fillPhoneUsername);
@@ -267,7 +312,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
     return true;
   };
 
-  // Step 2: call verify-user with phone+recovery, then verify-username
   const step2Next = async () => {
     if (!validateRecovery()) {
       setError(t.fillRecovery);
@@ -276,7 +320,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
     setLoading(true);
     setError('');
     try {
-      // First verify phone + recovery number
       const verifyRes = await axios.post(`${BASE_URL}/api/auth/verify-user`, {
         phone: formData.phone,
         idNumber: formData.recoveryNumber,
@@ -284,7 +327,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
       const userId = verifyRes.data.userId;
       setVerifiedUserId(userId);
 
-      // Then verify that the username belongs to this account
       await axios.post(`${BASE_URL}/api/auth/verify-username`, {
         userId,
         username: formData.username,
@@ -306,7 +348,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
     }
   };
 
-  // Step 3: reset password
   const resetPassword = async () => {
     if (!formData.newPassword || !formData.confirmPassword) {
       setError(t.fillPasswords);
@@ -395,6 +436,48 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
     </View>
   );
 
+  // ---- Tutorial steps for the current step ----
+  const tutorialSteps = useMemo(() => {
+    if (loading) return [];
+    const steps = [];
+
+    if (step === 1) {
+      steps.push(
+        {
+          getTarget: () => phoneContainerRef.current,
+          title: t.tStep1PhoneTitle,
+          body: t.tStep1PhoneBody,
+        },
+        {
+          getTarget: () => usernameContainerRef.current,
+          title: t.tStep1UserTitle,
+          body: t.tStep1UserBody,
+        }
+      );
+    } else if (step === 2) {
+      steps.push({
+        getTarget: () => recoveryContainerRef.current,
+        title: t.tStep2RecoveryTitle,
+        body: t.tStep2RecoveryBody,
+      });
+    } else if (step === 3) {
+      steps.push(
+        {
+          getTarget: () => newPasswordContainerRef.current,
+          title: t.tStep3PassTitle,
+          body: t.tStep3PassBody,
+        },
+        {
+          getTarget: () => confirmContainerRef.current,
+          title: t.tStep3ConfirmTitle,
+          body: t.tStep3ConfirmBody,
+        }
+      );
+    }
+
+    return steps;
+  }, [step, t, loading]);
+
   const renderStepContent = () => {
     switch (step) {
       case 1:
@@ -402,7 +485,10 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
           <>
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.phoneLabel}</Text>
-              <View style={[styles.inputContainer, { borderColor: phoneStatus.message && !phoneStatus.valid ? '#d87428' : theme.border }]}>
+              <View
+                ref={phoneContainerRef}
+                style={[styles.inputContainer, { borderColor: phoneStatus.message && !phoneStatus.valid ? '#d87428' : theme.border }]}
+              >
                 <Ionicons name="call-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={phoneRef}
@@ -429,7 +515,10 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
 
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.usernameLabel}</Text>
-              <View style={[styles.inputContainer, { borderColor: usernameStatus.message && !usernameStatus.valid ? '#d87428' : theme.border }]}>
+              <View
+                ref={usernameContainerRef}
+                style={[styles.inputContainer, { borderColor: usernameStatus.message && !usernameStatus.valid ? '#d87428' : theme.border }]}
+              >
                 <Ionicons name="person-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={usernameRef}
@@ -458,7 +547,10 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
         return (
           <View style={styles.inputGroup}>
             <Text style={[styles.label, { color: theme.text }]}>{t.recoveryLabel}</Text>
-            <View style={[styles.inputContainer, { borderColor: recoveryStatus.message && !recoveryStatus.valid ? '#d87428' : theme.border }]}>
+            <View
+              ref={recoveryContainerRef}
+              style={[styles.inputContainer, { borderColor: recoveryStatus.message && !recoveryStatus.valid ? '#d87428' : theme.border }]}
+            >
               <Ionicons name="keypad-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
               <TextInput
                 ref={recoveryRef}
@@ -486,7 +578,10 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
           <>
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.newPasswordLabel}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+              <View
+                ref={newPasswordContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border }]}
+              >
                 <Ionicons name="lock-closed-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={newPasswordRef}
@@ -507,7 +602,10 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
             </View>
             <View style={styles.inputGroup}>
               <Text style={[styles.label, { color: theme.text }]}>{t.confirmPasswordLabel}</Text>
-              <View style={[styles.inputContainer, { borderColor: theme.border }]}>
+              <View
+                ref={confirmContainerRef}
+                style={[styles.inputContainer, { borderColor: theme.border }]}
+              >
                 <Ionicons name="lock-closed-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
                   ref={confirmRef}
@@ -537,17 +635,17 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['top','left','right']}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={styles.scrollContainer}>
-          <Image source={Logo} style={[styles.logos, { width: 100, height: 95 }]} />
+          <Image source={normalizeImageSource(Logo)} style={[styles.logos, { width: 100, height: 95 }]} />
           <View style={styles.header}>
             <Text style={[styles.title, { color: theme.text }]}>{t.title}</Text>
             {step === 1 ? (
               <Text style={[styles.subtitle, { color: theme.textSecondary }]}>{t.subtitle}</Text>
             ) : showHint ? (
               <Animated.View style={[styles.stepHint, { opacity: fadeAnim }]}>
-                <Text style={[styles.stepHintTitle, { color: theme.text }]}> 
+                <Text style={[styles.stepHintTitle, { color: theme.text }]}>
                   {step === 2 ? t.step2HintTitle : t.step3HintTitle}
                 </Text>
-                <Text style={[styles.stepHintText, { color: theme.textSecondary }]}> 
+                <Text style={[styles.stepHintText, { color: theme.textSecondary }]}>
                   {step === 2 ? t.step2HintMessages[hintIndex] : t.step3HintMessages[hintIndex]}
                 </Text>
               </Animated.View>
@@ -592,14 +690,12 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
               )}
             </View>
 
-            {/* Bottom links */}
             <View style={styles.linksContainer}>
               <TouchableOpacity onPress={() => navigation.navigate('Login')}>
                 <Text style={[styles.linkText, { color: theme.accent }]}>
                   {t.rememberPassword} <Text style={[{ fontWeight: '600' },{ color: theme.text }]}>{t.login}</Text>
                 </Text>
               </TouchableOpacity>
-              
             </View>
           </View>
         </ScrollView>
@@ -627,6 +723,17 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
           </View>
         </View>
       </Modal>
+
+      {/* ============ FORGOT PASSWORD STEP TUTORIAL ============ */}
+      <ScreenTutorialOverlay
+        visible={showTutorial}
+        steps={tutorialSteps}
+        isDarkMode={isDarkMode}
+        language={language}
+        onFinish={finishTutorial}
+        padding={5}
+        dimOpacity={0}
+      />
     </SafeAreaView>
   );
 };
@@ -639,10 +746,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingVertical: 40,
   },
-  logos: {
-    marginTop: 10,
-    alignSelf: 'center',
-  },
+  logos: { marginTop: 10, alignSelf: 'center' },
   header: { alignItems: 'center', marginBottom: 20 },
   stepHint: { marginTop: 50, alignItems: 'center', paddingHorizontal: 8, position: 'absolute' },
   stepHintTitle: { fontSize: 14, fontWeight: '700', marginBottom: 4 },
@@ -683,11 +787,7 @@ const styles = StyleSheet.create({
   buttonText: { fontSize: 16, fontWeight: '600' },
   nextButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   resetButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
-  linksContainer: {
-    marginTop: 32,
-    alignItems: 'center',
-    gap: 10,
-  },
+  linksContainer: { marginTop: 32, alignItems: 'center', gap: 10 },
   linkText: { fontSize: 14 },
   modalOverlay: {
     flex: 1,
@@ -695,12 +795,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.45)',
   },
-  modalContent: {
-    width: width * 0.85,
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-  },
+  modalContent: { width: width * 0.85, borderRadius: 16, padding: 20, borderWidth: 1 },
   modalTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 8, textAlign: 'center' },
   modalText: { fontSize: 14, lineHeight: 20, textAlign: 'center', marginBottom: 16 },
   modalButton: { paddingVertical: 12, borderRadius: 8, alignItems: 'center' },

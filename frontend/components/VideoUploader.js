@@ -3,8 +3,64 @@ import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, StyleSheet,
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { getVideoMetaData } from '../utils/videoCompressor';
+import { requestVideoBackground } from '../services/videoBackgroundService';
 
-const VideoUploader = ({ value, onChange, videoLink, onVideoLinkChange, theme, disabled = false, disabledMessage = 'Video uploads are not allowed for this account. Please contact the admin for support.' }) => {
+const UNSUPPORTED_VIDEO_MESSAGE = 'Unsupported video. Please select a valid video with a readable duration.';
+
+const readBrowserVideoMetadata = uri => new Promise((resolve, reject) => {
+  const video = document.createElement('video');
+  let timeout;
+  const cleanup = () => {
+    clearTimeout(timeout);
+    video.onloadedmetadata = null;
+    video.onerror = null;
+    video.removeAttribute('src');
+    video.load();
+  };
+  video.onloadedmetadata = () => {
+    const metadata = {
+      duration: video.duration,
+      width: video.videoWidth,
+      height: video.videoHeight,
+    };
+    cleanup();
+    resolve(metadata);
+  };
+  video.onerror = () => {
+    cleanup();
+    reject(new Error(UNSUPPORTED_VIDEO_MESSAGE));
+  };
+  timeout = setTimeout(() => {
+    cleanup();
+    reject(new Error(UNSUPPORTED_VIDEO_MESSAGE));
+  }, 15000);
+  video.preload = 'metadata';
+  video.src = uri;
+  video.load();
+});
+
+export const readSelectedVideoMetadata = async uri => {
+  let metadata;
+  try {
+    metadata = Platform.OS === 'web'
+      ? await readBrowserVideoMetadata(uri)
+      : await getVideoMetaData(uri);
+  } catch {
+    throw new Error(UNSUPPORTED_VIDEO_MESSAGE);
+  }
+  const duration = Number(metadata.duration);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    throw new Error(UNSUPPORTED_VIDEO_MESSAGE);
+  }
+  const width = Number(metadata.width);
+  const height = Number(metadata.height);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    throw new Error('Unable to read this video\'s dimensions. Please select another video.');
+  }
+  return { ...metadata, duration, width, height };
+};
+
+const VideoUploader = ({ value, onChange, onValidationChange, videoLink, onVideoLinkChange, theme, disabled = false, disabledMessage = 'Video uploads are not allowed for this account. Please contact the admin for support.' }) => {
   const [picking, setPicking] = useState(false);
   const [resizeNotice, setResizeNotice] = useState('');
   const selectVideo = async () => {
@@ -13,6 +69,7 @@ const VideoUploader = ({ value, onChange, videoLink, onVideoLinkChange, theme, d
       return;
     }
     setPicking(true);
+    onValidationChange?.(true);
     try {
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!permission.granted) throw new Error('Please allow gallery access to select a video.');
@@ -23,33 +80,39 @@ const VideoUploader = ({ value, onChange, videoLink, onVideoLinkChange, theme, d
       });
       if (!result.canceled && result.assets?.[0]) {
         const asset = result.assets[0];
-        let uri = asset.uri;
-        let dimensions = Platform.OS === 'web'
-          ? { width: asset.width, height: asset.height }
-          : await getVideoMetaData(uri);
-        const sourceHeight = Number(asset.height) || Number(dimensions.height);
-
-        if (!Number.isFinite(sourceHeight)) {
-          throw new Error('Unable to read this video\'s dimensions. Please select another video.');
-        }
+        const uri = asset.uri;
+        const dimensions = await readSelectedVideoMetadata(uri);
         const extension = String(dimensions.extension || 'mp4').toLowerCase();
-        onChange({
+        const selectedVideo = {
           uri,
-          type: extension === 'mov' ? 'video/quicktime' : `video/${extension}`,
+          type: asset.mimeType || (extension === 'mov' ? 'video/quicktime' : `video/${extension}`),
           name: uri !== asset.uri ? `post_${Date.now()}.${extension}` : asset.fileName || `post_${Date.now()}.mp4`,
-          duration: asset.duration ? asset.duration / 1000 : Number(dimensions.duration) || 0,
+          duration: dimensions.duration,
           size: Number(asset.fileSize) || 0,
-          width: Number(dimensions.width) || Number(asset.width),
-          height: Number(dimensions.height) || Number(asset.height),
-          originalWidth: Number(asset.width) || Number(dimensions.width),
-          originalHeight: sourceHeight,
-        });
+          width: dimensions.width,
+          height: dimensions.height,
+          originalWidth: dimensions.width,
+          originalHeight: dimensions.height,
+        };
+        await onChange(selectedVideo);
+        if (selectedVideo.duration > 0) {
+          requestVideoBackground({
+            uri: selectedVideo.uri,
+            duration: selectedVideo.duration,
+            width: selectedVideo.width,
+            height: selectedVideo.height,
+            size: selectedVideo.size,
+          }).catch(error => {
+            console.warn('Could not prepare the selected video background:', error.name || 'Unknown error');
+          });
+        }
       }
     } catch (error) {
       setResizeNotice('');
-      onChange(null, error.message || 'Unable to select video.');
+      onChange(null, error.message || UNSUPPORTED_VIDEO_MESSAGE);
     } finally {
       setPicking(false);
+      onValidationChange?.(false);
     }
   };
 

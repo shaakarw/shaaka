@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
@@ -22,6 +23,10 @@ import axios from 'axios';
 import { useTheme } from '../context/ThemeContext';
 import { BASE_URL } from '../constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import OnlineStatusDot from '../components/OnlineStatusDot';
+import useOnlineUsers from '../hooks/useOnlineUsers';
+import { normalizeImageSource } from '../utils/imageUrl';
+
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -43,7 +48,7 @@ const MessageBubble = React.memo(({ item, isMe, onLongPress, onDoubleTap, theme 
 
   return (
     <View style={containerStyle}>
-      {!isMe && <Image source={item.senderAvatar ? { uri: item.senderAvatar } : DEFAULT_AVATAR} style={waStyles.avatarSmall} />}
+      {!isMe && <Image source={normalizeImageSource(item.senderAvatar ? { uri: item.senderAvatar } : DEFAULT_AVATAR)} style={waStyles.avatarSmall} />}
 
       <TouchableOpacity
         activeOpacity={0.9}
@@ -52,7 +57,7 @@ const MessageBubble = React.memo(({ item, isMe, onLongPress, onDoubleTap, theme 
         style={[waStyles.bubble, bubbleStyle]}
       >
         {item.text ? <Text style={[waStyles.bubbleText, { color: isMe ? '#fff' : theme.text }]}>{item.text}</Text> : null}
-        {item.imageUrl ? <Image source={{ uri: item.imageUrl }} style={waStyles.messageImage} /> : null}
+        {item.imageUrl ? <Image source={normalizeImageSource({ uri: item.imageUrl })} style={waStyles.messageImage} /> : null}
 
         <View style={waStyles.metaRow}>
           <Text style={[waStyles.timeText, { color: isMe ? 'rgba(255,255,255,0.85)' : theme.textSecondary }]}>{new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
@@ -67,7 +72,7 @@ const MessageBubble = React.memo(({ item, isMe, onLongPress, onDoubleTap, theme 
         </View>
       </TouchableOpacity>
 
-      {isMe && <Image source={item.senderAvatar ? { uri: item.senderAvatar } : DEFAULT_AVATAR} style={waStyles.avatarSmall} />}
+      {isMe && <Image source={normalizeImageSource(item.senderAvatar ? { uri: item.senderAvatar } : DEFAULT_AVATAR)} style={waStyles.avatarSmall} />}
     </View>
   );
 });
@@ -81,6 +86,8 @@ const WhatsAppChatScreen = ({ route, navigation }) => {
   const [selectedImage, setSelectedImage] = useState(null);
   const [isOtherTyping, setIsOtherTyping] = useState(false);
   const flatRef = useRef(null);
+  const onlineUsers = useOnlineUsers(otherUserId ? [otherUserId] : []);
+  const isOtherUserOnline = Boolean(onlineUsers[String(otherUserId)]);
 
   useEffect(() => {
     loadMessages();
@@ -179,10 +186,15 @@ const WhatsAppChatScreen = ({ route, navigation }) => {
     <SafeAreaView style={[waStyles.container, { backgroundColor: theme.background }]}> 
       <View style={[waStyles.header, { borderBottomColor: theme.border }]}> 
         <TouchableOpacity onPress={() => navigation.goBack()} style={waStyles.backBtn}><Ionicons name="arrow-back" size={24} color={theme.text} /></TouchableOpacity>
-        <Image source={otherUserAvatar ? { uri: otherUserAvatar } : DEFAULT_AVATAR} style={waStyles.headerAvatar} />
+        <View style={waStyles.headerAvatarWrap}>
+          <Image source={normalizeImageSource(otherUserAvatar ? { uri: otherUserAvatar } : DEFAULT_AVATAR)} style={waStyles.headerAvatar} />
+          <OnlineStatusDot visible={isOtherUserOnline} />
+        </View>
         <View style={waStyles.headerTextWrap}>
           <Text style={[waStyles.headerTitle, { color: theme.text }]} numberOfLines={1}>{otherUserName}</Text>
-          <Text style={[waStyles.headerSubtitle, { color: theme.textSecondary }]}>{isOtherTyping ? 'typing...' : 'online'}</Text>
+          {isOtherTyping && (
+            <Text style={[waStyles.headerSubtitle, { color: theme.textSecondary }]}>typing...</Text>
+          )}
         </View>
         <View style={waStyles.headerActions}>
           <TouchableOpacity style={waStyles.iconBtn}><Ionicons name="call" size={20} color={theme.text} /></TouchableOpacity>
@@ -236,7 +248,8 @@ const waStyles = StyleSheet.create({
   container: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1 },
   backBtn: { marginRight: 8 },
-  headerAvatar: { width: 40, height: 40, borderRadius: 20, marginRight: 8 },
+  headerAvatarWrap: { position: 'relative', marginRight: 8 },
+  headerAvatar: { width: 40, height: 40, borderRadius: 20 },
   headerTextWrap: { flex: 1 },
   headerTitle: { fontSize: 16, fontWeight: '600' },
   headerSubtitle: { fontSize: 12, marginTop: 2 },
