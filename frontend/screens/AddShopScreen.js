@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 // screens/AddShopScreen.js
 // A "full mall-selection screen" for the AddShop tab.
@@ -92,8 +93,8 @@ export default function AddShopScreen({ navigation, route, language = 'English' 
   const accentColor = theme.accent;
 
   const getToken = async () => {
-    let token = await AsyncStorage.getItem('userToken');
-    if (!token) token = await AsyncStorage.getItem('adminToken');
+    let token = await getAuthToken('userToken');
+    if (!token) token = await getAuthToken('adminToken');
     return token;
   };
 

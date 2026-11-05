@@ -32,6 +32,7 @@ import * as VideoThumbnails from 'expo-video-thumbnails';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import { useFocusEffect } from '@react-navigation/native';
+import { useAuth } from '../context/AuthContext';
 import { io } from 'socket.io-client';
 import { getRemainingUsage } from '../utils/subscriptionHelpers';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
@@ -41,6 +42,7 @@ import { networkStatus } from '../services/networkStatus';
 import { syncManager } from '../services/syncManager';
 import { logDebug } from '../utils/debugLogger';
 import { normalizeImageSource } from '../utils/imageUrl';
+import { getAuthToken } from '../utils/authStorage';
 
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -59,10 +61,17 @@ const MAX_IMAGES_PER_MESSAGE = 3;
 const DEFAULT_AVATAR = require('../assets/profile1.png');
 const chatBackground = require('../assets/chartbackground.png');
 const loadingLogo = require('../assets/logos.png');
+const chatThreadMemoryCache = new Map();
+const MAX_CACHED_CHAT_THREADS = 20;
 const getChatAuthToken = async (adminMode = false) => {
   const preferredKey = adminMode ? 'adminToken' : 'userToken';
   const fallbackKey = adminMode ? 'userToken' : 'adminToken';
-  return (await AsyncStorage.getItem(preferredKey)) || AsyncStorage.getItem(fallbackKey);
+  return (await getAuthToken(preferredKey)) || getAuthToken(fallbackKey);
+};
+const getChatThreadCacheKey = (user, sellerId, postId, adminMode) => {
+  const userId = user?._id || user?.id || user?.phone;
+  if (!userId || !sellerId) return null;
+  return `${adminMode ? 'admin' : 'user'}:${userId}:${sellerId}:${postId || 'direct'}`;
 };
 
 // ---------- Chat image deck sizing constants (ProductHeroDeck style) ----------
@@ -86,6 +95,9 @@ const translations = {
     cancel: 'Cancel',
     updated: 'Updated',
     copied: 'Copied',
+    sending: 'Sending…',
+    retry: 'Retry',
+    videoRetry: 'Video was not sent. Check your connection and retry.',
     messageEdited: 'Message edited successfully',
     editFailed: 'Failed to edit message',
     unsendTitle: 'Unsend Message',
@@ -151,6 +163,9 @@ const translations = {
     cancel: 'Reka',
     updated: 'Byahinduwe',
     copied: 'Byakozwecopi',
+    sending: 'Birimo koherezwa…',
+    retry: 'Ongera ugerageze',
+    videoRetry: 'Video ntiyohererejwe. Reba interineti wongere ugerageze.',
     messageEdited: 'Ubutumwa bwahinduwe neza',
     editFailed: 'Guhindura byanze',
     unsendTitle: 'Reka kohereza ubutumwa',
@@ -462,7 +477,7 @@ const TypingIndicator = ({ theme, avatar }) => {
   const [dot3] = useState(new Animated.Value(0));
 
   const animateDot = (dot, delay) => {
-    Animated.loop(
+    return Animated.loop(
       Animated.sequence([
         Animated.timing(dot, {
           toValue: -8,
@@ -476,14 +491,18 @@ const TypingIndicator = ({ theme, avatar }) => {
           useNativeDriver: true,
         }),
       ])
-    ).start();
+    );
   };
 
   useEffect(() => {
-    animateDot(dot1, 0);
-    animateDot(dot2, 150);
-    animateDot(dot3, 300);
-  }, []);
+    const animations = [
+      animateDot(dot1, 0),
+      animateDot(dot2, 150),
+      animateDot(dot3, 300),
+    ];
+    animations.forEach(animation => animation.start());
+    return () => animations.forEach(animation => animation.stop());
+  }, [dot1, dot2, dot3]);
 
   return (
     <View style={[styles.typingBubble, { backgroundColor: theme.cardBackground || '#e0e0e000' }]}>
@@ -746,15 +765,9 @@ const mergeMessages = (currentMessages, incomingMessages) => {
     const id = message?._id || message?.id;
     if (!id) return;
 
-    for (const [existingId, existing] of merged) {
-      if (
-        String(existingId).startsWith('temp_') &&
-        existing.senderId === message.senderId &&
-        existing.text === message.text &&
-        existing.imageUrl === message.imageUrl
-      ) {
-        merged.delete(existingId);
-      }
+    const clientMessageId = String(message.clientMessageId || '');
+    if (clientMessageId && merged.has(clientMessageId)) {
+      merged.delete(clientMessageId);
     }
     merged.set(String(id), message);
   });
@@ -935,6 +948,7 @@ const MessageItem = memo(({
   sellerId,
   sellerName,
   onReplyPostPress,
+  onRetryMessage,
 }) => {
   const isMe = isOwnMessage(item);
   const isReplied = item.repliedTo;
@@ -985,6 +999,9 @@ const MessageItem = memo(({
 
   const lastTapRef = useRef(0);
   const singleTapTimerRef = useRef(null);
+  useEffect(() => () => {
+    if (singleTapTimerRef.current) clearTimeout(singleTapTimerRef.current);
+  }, []);
 
   const handlePress = () => {
     if (hasMultipleImages) return;
@@ -1003,12 +1020,14 @@ const MessageItem = memo(({
         clearTimeout(singleTapTimerRef.current);
         singleTapTimerRef.current = null;
       }
-      singleTapTimerRef.current = setTimeout(() => {
-        if (url) {
-          Linking.openURL(url);
-        }
-        singleTapTimerRef.current = null;
-      }, 300);
+      if (url) {
+        singleTapTimerRef.current = setTimeout(() => {
+          Linking.openURL(url).catch(error => {
+            console.warn('Could not open message link:', error.message);
+          });
+          singleTapTimerRef.current = null;
+        }, 300);
+      }
     }
   };
 
@@ -1131,12 +1150,15 @@ const MessageItem = memo(({
                 </View>
               ) : item.videoUrl ? (
                 <View>
-                  <Text style={[styles.messageText, { color: textColor }]}>
-                    {t.videoCall || 'Video'}
-                  </Text>
-                  <Text style={[styles.messageText, { color: '#007AFF', textDecorationLine: 'underline' }]}>
-                    {item.videoUrl}
-                  </Text>
+                  <TouchableOpacity
+                    style={styles.videoMessageLink}
+                    onPress={() => Linking.openURL(item.videoUrl).catch(error => {
+                      console.warn('Could not open chat video:', error.message);
+                    })}
+                  >
+                    <Ionicons name="play-circle-outline" size={28} color={textColor} />
+                    <Text style={[styles.messageText, { color: textColor }]}>{t.videoCall || 'Video'}</Text>
+                  </TouchableOpacity>
                   {item.text ? (
                     <Text style={[styles.messageText, styles.imageCaption, { color: textColor }]}>
                       {item.text}
@@ -1178,7 +1200,14 @@ const MessageItem = memo(({
 
               {isMe && (
                 <View style={styles.readReceiptContainer}>
-                  {item.read ? (
+                  {item.syncStatus === 'failed' ? (
+                    <TouchableOpacity onPress={() => onRetryMessage?.(item)} style={styles.failedMessageAction}>
+                      <Ionicons name="refresh-circle-outline" size={14} color="#d87428" />
+                      <Text style={styles.failedMessageText}>{t.retry}</Text>
+                    </TouchableOpacity>
+                  ) : item.syncStatus === 'pending' ? (
+                    <Text style={[styles.pendingMessageText, { color: subTextColor }]}>{t.sending}</Text>
+                  ) : item.read ? (
                     <Ionicons name="checkmark-done" size={14} color={'gray'} />
                   ) : (
                     <Ionicons name="checkmark-outline" size={14} color={'gray'} />
@@ -1269,8 +1298,13 @@ const ChatScreen = ({ route, navigation, language }) => {
   const effectivePostId = String(routePostId ?? route.params?.post ?? route.params?.listingId ?? '').trim();
   const postId = effectivePostId;
   const { theme } = useTheme();
+  const { user: authUser } = useAuth();
   const { showBottomSheet } = useBottomSheet();
   const t = translations[language] || translations.English;
+  const initialThreadCacheKey = getChatThreadCacheKey(authUser, sellerId, postId, adminMode);
+  const initialCachedMessages = initialThreadCacheKey
+    ? chatThreadMemoryCache.get(initialThreadCacheKey)
+    : null;
   const showChatNotice = useCallback((type, title, message) => {
     showBottomSheet({
       type,
@@ -1282,7 +1316,7 @@ const ChatScreen = ({ route, navigation, language }) => {
   }, [showBottomSheet, t.ok]);
 
   // ---------- State ----------
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState(() => initialCachedMessages || []);
   const [inputText, setInputText] = useState('');
   const [inputHeight, setInputHeight] = useState(INPUT_MIN_HEIGHT);
   const [inputScrollable, setInputScrollable] = useState(false);
@@ -1290,8 +1324,8 @@ const ChatScreen = ({ route, navigation, language }) => {
   const [selectedImages, setSelectedImages] = useState([]);
   const [imageUploadProgress, setImageUploadProgress] = useState(0);
   const [imageUploadStatus, setImageUploadStatus] = useState('idle');
-  const [currentUser, setCurrentUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState(authUser || null);
+  const [loading, setLoading] = useState(!Array.isArray(initialCachedMessages));
   const [refreshing, setRefreshing] = useState(false);
   const [playingAudioId, setPlayingAudioId] = useState(null);
   const soundRef = useRef(null);
@@ -1300,6 +1334,10 @@ const ChatScreen = ({ route, navigation, language }) => {
   const [isOnline, setIsOnline] = useState(false);
   const [sellerAvatarUrl, setSellerAvatarUrl] = useState(sellerAvatar || null);
   const [replyPost, setReplyPost] = useState(null);
+  const threadCacheKey = getChatThreadCacheKey(currentUser, sellerId, postId, adminMode);
+  const [readyThreadCacheKey, setReadyThreadCacheKey] = useState(
+    initialCachedMessages ? initialThreadCacheKey : null
+  );
   const clearReplyPost = useCallback(() => {
     setReplyPost(null);
     if (route.params?.replyPost) {
@@ -1308,6 +1346,7 @@ const ChatScreen = ({ route, navigation, language }) => {
   }, [navigation, route.params?.replyPost]);
 
   const socketRef = useRef(null);
+  const reloadThreadRef = useRef(null);
   const messagesFetchRef = useRef(false);
   const flatListRef = useRef(null);
   const inputRef = useRef(null);
@@ -1319,6 +1358,7 @@ const ChatScreen = ({ route, navigation, language }) => {
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
   const [isNearBottom, setIsNearBottom] = useState(true);
+  const isNearBottomRef = useRef(true);
 
   const [remainingImages, setRemainingImages] = useState(1);
   const [userImagesPerMessage, setUserImagesPerMessage] = useState(CHAT_POLICY.imagesPerMessage);
@@ -1330,6 +1370,21 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   const markedAsReadRef = useRef(new Set());
   const typingClearTimerRef = useRef(null);
+
+  useEffect(() => syncManager.subscribe(event => {
+    if (event.status === 'message-sent' && event.message?._id) {
+      setMessages(previous => mergeMessages(
+        previous.filter(message => String(message._id || message.id) !== event.clientMessageId),
+        [event.message]
+      ));
+    } else if (event.status === 'message-failed' && event.clientMessageId) {
+      setMessages(previous => previous.map(message => (
+        String(message._id || message.id) === event.clientMessageId
+          ? { ...message, syncStatus: 'failed', syncError: event.message }
+          : message
+      )));
+    }
+  }), []);
 
   // ---------- useEffect hooks ----------
   useEffect(() => {
@@ -1381,8 +1436,9 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   // ---------- Animations ----------
   useEffect(() => {
+    let animation;
     if (loading) {
-      Animated.loop(
+      animation = Animated.loop(
         Animated.sequence([
           Animated.timing(scaleAnim, {
             toValue: 1.2,
@@ -1395,18 +1451,22 @@ const ChatScreen = ({ route, navigation, language }) => {
             useNativeDriver: true,
           }),
         ])
-      ).start();
+      );
+      animation.start();
     }
-  }, [loading]);
+    return () => animation?.stop();
+  }, [loading, scaleAnim]);
 
   useEffect(() => {
-    Animated.loop(
+    const animation = Animated.loop(
       Animated.sequence([
         Animated.timing(pulseAnim, { toValue: 1.2, duration: 1000, useNativeDriver: true }),
         Animated.timing(pulseAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
       ])
-    ).start();
-  }, []);
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [pulseAnim]);
 
   const setOnlineStatus = useCallback(async (online) => {
     try {
@@ -1423,7 +1483,11 @@ const ChatScreen = ({ route, navigation, language }) => {
   useEffect(() => {
     loadCurrentUser();
     return () => {
-      if (soundRef.current) soundRef.current.unloadAsync();
+      if (soundRef.current) {
+        soundRef.current.unloadAsync().catch(error => {
+          console.warn('Could not unload chat audio:', error.message);
+        });
+      }
       if (typingClearTimerRef.current) clearTimeout(typingClearTimerRef.current);
       if (socketRef.current) {
         try {
@@ -1438,6 +1502,7 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   const fetchUserLimitsAndUsage = useCallback(async () => {
     try {
+      if (!(await networkStatus.start()).isOnline) return;
       const token = await getChatAuthToken(adminModeRef.current);
       if (!token) return;
       const res = await axios.get(`${BASE_URL}/api/user/me`, {
@@ -1472,6 +1537,7 @@ const ChatScreen = ({ route, navigation, language }) => {
   const fetchSellerOnlineStatus = useCallback(async () => {
     if (isDemoChat || !sellerId) return;
     try {
+      if (!(await networkStatus.start()).isOnline) return;
       const token = await getChatAuthToken(adminModeRef.current);
       if (!token) return;
       const res = await axios.get(`${BASE_URL}/api/user/${sellerId}/online`, {
@@ -1488,6 +1554,7 @@ const ChatScreen = ({ route, navigation, language }) => {
   const fetchSellerAvatar = useCallback(async () => {
     if (!sellerId || isDemoChat) return;
     try {
+      if (!(await networkStatus.start()).isOnline) return;
       const token = await getChatAuthToken(adminModeRef.current);
       if (!token) return;
       const res = await axios.get(`${BASE_URL}/api/user/${sellerId}`, {
@@ -1535,6 +1602,7 @@ const ChatScreen = ({ route, navigation, language }) => {
         if (sellerId && !isDemoChat) {
           socket.emit('join-chat', { sellerId });
         }
+        reloadThreadRef.current?.();
       });
 
       socket.on('reconnect', () => {
@@ -1582,6 +1650,30 @@ const ChatScreen = ({ route, navigation, language }) => {
           .catch(error => console.warn('Could not update cached chat message:', error.message));
       });
 
+      socket.on('message-read', (payload) => {
+        const messageId = String(payload?.messageId || '');
+        if (
+          !messageId
+          || String(payload?.senderId || '') !== String(currentUserIdRef.current || '')
+          || String(payload?.receiverId || '') !== String(sellerId)
+        ) return;
+
+        setMessages(previous => previous.map(message => (
+          String(message._id || message.id) === messageId
+            ? { ...message, read: true }
+            : message
+        )));
+        offlineDatabase.getRecord('messages', messageId).then(cachedMessage => {
+          if (!cachedMessage) return undefined;
+          return offlineDatabase.putRecord(
+            'messages',
+            messageId,
+            { ...cachedMessage, read: true },
+            { priority: 'high', protected: true }
+          );
+        }).catch(error => console.warn('Could not cache message read receipt:', error.message));
+      });
+
       socket.on('new-message', (payload) => {
         const incoming = payload?.message || payload;
         if (!incoming?._id || isDemoChat) return;
@@ -1595,8 +1687,12 @@ const ChatScreen = ({ route, navigation, language }) => {
         if (!sameChat) return;
         setMessages(previous => mergeMessages(previous, [incoming]));
         if (String(incoming.senderId) === String(sellerId)) {
-          markAsRead(incoming._id);
-          if (isNearBottom) flatListRef.current?.scrollToEnd({ animated: true });
+          const messageId = String(incoming._id);
+          if (!markedAsReadRef.current.has(messageId)) {
+            markedAsReadRef.current.add(messageId);
+            markAsRead(incoming._id);
+          }
+          if (isNearBottomRef.current) flatListRef.current?.scrollToEnd({ animated: true });
         }
       });
 
@@ -1653,7 +1749,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     } catch (e) {
       console.warn('[Socket] setup failed:', e?.message);
     }
-  }, [currentUser?._id, sellerId, isDemoChat, typingPostId, isNearBottom]);
+  }, [currentUser?._id, sellerId, isDemoChat, typingPostId]);
 
   useEffect(() => {
     connectPresenceSocket();
@@ -1685,38 +1781,73 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   useEffect(() => {
     if (!currentUser) return;
-    setMessages([]);
+    const cacheKey = getChatThreadCacheKey(currentUser, sellerId, postId, adminMode);
+    const cachedMessages = cacheKey ? chatThreadMemoryCache.get(cacheKey) : null;
+    if (Array.isArray(cachedMessages)) {
+      setMessages(cachedMessages);
+      setReadyThreadCacheKey(cacheKey);
+      setLoading(false);
+    } else {
+      setMessages([]);
+      setReadyThreadCacheKey(null);
+      setLoading(true);
+    }
     loadMessages();
-  }, [currentUser?._id, sellerId, isDemoChat]);
+  }, [currentUser?._id, currentUser?.phone, sellerId, postId, isDemoChat, adminMode]);
+
+  useEffect(() => {
+    if (!threadCacheKey || readyThreadCacheKey !== threadCacheKey) return;
+    chatThreadMemoryCache.delete(threadCacheKey);
+    chatThreadMemoryCache.set(threadCacheKey, messages);
+    if (chatThreadMemoryCache.size > MAX_CACHED_CHAT_THREADS) {
+      const oldestThreadKey = chatThreadMemoryCache.keys().next().value;
+      chatThreadMemoryCache.delete(oldestThreadKey);
+    }
+    offlineDatabase.putRecord('chat-threads', threadCacheKey, messages, {
+      priority: 'high',
+      protected: true,
+    }).catch(error => {
+      console.warn('Could not cache chat thread:', error.message);
+    });
+  }, [messages, readyThreadCacheKey, threadCacheKey]);
 
   const loadCurrentUser = async () => {
     try {
+      const storedUser = await AsyncStorage.getItem('sessionUser') || await AsyncStorage.getItem('user');
+      let restoredUser = null;
+      if (storedUser) {
+        const parsedUser = JSON.parse(storedUser);
+        restoredUser = { ...parsedUser, _id: parsedUser._id || parsedUser.id || parsedUser.phone };
+        setCurrentUser(restoredUser);
+      }
+
       const token = await getChatAuthToken(adminModeRef.current);
-      if (!token) {
-        console.warn('No token found; falling back to local user');
-        throw new Error('No token');
+      if (!token || !(await networkStatus.start()).isOnline) {
+        if (!restoredUser) {
+          setCurrentUser(authUser || null);
+          setLoading(false);
+        }
+        return;
       }
       const response = await axios.get(`${BASE_URL}/api/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setCurrentUser(response.data.user);
     } catch (error) {
-      console.error('Error loading user:', error);
-      const sessionUser = await AsyncStorage.getItem('sessionUser');
-      if (sessionUser) {
-        const parsedUser = JSON.parse(sessionUser);
-        setCurrentUser({
-          ...parsedUser,
-          _id: parsedUser._id || parsedUser.phone,
-        });
-      } else {
-        const phone = await AsyncStorage.getItem('currentUser');
-        setCurrentUser({
-          _id: phone || '+250788123456',
-          phone: phone || '+250788123456',
-          username: 'You',
-        });
+      console.warn('Could not load the current user from the server:', error.message);
+      try {
+        const storedUser = await AsyncStorage.getItem('sessionUser') || await AsyncStorage.getItem('user');
+        if (storedUser) {
+          const parsedUser = JSON.parse(storedUser);
+          setCurrentUser({ ...parsedUser, _id: parsedUser._id || parsedUser.id || parsedUser.phone });
+        } else {
+          setCurrentUser(authUser || null);
+        }
+      } catch (storageError) {
+        console.error('Could not restore the cached chat user:', storageError.message);
+        setCurrentUser(authUser || null);
       }
+      if (!restoredUser && !authUser) setLoading(false);
     }
   };
 
@@ -1734,16 +1865,35 @@ const ChatScreen = ({ route, navigation, language }) => {
     if (messagesFetchRef.current) return;
     messagesFetchRef.current = true;
     if (showLoading) setRefreshing(true);
+    const cacheKey = getChatThreadCacheKey(currentUser, sellerId, postId, adminMode);
+    let cachedThreadMessages = cacheKey ? chatThreadMemoryCache.get(cacheKey) : null;
     try {
-      await prefetchReplyPostCovers([
-        ...messages,
-        { replyPost: replyPost || initialReplyPost },
-      ]);
+      if (!Array.isArray(cachedThreadMessages) && cacheKey) {
+        try {
+          cachedThreadMessages = await offlineDatabase.getRecord('chat-threads', cacheKey);
+        } catch (cacheError) {
+          console.warn('Could not read cached chat thread:', cacheError.message);
+        }
+      }
+      if (Array.isArray(cachedThreadMessages)) {
+        const enhancedCachedMessages = enhanceReplies(cachedThreadMessages);
+        setMessages(previous => mergeMessages(previous, enhancedCachedMessages));
+        setReadyThreadCacheKey(cacheKey);
+        setLoading(false);
+        prefetchReplyPostCovers(enhancedCachedMessages).catch(error => {
+          console.warn('Could not prefetch cached chat media:', error.message);
+        });
+      }
 
-      if (!networkStatus.get().isOnline) {
-        const localMessages = await loadLocalMessages();
-        await prefetchReplyPostCovers(localMessages);
-        setMessages(previous => mergeMessages(previous, enhanceReplies(localMessages)));
+      if (!(await networkStatus.start()).isOnline) {
+        if (!Array.isArray(cachedThreadMessages)) {
+          const localMessages = await loadLocalMessages();
+          setMessages(previous => mergeMessages(previous, enhanceReplies(localMessages)));
+          setReadyThreadCacheKey(cacheKey);
+          prefetchReplyPostCovers(localMessages).catch(error => {
+            console.warn('Could not prefetch offline chat media:', error.message);
+          });
+        }
         setLoading(false);
         return;
       }
@@ -1763,21 +1913,29 @@ const ChatScreen = ({ route, navigation, language }) => {
         senderId: m.senderId || m.senderPhone || m.senderId,
         replyPost: m.replyPost || m.replyPostContext || null,
       }));
+      Promise.all(messagesFromApi.map(message => (
+        offlineDatabase.putRecord('messages', message._id, message, { priority: 'high', protected: true })
+      ))).catch(cacheError => {
+        console.warn('Could not cache loaded chat messages:', cacheError.message);
+      });
 
-      const localMessages = await loadLocalMessages();
+      const localMessages = Array.isArray(cachedThreadMessages) ? [] : await loadLocalMessages();
       const allMessages = [...messagesFromApi, ...localMessages];
       const sorted = allMessages
         .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
-        .filter((msg, index, self) => self.findIndex(m => (m._id || m.id) === (msg._id || msg.id)) === index);
+        .filter((msg, index, self) => self.findIndex(m => String(m._id || m.id) === String(msg._id || msg.id)) === index);
 
       const enhancedMessages = enhanceReplies(sorted);
 
-      await prefetchReplyPostCovers(enhancedMessages);
       setMessages(previous => mergeMessages(previous, enhancedMessages));
+      setReadyThreadCacheKey(cacheKey);
       setLoading(false);
+      prefetchReplyPostCovers(enhancedMessages).catch(error => {
+        console.warn('Could not prefetch chat media:', error.message);
+      });
 
       messagesFromApi.forEach((msg) => {
-        if (msg.senderId === sellerId && !msg.read) {
+        if (String(msg.senderId) === String(sellerId) && !msg.read) {
           markAsRead(msg._id);
         }
       });
@@ -1785,16 +1943,29 @@ const ChatScreen = ({ route, navigation, language }) => {
       syncManager.run('chat-open');
     } catch (error) {
       console.warn('Using cached messages:', error.message);
-      const localMessages = await loadLocalMessages();
-      const enhancedLocal = enhanceReplies(localMessages);
-      await prefetchReplyPostCovers(enhancedLocal);
-      setMessages(previous => mergeMessages(previous, enhancedLocal));
-      setLoading(false);
+      try {
+        if (!Array.isArray(cachedThreadMessages)) {
+          const localMessages = await loadLocalMessages();
+          const enhancedLocal = enhanceReplies(localMessages);
+          setMessages(previous => mergeMessages(previous, enhancedLocal));
+          setReadyThreadCacheKey(cacheKey);
+          prefetchReplyPostCovers(enhancedLocal).catch(cacheError => {
+            console.warn('Could not prefetch cached chat media:', cacheError.message);
+          });
+        }
+      } catch (cacheError) {
+        console.error('Could not load cached chat messages:', cacheError);
+        showChatNotice('error', t.networkError, t.couldNotLoad);
+      } finally {
+        setLoading(false);
+      }
     } finally {
       messagesFetchRef.current = false;
       if (showLoading) setRefreshing(false);
     }
   };
+
+  reloadThreadRef.current = () => loadMessages();
 
   const loadLocalMessages = async () => {
     const records = await offlineDatabase.getCollection('messages');
@@ -1802,15 +1973,15 @@ const ChatScreen = ({ route, navigation, language }) => {
     const currentUserId = currentUser._id || currentUser.phone;
     const filtered = allMessages
       .filter((msg) => {
-        const senderId = String(msg.senderId || '');
-        const receiverId = String(msg.receiverId || '');
+        const senderId = String(msg.senderId || msg.senderPhone || '');
+        const receiverId = String(msg.receiverId || msg.receiverPhone || '');
         const me = String(currentUserId || '');
         const seller = String(sellerId || '');
         const belongsToThread =
           (senderId === me && receiverId === seller) ||
           (senderId === seller && receiverId === me);
 
-        return belongsToThread;
+        return belongsToThread && (!postId || String(msg.postId || '') === String(postId));
       })
       .map(toChatMessage)
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
@@ -1890,6 +2061,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     if (isDemoChat) return;
     if (!currentUser?._id || !sellerId) return;
     if (!networkStatus.get().isOnline) return;
+    if (socketRef.current?.connected) return;
     if (messagesFetchRef.current) return;
 
     messagesFetchRef.current = true;
@@ -1918,6 +2090,13 @@ const ChatScreen = ({ route, navigation, language }) => {
         senderId: m.senderId || m.senderPhone,
         replyPost: m.replyPost || m.replyPostContext || null,
       }));
+      try {
+        await Promise.all(messagesFromApi.map(message => (
+          offlineDatabase.putRecord('messages', message._id, message, { priority: 'high', protected: true })
+        )));
+      } catch (cacheError) {
+        console.warn('Could not cache refreshed chat messages:', cacheError.message);
+      }
 
       const enhanced = enhanceReplies(messagesFromApi);
 
@@ -1935,7 +2114,7 @@ const ChatScreen = ({ route, navigation, language }) => {
         }
       });
     } catch (error) {
-      // Silent fail — the next tick will retry.
+      console.warn('Could not refresh chat messages; the next retry will run when available:', error.message);
     } finally {
       messagesFetchRef.current = false;
     }
@@ -1954,7 +2133,7 @@ const ChatScreen = ({ route, navigation, language }) => {
 
       const intervalId = setInterval(() => {
         pollNewMessages();
-      }, 1000);
+      }, 5000);
 
       return () => clearInterval(intervalId);
     }, [pollNewMessages, isDemoChat, currentUser?._id, sellerId])
@@ -2041,11 +2220,11 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   };
 
-  const sendMessage = async (text, imageUrl = null, repliedTo = null, imageUrls = null) => {
+  const sendMessage = async (text, imageUrl = null, repliedTo = null, imageUrls = null, videoAsset = null) => {
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     sendTyping(false);
     const cleanText = text?.trim() || '';
-    if (!cleanText && !imageUrl && (!imageUrls || imageUrls.length === 0)) return;
+    if (!cleanText && !imageUrl && (!imageUrls || imageUrls.length === 0) && !videoAsset) return;
     if (!currentUser) {
       showChatNotice('error', t.error, t.userNotLoaded);
       return;
@@ -2072,9 +2251,10 @@ const ChatScreen = ({ route, navigation, language }) => {
       return;
     }
 
-    const currentReplyPost = replyPost || null;
+    const currentReplyPost = videoAsset?.replyPost || replyPost || null;
 
     const messageData = {
+      clientMessageId: videoAsset?.clientMessageId || `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`,
       postId,
       postTitle,
       postUser: sellerName,
@@ -2087,6 +2267,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       receiverPhone: sellerPhone,
       text: cleanText,
       imageUrl: primaryImage,
+      videoUrl: '',
       ...(hasMultiple ? { imageUrls } : {}),
       repliedTo: repliedTo
         ? {
@@ -2102,10 +2283,11 @@ const ChatScreen = ({ route, navigation, language }) => {
       replyPost: currentReplyPost,
     };
 
-    const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const tempId = messageData.clientMessageId;
     const tempMessage = {
       _id: tempId,
       ...messageData,
+      ...(videoAsset ? { videoUrl: videoAsset.uri, videoAsset: { ...videoAsset, replyPost: currentReplyPost } } : {}),
       clientMessageId: tempId,
       syncStatus: 'pending',
       createdAt: new Date().toISOString(),
@@ -2114,14 +2296,7 @@ const ChatScreen = ({ route, navigation, language }) => {
 
     setMessages(prev => {
       const alreadyExists = prev.some((msg) => {
-        const sameTempId = msg._id === tempId;
-        const sameContent =
-          msg.senderId === currentUserId &&
-          msg.text === cleanText &&
-          msg.imageUrl === primaryImage &&
-          msg.receiverId === sellerId &&
-          Math.abs(new Date(msg.createdAt || msg.timestamp).getTime() - new Date(tempMessage.createdAt).getTime()) < 5000;
-        return sameTempId || sameContent;
+        return String(msg._id || msg.id) === tempId;
       });
       return alreadyExists ? prev : [...prev, tempMessage];
     });
@@ -2131,6 +2306,11 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
 
     try {
+      if (videoAsset && !networkStatus.get().isOnline) {
+        setMessages(prev => prev.filter(msg => String(msg._id || msg.id) !== tempId));
+        showChatNotice('info', t.networkError, t.videoRetry);
+        return;
+      }
       if (!networkStatus.get().isOnline) {
         await offlineDatabase.putRecord('messages', tempId, { ...tempMessage, id: tempId }, { priority: 'high', protected: true });
         await syncManager.enqueue({ actionType: 'SEND_MESSAGE', entityType: 'message', entityId: tempId, payload: { ...messageData, clientMessageId: tempId } });
@@ -2141,9 +2321,24 @@ const ChatScreen = ({ route, navigation, language }) => {
         return;
       }
       const token = await getChatAuthToken(adminModeRef.current);
+      let requestBody = messageData;
+      if (videoAsset) {
+        const form = new FormData();
+        Object.entries(messageData).forEach(([key, value]) => {
+          if (value === undefined || value === null || key === 'videoUrl') return;
+          form.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
+        });
+        const filename = videoAsset.fileName || videoAsset.uri.split('/').pop() || `chat-${tempId}.mp4`;
+        form.append('video', {
+          uri: videoAsset.uri,
+          name: filename,
+          type: videoAsset.mimeType || 'video/mp4',
+        });
+        requestBody = form;
+      }
       const response = await axios.post(
         `${BASE_URL}/api/messages/send`,
-        messageData,
+        requestBody,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       const serverMessage = {
@@ -2169,6 +2364,24 @@ const ChatScreen = ({ route, navigation, language }) => {
       }
     } catch (error) {
       console.error('Error sending message:', error);
+      if (error.response && error.response.status < 500) {
+        setMessages(prev => prev.filter(msg => String(msg._id || msg.id) !== tempId));
+        showChatNotice(
+          'error',
+          t.sendFailed,
+          error.response.data?.message || (primaryImage ? t.imageSendFailed : t.couldNotSend)
+        );
+        return;
+      }
+      if (videoAsset) {
+        const failedMessage = { ...tempMessage, syncStatus: 'failed', syncError: error.message };
+        await offlineDatabase.putRecord('messages', tempId, failedMessage, { priority: 'high', protected: true });
+        setMessages(prev => prev.map(msg => (
+          String(msg._id || msg.id) === tempId ? failedMessage : msg
+        )));
+        showChatNotice('error', t.sendFailed, t.videoRetry);
+        return;
+      }
       await offlineDatabase.putRecord('messages', tempId, { ...tempMessage, id: tempId }, { priority: 'high', protected: true });
       await syncManager.enqueue({ actionType: 'SEND_MESSAGE', entityType: 'message', entityId: tempId, payload: { ...messageData, clientMessageId: tempId } });
       setInputText('');
@@ -2176,6 +2389,58 @@ const ChatScreen = ({ route, navigation, language }) => {
       setReplyTo(null);
       clearReplyPost();
       showChatNotice('error', t.error, primaryImage ? t.imageSendFailed : t.couldNotSend);
+    }
+  };
+
+  const retryPendingMessage = async (message) => {
+    if (sendInFlightRef.current) return;
+    const clientMessageId = String(message.clientMessageId || message._id || message.id || '');
+    if (!clientMessageId || !currentUser || !sellerId) return;
+
+    sendInFlightRef.current = true;
+    if (message.videoAsset) {
+      try {
+        await sendMessage(message.text, null, message.repliedTo || null, null, {
+          ...message.videoAsset,
+          clientMessageId,
+          replyPost: message.replyPost || message.videoAsset.replyPost || null,
+        });
+      } finally {
+        sendInFlightRef.current = false;
+      }
+      return;
+    }
+
+    const payload = { ...message, clientMessageId };
+    delete payload._id;
+    delete payload.id;
+    delete payload.syncStatus;
+    delete payload.syncError;
+    delete payload.createdAt;
+    delete payload.read;
+
+    try {
+      const pendingMessage = { ...message, clientMessageId, syncStatus: 'pending', syncError: null };
+      setMessages(previous => previous.map(entry => (
+        String(entry._id || entry.id) === clientMessageId ? pendingMessage : entry
+      )));
+      await offlineDatabase.putRecord('messages', clientMessageId, pendingMessage, { priority: 'high', protected: true });
+      await syncManager.enqueue({
+        actionType: 'SEND_MESSAGE',
+        entityType: 'message',
+        entityId: clientMessageId,
+        payload,
+      });
+    } catch (error) {
+      console.error('Could not retry the pending message:', error);
+      setMessages(previous => previous.map(entry => (
+        String(entry._id || entry.id) === clientMessageId
+          ? { ...entry, syncStatus: 'failed', syncError: error.message }
+          : entry
+      )));
+      showChatNotice('error', t.sendFailed, t.couldNotSend);
+    } finally {
+      sendInFlightRef.current = false;
     }
   };
 
@@ -2324,12 +2589,23 @@ const ChatScreen = ({ route, navigation, language }) => {
     console.log('SELECTED IMAGE:', assets);
 
     try {
+      if (!(await networkStatus.start()).isOnline) {
+        showChatNotice('info', t.networkError, t.unableToUpload);
+        return;
+      }
+    } catch (error) {
+      console.warn('Could not check the network before uploading chat images:', error.message);
+      showChatNotice('error', t.networkError, t.unableToUpload);
+      return;
+    }
+
+    try {
       const lastImageSendKey = `lastImageSend_${currentUser?._id || 'default'}`;
       const lastSend = await AsyncStorage.getItem(lastImageSendKey);
       const now = Date.now();
       if (lastSend) {
-        const elapsed = (now - parseInt(lastSend)) / 6;
-        if (elapsed < 5) {
+        const elapsedMinutes = (now - parseInt(lastSend, 10)) / (1000 * 60);
+        if (elapsedMinutes < 5) {
           showChatNotice('info', t.imageCooldown, t.imageCooldownMessage);
           return;
         }
@@ -2513,7 +2789,9 @@ const ChatScreen = ({ route, navigation, language }) => {
       sound.setOnPlaybackStatusUpdate((status) => {
         if (status.didJustFinish) {
           setPlayingAudioId(null);
-          sound.unloadAsync();
+          sound.unloadAsync().catch(error => {
+            console.warn('Could not unload finished chat audio:', error.message);
+          });
         }
       });
     } catch (error) {
@@ -2523,7 +2801,7 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   const isOwnMessage = useCallback((message) => {
     const userId = currentUser?._id || currentUser?.phone;
-    return message.senderId === userId;
+    return String(message.senderId || '') === String(userId || '');
   }, [currentUser]);
 
   const formatDuration = useCallback((seconds) => {
@@ -2534,6 +2812,7 @@ const ChatScreen = ({ route, navigation, language }) => {
   }, []);
 
   const toChatMessage = (msg) => ({
+    ...msg,
     _id: msg.id || msg._id,
     senderId: msg.senderId || msg.senderPhone,
     senderName: msg.senderName,
@@ -2746,6 +3025,7 @@ const ChatScreen = ({ route, navigation, language }) => {
           sellerId={sellerId}
           sellerName={sellerName}
           onReplyPostPress={navigateToPostDetail}
+          onRetryMessage={retryPendingMessage}
         />
       </>
     );
@@ -2769,11 +3049,15 @@ const ChatScreen = ({ route, navigation, language }) => {
   ]);
 
   useEffect(() => {
+    let scrollTimeout;
     if (!loading && messages.length > 0 && flatListRef.current) {
-      setTimeout(() => {
+      scrollTimeout = setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: false });
       }, 100);
     }
+    return () => {
+      if (scrollTimeout) clearTimeout(scrollTimeout);
+    };
   }, [loading]);
 
   const handleContentSizeChange = () => {
@@ -2785,6 +3069,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     const bottomOffset = contentSize.height - layoutMeasurement.height;
     const threshold = 50;
     const isNear = bottomOffset - contentOffset.y < threshold;
+    isNearBottomRef.current = isNear;
     setIsNearBottom(isNear);
   };
 
@@ -2970,7 +3255,7 @@ const ChatScreen = ({ route, navigation, language }) => {
             />
 
             {editingMessageId ? (
-              <TouchableOpacity onPress={() => sendMessage(inputText, null, replyTo)} style={[styles.sendBtn, { backgroundColor: '#ff9500' }]}>
+              <TouchableOpacity onPress={handleSendPress} style={[styles.sendBtn, { backgroundColor: '#ff9500' }]}>
                 <Ionicons name="pencil" size={20} color="white" />
               </TouchableOpacity>
             ) : (
@@ -3206,8 +3491,12 @@ const styles = StyleSheet.create({
   replyImageContainer: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
   replyImageThumbnail: { width: 40, height: 40, borderRadius: 4 },
   audioButton: { flexDirection: 'row', alignItems: 'center' },
+  videoMessageLink: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   audioDuration: { marginLeft: 8, fontSize: 14 },
   readReceiptContainer: { alignSelf: 'flex-end', marginTop: 0, position: 'absolute', bottom: -15, right: 0 },
+  failedMessageAction: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  failedMessageText: { color: '#d87428', fontSize: 11 },
+  pendingMessageText: { fontSize: 10 },
   replyBar: {
     flexDirection: 'row',
     alignItems: 'center',

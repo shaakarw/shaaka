@@ -1,5 +1,6 @@
+import { getAuthToken } from './utils/authStorage';
 // App.js
-import React, { useState, useCallback, Component, useEffect } from 'react';
+import React, { useState, useCallback, Component, useEffect, useRef } from 'react';
 import {
   DarkTheme,
   DefaultTheme,
@@ -9,11 +10,11 @@ import {
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
-import { AuthProvider } from './context/AuthContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { BottomSheetProvider } from './context/BottomSheetContext';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { LogBox, View, Text, TouchableOpacity, StyleSheet, AppState, Alert } from 'react-native';
+import { LogBox, View, Text, TouchableOpacity, StyleSheet, AppState, Alert, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StatusBar } from 'expo-status-bar';
 import { TabModeProvider } from './context/TabModeContext';
@@ -69,7 +70,10 @@ import OfflineBanner from './components/OfflineBanner';
 import { networkStatus } from './services/networkStatus';
 import { syncManager } from './services/syncManager';
 import { startupPrefetch } from './services/startupPrefetch';
+import { setTutorialsReady } from './services/tutorialCoordinator';
 import { installOfflineApiCache } from './services/offlineApiCache';
+import PushNotificationHandler from './services/PushNotificationHandler';
+import { getNotifications, isExpoGo } from './services/notificationsRuntime';
 import RouteTutorialGuide from './components/RouteTutorialGuide';
 import StartupScreen from './screens/StartupScreen';
 
@@ -214,7 +218,7 @@ const LegacyCustomHeader = ({ theme, language, toggleLanguage, showBackButton = 
           setAvatarUri(currentUser?.avatar || null);
 
           if (currentUser) {
-            const token = await AsyncStorage.getItem('userToken');
+            const token = await getAuthToken('userToken');
             if (!token) {
               setUnreadNotifications(0);
               return;
@@ -256,7 +260,7 @@ const LegacyCustomHeader = ({ theme, language, toggleLanguage, showBackButton = 
           </TouchableOpacity>
         )}
         <TouchableOpacity
-          onPress={() => navigation.navigate('Main', { refreshKey: Date.now() })}
+          onPress={() => navigation.navigate('Main', { screen: 'WelcomeHome' })}
           style={{ flexDirection: 'row' }}
         >
           <Text style={[styles.appName, { color: theme.text }]}>Shaaka</Text>
@@ -431,15 +435,11 @@ const MainTabs = ({
   language,
   toggleLanguage,
   theme,
-  route,
   isLoading,
   onWelcomeHomeReady,
 }) => {
-  const refreshKey = route?.params?.refreshKey || 0;
-
   return (
     <Tab.Navigator
-      key={refreshKey}
       initialRouteName="WelcomeHome"
       tabBar={props => <BottomBar {...props} theme={theme} />}
       screenOptions={{ headerShown: false }}
@@ -520,6 +520,13 @@ const MainTabs = ({
 // ==================== APP CONTENT ====================
 function AppContent() {
   const { theme, isDarkMode, isLoading } = useTheme();
+  const {
+    isAuthenticated,
+    isAdminAuthenticated,
+    loading: authLoading,
+    adminSessionInvalidated,
+    clearAdminSessionInvalidated,
+  } = useAuth();
   const [showStartupAnimation, setShowStartupAnimation] = useState(true);
   const [isWelcomeHomeReady, setIsWelcomeHomeReady] = useState(false);
   const baseNavigationTheme = isDarkMode ? DarkTheme : DefaultTheme;
@@ -535,9 +542,93 @@ function AppContent() {
   const [showMobileNavigation, setShowMobileNavigation] = useState(false);
   const [activeRouteName, setActiveRouteName] = useState(null);
   const navigationRef = useNavigationContainerRef();
+  const previousAuthentication = useRef(isAuthenticated);
+  const pendingNotificationRef = React.useRef(null);
+  const handledNotificationIds = React.useRef(new Set());
+  const handleNotificationTap = useCallback(async data => {
+    const notificationId = String(data?.notificationId || '');
+    if (notificationId && handledNotificationIds.current.has(notificationId)) return;
+    const destination = data?.destination;
+    const allowedDestinations = ['Chat', 'PostDetail', 'ViewPlace', 'ViewShop', 'Settings', 'ChangePassword', 'Notifications'];
+    const route = allowedDestinations.includes(destination) ? destination : 'Notifications';
+    const params = data?.params && typeof data.params === 'object' ? data.params : {};
+    if (!navigationRef.isReady()) {
+      pendingNotificationRef.current = { data };
+      return;
+    }
+    if (notificationId) handledNotificationIds.current.add(notificationId);
+    if (notificationId) {
+      try {
+        const token = await getAuthToken('userToken');
+        if (token) {
+          const response = await axios.patch(
+            `${BASE_URL}/api/notifications/${notificationId}/read`,
+            {},
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (!isExpoGo && (Platform.OS === 'ios' || Platform.OS === 'android')) {
+            const Notifications = getNotifications();
+            if (Notifications) {
+              await Notifications.setBadgeCountAsync(response.data.unreadCount || 0);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[Push] Could not mark notification as read:', error?.response?.data?.message || error?.message || error);
+      }
+    }
+    if (route === 'ViewPlace' && !params.place) {
+      try {
+        const token = await getAuthToken('userToken');
+        const placeId = params.placeId || params.shopId || params.shoppingMallId;
+        if (!token || !placeId) throw new Error('Notification does not contain a place identifier');
+        const response = await axios.get(`${BASE_URL}/api/places/${placeId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        navigationRef.navigate('ViewPlace', { place: response.data.place });
+        return;
+      } catch (error) {
+        console.error('[Push] Could not open the notification destination:', error?.response?.data?.message || error?.message || error);
+        navigationRef.navigate('Notifications');
+        return;
+      }
+    }
+    navigationRef.navigate(route, params);
+  }, [navigationRef]);
   const toggleLanguage = () => setLanguage(prev => prev === 'English' ? 'Kinyarwanda' : 'English');
   const finishStartupAnimation = useCallback(() => setShowStartupAnimation(false), []);
   const markWelcomeHomeReady = useCallback(() => setIsWelcomeHomeReady(true), []);
+
+  useEffect(() => {
+    if (!showStartupAnimation) setTutorialsReady();
+  }, [showStartupAnimation]);
+
+  useEffect(() => {
+    if (previousAuthentication.current && !isAuthenticated && navigationRef.isReady()) {
+      navigationRef.resetRoot({ index: 0, routes: [{ name: 'Login' }] });
+    }
+    previousAuthentication.current = isAuthenticated;
+  }, [isAuthenticated, navigationRef]);
+
+  useEffect(() => {
+    if (
+      authLoading
+      || isAuthenticated
+      || !isAdminAuthenticated
+      || activeRouteName === 'AdminDashboard'
+      || !navigationRef.isReady()
+    ) return;
+    navigationRef.resetRoot({ index: 0, routes: [{ name: 'AdminDashboard' }] });
+  }, [activeRouteName, authLoading, isAdminAuthenticated, isAuthenticated, navigationRef]);
+
+  useEffect(() => {
+    if (!adminSessionInvalidated || !navigationRef.isReady()) return;
+    clearAdminSessionInvalidated();
+    navigationRef.resetRoot({
+      index: 0,
+      routes: [{ name: 'AdminLogin', params: { forceLogin: true } }],
+    });
+  }, [adminSessionInvalidated, clearAdminSessionInvalidated, navigationRef]);
 
   useEffect(() => {
     let previousOnline = false;
@@ -562,7 +653,7 @@ function AppContent() {
   // ---------- GLOBAL ONLINE STATUS (unchanged) ----------
   const setGlobalOnlineStatus = useCallback(async (online) => {
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (!token) return;
       await axios.post(
         `${BASE_URL}/api/user/online`,
@@ -576,7 +667,7 @@ function AppContent() {
 
   useEffect(() => {
     const checkAndSetOnline = async () => {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (token) {
         setGlobalOnlineStatus(true);
       }
@@ -611,7 +702,14 @@ function AppContent() {
         <NavigationContainer
           ref={navigationRef}
           theme={navigationTheme}
-          onReady={() => setActiveRouteName(navigationRef.getCurrentRoute()?.name || null)}
+          onReady={() => {
+            setActiveRouteName(navigationRef.getCurrentRoute()?.name || null);
+            if (pendingNotificationRef.current) {
+              const { data } = pendingNotificationRef.current;
+              pendingNotificationRef.current = null;
+              handleNotificationTap(data);
+            }
+          }}
           onStateChange={state => {
             const activeRoute = state?.routes?.[state.index];
             setActiveRouteName(navigationRef.getCurrentRoute()?.name || null);
@@ -624,6 +722,7 @@ function AppContent() {
             );
           }}
         >
+          <PushNotificationHandler onNotificationTap={handleNotificationTap} />
           <OfflineBanner />
           
           <Stack.Navigator initialRouteName="Main" screenOptions={{ headerShown: false }}>
@@ -660,7 +759,12 @@ function AppContent() {
             </Stack.Screen>
 
             <Stack.Screen name="Tutorial">
-              {props => <TutorialScreen {...props} language={language} />}
+              {props => (
+                <>
+                  <TopBar theme={theme} language={language} toggleLanguage={toggleLanguage} showBackButton />
+                  <TutorialScreen {...props} language={language} />
+                </>
+              )}
             </Stack.Screen>
 
             <Stack.Screen name="AdminTutorial" options={{ headerShown: false }}>

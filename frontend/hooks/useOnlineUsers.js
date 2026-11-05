@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 import { useEffect, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
@@ -51,8 +52,8 @@ export default function useOnlineUsers(userIds = []) {
 
     const startPresence = async () => {
       try {
-        const token = await AsyncStorage.getItem('userToken')
-          || await AsyncStorage.getItem('adminToken');
+        const token = await getAuthToken('userToken')
+          || await getAuthToken('adminToken');
         if (!active || !token) return;
 
         fetchStatuses(token);

@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 import React, { useState, useEffect, useRef } from 'react';
 import {
@@ -59,7 +60,7 @@ const InstagramChatScreen = ({ route, navigation }) => {
 
   const loadCurrentUser = async () => {
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (!token) throw new Error('no token');
       const res = await axios.get(`${BASE_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
       setCurrentUser(res.data.user);
@@ -74,7 +75,7 @@ const InstagramChatScreen = ({ route, navigation }) => {
     setLoading(true);
     try {
       if (!sellerId || !postId) return setLoading(false);
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       const url = `${BASE_URL}/api/messages/${postId}/${currentUser._id}/${sellerId}`;
       const res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } });
       const apiMsgs = (res.data.messages || []).map(m => ({ _id: m._id || m.id, text: m.text, imageUrl: m.imageUrl, senderId: m.senderId, senderAvatar: m.senderAvatar, createdAt: m.createdAt || m.timestamp }));
@@ -110,7 +111,7 @@ const InstagramChatScreen = ({ route, navigation }) => {
     listRef.current?.scrollToEnd();
 
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       let imageUrlToSend = null;
       if (selectedImage && !selectedImage.startsWith('http')) {
         try {

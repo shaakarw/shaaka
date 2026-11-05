@@ -1,3 +1,4 @@
+import { getAuthToken, removeAuthToken } from '../utils/authStorage';
 // screens/AddUpdateScreen.js
 //
 // NOTE ON DEPENDENCIES:
@@ -204,9 +205,9 @@ const AddUpdateScreen = ({ navigation, language }) => {
   // ---------- Token & endpoint helpers (unchanged) ----------
   const getToken = async () => {
     if (isAdmin) {
-      return await AsyncStorage.getItem('adminToken');
+      return await getAuthToken('adminToken');
     } else {
-      return await AsyncStorage.getItem('userToken');
+      return await getAuthToken('userToken');
     }
   };
 
@@ -229,12 +230,12 @@ const AddUpdateScreen = ({ navigation, language }) => {
       }
     } catch (error) {
       console.error('Fetch notes error:', error.response?.data || error.message);
-      if (error.response?.status === 401) {
+      if (['session_invalidated', 'session_ended'].includes(error.response?.data?.reason)) {
         if (isAdmin) {
-          await AsyncStorage.removeItem('adminToken');
+          await removeAuthToken('adminToken');
           navigation.replace('AdminLogin');
         } else {
-          await AsyncStorage.removeItem('userToken');
+          await removeAuthToken('userToken');
           navigation.replace('Login');
         }
       }

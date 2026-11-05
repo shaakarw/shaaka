@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 import { getImageUri, normalizeImageSource } from '../utils/imageUrl';
 import { getPostImages } from '../utils/postMedia';
@@ -120,7 +121,7 @@ const translations = {
     video: 'Video',
     buffering: 'Buffering...',
     previewVideo: 'Preview video',
-    shakarole:'Shaaka only connect buyer and seller',
+   
   },
   Kinyarwanda: {
     loading: 'Turigutunganya page neza...',
@@ -164,7 +165,7 @@ const translations = {
     video: 'Video',
     buffering: 'Video iri gufunguka...',
     previewVideo: 'Reba video',
-    shakarole:'Shaaka ihuza ugura nu gurisha gusa',
+   
   },
 };
 
@@ -720,9 +721,11 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
 
   const checkLoginStatus = async () => {
     try {
-      const storedValues = await AsyncStorage.multiGet(['isLoggedIn', 'userToken']);
-      const isAuthenticated = storedValues[0]?.[1] === 'true' && Boolean(storedValues[1]?.[1]);
-      const token = storedValues[1]?.[1];
+      const [loginFlag, token] = await Promise.all([
+        AsyncStorage.getItem('isLoggedIn'),
+        getAuthToken('userToken'),
+      ]);
+      const isAuthenticated = loginFlag === 'true' && Boolean(token);
       setIsLoggedIn(isAuthenticated);
       if (!isAuthenticated) {
         setLoading(false);
@@ -823,22 +826,24 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
   const toggleSave = async () => {
     if (!isLoggedIn || !house) return;
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
+      if (!token) throw new Error('Authentication token is missing');
       const response = await axios.post(
         `${BASE_URL}/api/posts/save/${house._id}`,
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      if (response.data.success) {
-        setIsSaved(response.data.saved);
-        Alert.alert(
-          response.data.saved ? t.savedTitle : t.removed,
-          response.data.saved ? t.postSaved : t.postRemoved
-        );
+      if (!response.data?.success || typeof response.data.saved !== 'boolean') {
+        throw new Error(response.data?.message || t.couldNotSave);
       }
+      setIsSaved(response.data.saved);
+      Alert.alert(
+        response.data.saved ? t.savedTitle : t.removed,
+        response.data.saved ? t.postSaved : t.postRemoved
+      );
     } catch (error) {
       console.error(error);
-      Alert.alert(t.error, t.couldNotSave);
+      Alert.alert(t.error, error.response?.data?.message || t.couldNotSave);
     }
   };
 
@@ -963,9 +968,7 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
               <View style={styles.tagsRow}>
                <Text style={[styles.tagText, { color: theme.textSecondary }]}>{location}</Text>
               </View>
-              <View style={styles.ratingRow}>
-                <Text style={[styles.ratingText, { color: theme.login}]}>{t.shakarole}</Text>
-              </View>
+             
             </View>
             <View style={styles.priceContainer}>
               <Text style={[styles.price, { color: theme.text }]}>
@@ -1104,7 +1107,7 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
     <Ionicons
       name={isSaved ? 'bookmark' : 'bookmark-outline'}
       size={22}
-      color={theme.text}
+      color={isSaved ? '#d87428' : theme.text}
     />
   </TouchableOpacity>
 

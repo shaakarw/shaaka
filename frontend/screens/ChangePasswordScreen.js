@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 import React, { useRef, useState } from 'react';
 import { ActivityIndicator, Alert, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import axios from 'axios';
@@ -33,10 +34,9 @@ export default function ChangePasswordScreen({ navigation, route, language = 'En
 
   const getAuthToken = async () => {
     if (adminMode) {
-      const adminToken = await AsyncStorage.getItem('adminToken');
-      if (adminToken) return adminToken;
+      return getAuthToken('adminToken');
     }
-    return AsyncStorage.getItem('userToken');
+    return getAuthToken('userToken');
   };
 
   const verifyCurrentPassword = async () => {
@@ -51,7 +51,10 @@ export default function ChangePasswordScreen({ navigation, route, language = 'En
         reportError(rw ? 'Injira ubundi mbere.' : 'Please log in first.');
         return;
       }
-      await axios.post(`${BASE_URL}/api/auth/verify-current-password`, { currentPassword }, { headers: { Authorization: `Bearer ${token}` } });
+      const endpoint = adminMode
+        ? '/api/admin/change-password/verify'
+        : '/api/auth/verify-current-password';
+      await axios.post(`${BASE_URL}${endpoint}`, { currentPassword }, { headers: { Authorization: `Bearer ${token}` } });
       setError('');
       setStep(2);
     } catch (error) {
@@ -81,7 +84,10 @@ export default function ChangePasswordScreen({ navigation, route, language = 'En
         reportError(rw ? 'Injira ubundi mbere.' : 'Please log in first.');
         return;
       }
-      await axios.put(`${BASE_URL}/api/auth/change-password`, { currentPassword, newPassword }, { headers: { Authorization: `Bearer ${token}` } });
+      const endpoint = adminMode
+        ? '/api/admin/change-password'
+        : '/api/auth/change-password';
+      await axios.put(`${BASE_URL}${endpoint}`, { currentPassword, newPassword }, { headers: { Authorization: `Bearer ${token}` } });
       const message = rw ? 'Ijambo banga ryahinduwe.' : 'Password changed successfully.';
       if (adminMode) {
         showAdminFeedback(rw ? 'Byakunze' : 'Success', message, 'success', {

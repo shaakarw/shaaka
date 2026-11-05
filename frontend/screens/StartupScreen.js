@@ -22,7 +22,7 @@ const logo = require('../assets/logos.png');
 const BRAND = 'SHAAKA';
 
 // What SHAAKA does — typed out one character at a time.
-const TAGLINE = 'Buy and sell pre-loved fashion';
+const TAGLINE = 'Buy & sell and Locate pre-loved fashion';
 
 /* -------------------------------------------------------------------------- */
 /*  Navigation                                                                */
@@ -486,7 +486,7 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   tagline: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '500',
     letterSpacing: 1.2,
   },

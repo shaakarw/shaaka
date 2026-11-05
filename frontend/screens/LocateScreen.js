@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 // screens/LocateScreen.js
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
@@ -11,6 +12,7 @@ import {
   Alert,
   BackHandler,
   Dimensions,
+  ActivityIndicator,
   FlatList,
   TouchableWithoutFeedback,
 } from 'react-native';
@@ -146,11 +148,12 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       errorTitle: 'Error',
       noCoordinates: 'This place has no valid coordinates.',
       myShops: 'My Shops',
+      myShopsLoadFailed: 'Could not load your shops. Please try again.',
       noShopsYet: "You haven't added any shops yet.",
       addFirstShop: 'Add Your First Shop',
       savedPlaces: 'Saved Places & Shops',
       noSavedPlaces: "You haven't saved any places or shops yet.",
-      savedPlacesHint: 'Tap the ❤️ on a place or shop to save it.',
+      savedPlacesHint: 'Tap the bookmark icon on a place or shop to save it.',
       deleteShop: 'Delete Shop',
       deleteConfirm: 'Are you sure you want to delete this place?',
       deleteMallShopConfirm: 'Are you sure you want to delete this shop from the mall?',
@@ -186,7 +189,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       tSearchTitle: 'Search places',
       tSearchBody: 'Tap here to search for places, shops, or malls by name or category.',
       tSavedTitle: 'Saved places',
-      tSavedBody: 'Tap the heart to see places and shops you have saved for later.',
+      tSavedBody: 'Tap the bookmark icon to see places and shops you have saved for later.',
       tMyShopsTitle: 'My shops',
       tMyShopsBody: 'Tap the store icon to manage the shops you have added. You can open or delete them.',
       tLocateTitle: 'Find me',
@@ -205,11 +208,12 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       errorTitle: 'Ikibazo',
       noCoordinates: 'Aha hantu ntihamaze kugaragara.',
       myShops: 'Amabanga yanjye',
+      myShopsLoadFailed: 'Ntibyashobotse kubona amaduka yawe. Ongera ugerageze.',
       noShopsYet: 'Nta iduka wongeyemo.',
       addFirstShop: 'Ongera iduka ryawe rya mbere',
       savedPlaces: 'Ahantu n’amaduka wabitse',
       noSavedPlaces: 'Nta hantu cyangwa iduka wabikitse.',
-      savedPlacesHint: 'Kanda kuri ❤️ ku hantu cyangwa ku iduka uribike.',
+      savedPlacesHint: 'Kanda ku kimenyetso cyo kubika ahantu cyangwa iduka.',
       deleteShop: 'Siba iduka',
       deleteConfirm: 'Ese urabyemera gusiba iri duka?',
       deleteMallShopConfirm: 'Ese urashaka gusiba iri duka ryo mu isoko rinini?',
@@ -284,6 +288,8 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   const [myShopsVisible, setMyShopsVisible] = useState(false);
   const [savedPlacesVisible, setSavedPlacesVisible] = useState(false);
+  const [myShopsLoading, setMyShopsLoading] = useState(false);
+  const [savedPlacesLoading, setSavedPlacesLoading] = useState(false);
   const shopSheetTranslateY = useRef(new Animated.Value(height * 0.75)).current;
   const [savedPlaces, setSavedPlaces] = useState([]);
   const [favoriteIds, setFavoriteIds] = useState([]);
@@ -366,7 +372,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   });
 
   const isAuthenticated = async () => {
-    const token = await AsyncStorage.getItem('userToken');
+    const token = await getAuthToken('userToken');
     return !!token;
   };
 
@@ -394,7 +400,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     if (!userId) return false;
 
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (!token) return false;
 
       const headers = { Authorization: `Bearer ${token}` };
@@ -484,11 +490,17 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     }
   };
 
+  useEffect(() => {
+    loadCachedMapData().catch(error => {
+      console.warn('Could not restore cached map data:', error.message);
+    });
+  }, []);
+
   const fetchPlaces = async () => {
     await loadCachedMapData();
     if (!networkStatus.get().isConnected || !networkStatus.get().isInternetReachable) return;
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       const headers = {};
       if (token) headers.Authorization = `Bearer ${token}`;
       const response = await axios.get(`${BASE_URL}/api/places`, { headers });
@@ -508,7 +520,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
   const fetchPlacesSilent = async () => {
     if (!networkStatus.get().isConnected || !networkStatus.get().isInternetReachable) return;
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       const headers = {};
       if (token) headers.Authorization = `Bearer ${token}`;
       const response = await axios.get(`${BASE_URL}/api/places`, { headers });
@@ -541,7 +553,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       return;
     }
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       const responses = await Promise.all(mallIds.map(mallId => axios.get(`${BASE_URL}/api/mall-shops`, {
         params: { mallId },
@@ -561,7 +573,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
 
   const fetchMyMallShops = useCallback(async () => {
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (!token) {
         setMyMallShops([]);
         return;
@@ -888,7 +900,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
       return;
     }
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       const response = await axios.get(`${BASE_URL}/api/mall-shops/search`, {
         params: { q: query.trim() },
@@ -1331,7 +1343,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         .filter(shop => favoriteShopIds.includes(String(shop._id || shop.id)))
         .map(shop => ({ ...shop, isMallShop: true }));
 
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (token && networkStatus.get().isConnected && networkStatus.get().isInternetReachable) {
         try {
           const response = await axios.get(`${BASE_URL}/api/favorites`, {
@@ -1371,15 +1383,29 @@ function LocateScreen({ navigation, route, language = 'English' }) {
     const can = await requireAuth();
     if (!can) return;
     if (myShopsVisible) setMyShopsVisible(false);
+    setSavedPlacesLoading(true);
     setSavedPlacesVisible(true);
-    loadSavedPlaces();
+    try {
+      await loadSavedPlaces();
+    } finally {
+      setSavedPlacesLoading(false);
+    }
   };
 
   const openMyShops = async () => {
     const can = await requireAuth();
     if (!can) return;
     if (savedPlacesVisible) setSavedPlacesVisible(false);
+    setMyShopsLoading(true);
     setMyShopsVisible(true);
+    try {
+      await Promise.all([fetchPlaces(), fetchMyMallShops()]);
+    } catch (error) {
+      console.error('Error loading your shops:', error);
+      showAppAlert(t.errorTitle, t.myShopsLoadFailed);
+    } finally {
+      setMyShopsLoading(false);
+    }
   };
 
   // ---- Locate helper: fly map → highlight → navigate ----
@@ -1473,7 +1499,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
           style: 'destructive',
           onPress: async () => {
             try {
-              const token = await AsyncStorage.getItem('userToken');
+              const token = await getAuthToken('userToken');
               await axios.delete(`${BASE_URL}/api/places/${placeId}`, {
                 headers: { Authorization: `Bearer ${token}` },
               });
@@ -1499,7 +1525,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
           style: 'destructive',
           onPress: async () => {
             try {
-              const token = await AsyncStorage.getItem('userToken');
+              const token = await getAuthToken('userToken');
               await axios.delete(`${BASE_URL}/api/mall-shops/${shopId}`, {
                 headers: { Authorization: `Bearer ${token}` },
               });
@@ -1998,7 +2024,12 @@ function LocateScreen({ navigation, route, language = 'English' }) {
             <Ionicons name="close" size={26} color={textColor} />
           </TouchableOpacity>
         </View>
-        {myBusinesses.length === 0 ? (
+        {myShopsLoading ? (
+          <View style={styles.sheetLoading}>
+            <ActivityIndicator size="large" color={theme.accent} />
+            <Text style={[styles.emptyText, { color: secondaryText }]}>{t.loading}</Text>
+          </View>
+        ) : myBusinesses.length === 0 ? (
           <View style={styles.emptyContainer}>
             <MaterialCommunityIcons name="store-off" size={60} color={secondaryText} />
             <Text style={[styles.emptyText, { color: secondaryText }]}>{t.noShopsYet}</Text>
@@ -2040,16 +2071,21 @@ function LocateScreen({ navigation, route, language = 'English' }) {
         <View style={[styles.sheetHandle, { backgroundColor: secondaryText }]} />
         <View style={styles.modalHeader}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <Ionicons name="heart" size={22} color={theme.accent} />
+            <Ionicons name="bookmark" size={22} color="#d87428" />
             <Text style={[styles.modalTitle, { color: textColor }]}>{t.savedPlaces}</Text>
           </View>
           <TouchableOpacity onPress={closeSavedPlaces}>
             <Ionicons name="close" size={26} color={textColor} />
           </TouchableOpacity>
         </View>
-        {savedPlaces.length === 0 ? (
+        {savedPlacesLoading ? (
+          <View style={styles.sheetLoading}>
+            <ActivityIndicator size="large" color="#d87428" />
+            <Text style={[styles.emptyText, { color: secondaryText }]}>{t.loading}</Text>
+          </View>
+        ) : savedPlaces.length === 0 ? (
           <View style={styles.emptyContainer}>
-            <Ionicons name="heart-outline" size={60} color={secondaryText} />
+            <Ionicons name="bookmark-outline" size={60} color={secondaryText} />
             <Text style={[styles.emptyText, { color: secondaryText }]}>
               {t.noSavedPlaces}
             </Text>
@@ -2068,26 +2104,26 @@ function LocateScreen({ navigation, route, language = 'English' }) {
                 : getAddressString(item);
               return (
                 <TouchableOpacity
-                  style={[styles.myShopItem, { backgroundColor: theme.background }]}
+                  style={[styles.myShopItem, { backgroundColor: '#d87428' }]}
                   onPress={() => handleSavedPlacePress(item)}
                   activeOpacity={0.75}
                 >
-                  <View style={[styles.myShopIconCircle, { backgroundColor: theme.accent + '22' }]}>
+                  <View style={[styles.myShopIconCircle, { backgroundColor: 'rgba(255,255,255,0.2)' }]}>
                     <MaterialCommunityIcons
                       name={item.isMallShop ? 'store' : icon}
                       size={22}
-                      color={theme.accent}
+                      color="#fff"
                     />
                   </View>
                   <View style={styles.myShopTexts}>
-                    <Text style={[styles.myShopName, { color: textColor }]} numberOfLines={1}>
+                    <Text style={[styles.myShopName, { color: '#fff' }]} numberOfLines={1}>
                       {item.name}
                     </Text>
-                    <Text style={[styles.myShopAddress, { color: theme.textSecondary }]} numberOfLines={1}>
+                    <Text style={[styles.myShopAddress, { color: 'rgba(255,255,255,0.85)' }]} numberOfLines={1}>
                       {addressStr}
                     </Text>
                   </View>
-                  <Ionicons name="arrow-forward-circle" size={22} color={theme.textSecondary} />
+                  <Ionicons name="arrow-forward-circle" size={22} color="#fff" />
                 </TouchableOpacity>
               );
             }}
@@ -2326,7 +2362,7 @@ function LocateScreen({ navigation, route, language = 'English' }) {
               style={[styles.headerIconBtn, { backgroundColor: isDarkMode ? 'rgba(0,0,0,0.8)' : 'rgba(255,255,255,0.8)' }]}
               onPress={handleSavedLocationsPress}
             >
-              <Ionicons name="heart-outline" size={28} color={textColor} />
+              <Ionicons name="bookmark-outline" size={28} color={textColor} />
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -2516,8 +2552,8 @@ const styles = StyleSheet.create({
   },
   myShopsSheet: {
     width: '100%',
-    maxHeight: '80%',
-    minHeight: 220,
+    maxHeight: height * 0.75,
+    minHeight: height * 0.45,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     paddingHorizontal: 16,
@@ -2542,6 +2578,7 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
     paddingTop: 4,
   },
+  sheetLoading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   myShopItem: {
     flexDirection: 'row',
     alignItems: 'center',

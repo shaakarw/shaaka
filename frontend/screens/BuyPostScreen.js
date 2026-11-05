@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 // screens/BuyPostScreen.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
@@ -37,6 +38,7 @@ import { setReelsActive } from '../services/reelActivity';
 import { reelVideoCache } from '../services/reelVideoCache';
 import { requestVideoBackground } from '../services/videoBackgroundService';
 import { useContactInfo, useContactLinks } from '../services/contactInfo';
+import ContactInfoIcon from '../components/ContactInfoIcon';
 
 LogBox.ignoreLogs([
   'The native view manager for module(ExpoBlur)',
@@ -70,6 +72,7 @@ let restoredReelIndex = 0;
 
 const DEFAULT_AVATAR = require('../assets/profile1.png');
 const LOADING_LOGO = require('../assets/logos.png');
+const buyPostFeedMemoryCache = new Map();
 
 const shuffleArray = (array) => {
   const copy = [...array];
@@ -1316,11 +1319,6 @@ const SuggestionOverlayContent = React.memo(({
           <Text style={[styles.suggestionStatusText, { color: isSuccess ? '#47ae87' : '#d87428' }]}>
             {suggestionState.message}
           </Text>
-          {suggestionState.sentText && (
-            <Text style={[styles.suggestionSentText, { color: '#fff' }]} numberOfLines={2}>
-              "{suggestionState.sentText}"
-            </Text>
-          )}
         </Animated.View>
       </View>
     );
@@ -1660,7 +1658,7 @@ const HouseCard = React.memo(({
               <Ionicons
                 name={isSaved ? 'bookmark' : 'bookmark-outline'}
                 size={32}
-                color={isSaved ? '#47ae87' : '#ffffff'}
+                color={isSaved ? '#d87428' : '#ffffff'}
                 style={styles.rightActionIcon}
               />
             </TouchableOpacity>
@@ -1850,6 +1848,8 @@ const ReelsFeed = React.memo(({
   const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 80 }).current;
   const latestReelsRef = useRef(reels);
   const onLoadMoreRef = useRef(onLoadMore);
+  const lastLoadMoreIndexRef = useRef(-1);
+  const lastLoadMoreReelCountRef = useRef(0);
   latestReelsRef.current = reels;
   onLoadMoreRef.current = onLoadMore;
 
@@ -1869,13 +1869,23 @@ const ReelsFeed = React.memo(({
     setActiveIndex(index);
 
     const currentReels = latestReelsRef.current;
+    if (currentReels.length < lastLoadMoreReelCountRef.current) {
+      lastLoadMoreIndexRef.current = -1;
+    }
     [index - 1, index + 1].forEach(reelIndex => {
       const reel = currentReels[reelIndex];
       if (reel?.videoThumbnail) {
         videoPreloader.preloadThumbnail(reel.videoThumbnail, String(reel._id));
       }
     });
-    if (index >= currentReels.length - 2) onLoadMoreRef.current?.();
+    if (
+      index >= currentReels.length - 2 &&
+      index > lastLoadMoreIndexRef.current
+    ) {
+      lastLoadMoreIndexRef.current = index;
+      lastLoadMoreReelCountRef.current = currentReels.length;
+      onLoadMoreRef.current?.();
+    }
   }).current;
 
   useEffect(() => {
@@ -2073,7 +2083,7 @@ const ReelsFeed = React.memo(({
             <Ionicons
               name={isSaved ? 'bookmark' : 'bookmark-outline'}
               size={28}
-              color={isSaved ? '#47ae87' : '#fff'}
+              color={isSaved ? '#d87428' : '#fff'}
             />
           </TouchableOpacity>
 
@@ -2108,7 +2118,7 @@ const ReelsFeed = React.memo(({
       <FlatList
         ref={listRef}
         data={reels}
-        keyExtractor={item => String(item.reelId || item._id)}
+        keyExtractor={item => String(item._reelLoopKey || item.reelId || item._id)}
         renderItem={renderReel}
         pagingEnabled
         decelerationRate="fast"
@@ -2162,6 +2172,9 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   const { showBottomSheet } = useBottomSheet();
   const route = useRoute();
   const t = translations[language] || translations.English;
+  const feedCacheKey = String(authUser?._id || authUser?.id || 'guest');
+  const cachedInitialFeed = buyPostFeedMemoryCache.get(feedCacheKey);
+  const hasCachedInitialFeed = Array.isArray(cachedInitialFeed?.posts);
 
   const [onlineUsers, setOnlineUsers] = useState({});
   const presenceSocketRef = useRef(null);
@@ -2191,18 +2204,21 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     const ownerId = getPostOwnerId(post);
     return Boolean(viewerId && ownerId && String(viewerId) === String(ownerId));
   }, [viewerId]);
-  const [feedPosts, setFeedPosts] = useState([]);
-  const [feedCursor, setFeedCursor] = useState(null);
-  const [hasMoreFeed, setHasMoreFeed] = useState(true);
+  const [feedPosts, setFeedPosts] = useState(() => cachedInitialFeed?.posts || []);
+  const [feedCursor, setFeedCursor] = useState(() => cachedInitialFeed?.nextCursor || null);
+  const [hasMoreFeed, setHasMoreFeed] = useState(() => cachedInitialFeed?.hasMore ?? true);
   const [isAppendingFeed, setIsAppendingFeed] = useState(false);
   const feedAppendLock = useRef(false);
+  const [reelLoopCycles, setReelLoopCycles] = useState([]);
+  const reelLoopCycleCount = useRef(0);
   const [feedLoopCount, setFeedLoopCount] = useState(3);
   const isExtendingFeedLoop = useRef(false);
   const [myPosts, setMyPosts] = useState([]);
   const [savedPosts, setSavedPosts] = useState([]);
   const [savedPostIds, setSavedPostIds] = useState([]);
+  const saveRequestsRef = useRef(new Set());
   const [updates, setUpdates] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!hasCachedInitialFeed);
   const [refreshing, setRefreshing] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [feedError, setFeedError] = useState(false);
@@ -2469,7 +2485,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     }
   }, [authUser]);
 
-  const getToken = useCallback(async () => await AsyncStorage.getItem('userToken'), []);
+  const getToken = useCallback(async () => await getAuthToken('userToken'), []);
 
   const fetchOnlineStatuses = useCallback(async (userIds) => {
     if (!userIds || userIds.length === 0) return;
@@ -2758,17 +2774,36 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       return [...featured, ...nonFeatured];
     }
   }, []);
+  const hasLoadedFeedRef = useRef(hasCachedInitialFeed);
+
+  useEffect(() => {
+    if (!hasLoadedFeedRef.current) return;
+    buyPostFeedMemoryCache.set(feedCacheKey, {
+      posts: feedPosts,
+      nextCursor: feedCursor,
+      hasMore: hasMoreFeed,
+    });
+  }, [feedCacheKey, feedPosts, feedCursor, hasMoreFeed]);
 
   const loadData = useCallback(async (isRefresh = false) => {
-    setLoading(true);
+    if (!hasLoadedFeedRef.current) setLoading(true);
     setFeedError(false);
+    setReelLoopCycles([]);
+    reelLoopCycleCount.current = 0;
 
     const applyFeed = feed => {
       let filteredFeed = feed.posts;
       if (isLoggedIn && currentUser) {
         filteredFeed = feed.posts.filter(post => post.userId !== currentUser._id);
       }
-      setFeedPosts(sortFeedPosts(filteredFeed, isRefresh));
+      const sortedFeed = sortFeedPosts(filteredFeed, isRefresh);
+      hasLoadedFeedRef.current = true;
+      buyPostFeedMemoryCache.set(feedCacheKey, {
+        posts: sortedFeed,
+        nextCursor: feed.nextCursor,
+        hasMore: feed.hasMore,
+      });
+      setFeedPosts(sortedFeed);
       setFeedCursor(feed.nextCursor);
       setHasMoreFeed(feed.hasMore);
       setLoading(false);
@@ -2799,7 +2834,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     } finally {
       setLoading(false);
     }
-  }, [isLoggedIn, currentUser, fetchFeed, fetchNotes, fetchMyPosts, fetchSavedPosts, sortFeedPosts]);
+  }, [feedCacheKey, isLoggedIn, currentUser, fetchFeed, fetchNotes, fetchMyPosts, fetchSavedPosts, sortFeedPosts]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -2812,29 +2847,41 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
 
   const toggleSave = useCallback(async (post) => {
     if (!isLoggedIn) {
-        setLoginSheetMessage(t.pleaseLoginToSave);
-        setLoginSheetVisible(true);
-        return;
+      setLoginSheetMessage(t.pleaseLoginToSave);
+      setLoginSheetVisible(true);
+      return;
     }
+    const postId = String(post?._id || post?.id || '');
+    if (!postId || saveRequestsRef.current.has(postId)) return;
+    saveRequestsRef.current.add(postId);
     try {
       const token = await getToken();
+      if (!token) throw new Error('Authentication token is missing');
       const response = await axios.post(
-        `${BASE_URL}/api/posts/save/${post._id}`,
+        `${BASE_URL}/api/posts/save/${postId}`,
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      if (response.data.success) {
-        if (response.data.saved) {
-          setSavedPostIds(prev => [...prev, post._id]);
-          setSavedPosts(prev => [mapPost(post), ...prev]);
-        } else {
-          setSavedPostIds(prev => prev.filter(id => id !== post._id));
-          setSavedPosts(prev => prev.filter(p => p._id !== post._id));
-        }
+      if (!response.data?.success || typeof response.data.saved !== 'boolean') {
+        throw new Error(response.data?.message || 'Save request was not successful');
+      }
+      if (response.data.saved) {
+        const savedPost = { ...mapPost(post), _id: postId };
+        setSavedPostIds(prev => (
+          prev.some(id => String(id) === postId) ? prev : [...prev, postId]
+        ));
+        setSavedPosts(prev => (
+          prev.some(item => String(item._id) === postId) ? prev : [savedPost, ...prev]
+        ));
+      } else {
+        setSavedPostIds(prev => prev.filter(id => String(id) !== postId));
+        setSavedPosts(prev => prev.filter(item => String(item._id) !== postId));
       }
     } catch (error) {
       console.error('Toggle save error:', error);
-      Alert.alert('Error', 'Failed to save/unsave post');
+      Alert.alert('Error', error.response?.data?.message || 'Failed to save/unsave post');
+    } finally {
+      saveRequestsRef.current.delete(postId);
     }
   }, [isLoggedIn, t.pleaseLoginToSave, getToken]);
 
@@ -2845,9 +2892,13 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       return;
     }
     try {
-      const sellerId = house.userId;
+      const sellerId = getPostOwnerId(house);
       if (!sellerId) {
         Alert.alert('Error', t.sellerInfoMissing);
+        return;
+      }
+      if (viewerId && String(viewerId) === String(sellerId)) {
+        Alert.alert(t.error, t.cannotMessageYourself);
         return;
       }
       const token = await getToken();
@@ -2862,8 +2913,9 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       const replyPost = buildChatReplyPost(house);
       replyPost.username = sellerDisplayName;
       replyPost.videoThumbnail = getVideoCover(house.videoUrl, house.videoThumbnail) || replyPost.videoThumbnail || '';
+      const postId = String(house._id || house.id || '');
       const messageData = {
-        postId: house._id,
+        postId,
         postTitle: house.productName || house.title || '',
         postUser: sellerDisplayName,
         senderId: currentUser?._id,
@@ -2883,17 +2935,16 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         messageData,
         { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
       );
-      try {
-        await axios.post(`${BASE_URL}/api/notifications`, {
-          userId: sellerId,
-          type: 'message',
-          message: text,
-          data: { postId: house._id, senderId: currentUser?._id, senderName: currentUser?.name || currentUser?.username || 'User', hasPostReply: true },
-        }, { headers: { Authorization: `Bearer ${token}` } });
-      } catch (notifErr) {
-        console.warn('Notification failed (non-fatal)');
-      }
       updateSuggestionState(house._id, { status: 'success', message: t.messageSent, sentText: text });
+      navigation.navigate('Chat', {
+        sellerId: String(sellerId),
+        sellerName: sellerDisplayName,
+        sellerAvatar: house.userAvatar || house.user?.avatar || '',
+        sellerPhone: house.contactNumber1 || house.contactNumber2 || '',
+        postId,
+        postTitle: house.productName || house.title || 'Product',
+        replyPost,
+      });
     } catch (error) {
       console.error('Quick send failed', error);
       if (error.response?.status === 401) {
@@ -2906,7 +2957,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     } finally {
       setIsSendingSuggestion(false);
     }
-  }, [isLoggedIn, t, getToken, currentUser, updateSuggestionState]);
+  }, [isLoggedIn, t, getToken, currentUser, viewerId, updateSuggestionState, navigation]);
 
   const handleDeletePost = useCallback(async (postId) => {
     try {
@@ -3114,7 +3165,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
   const renderSocialIcons = useCallback(() => (
     <View style={styles.socialIconsFooter}>
       <Text style={[styles.followText, { color: theme.textSecondary }]}>{t.followUs}</Text>
-      <View style={styles.socialIconsRow}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.socialIconsRow}>
         {socialLinks.map((item, index) => (
           <TouchableOpacity
             key={index}
@@ -3123,11 +3174,11 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
             activeOpacity={0.7}
           >
             <View style={[styles.socialIconCircleSmall, { backgroundColor: item.color }]}>
-              <Ionicons name={item.icon} size={20} color="#fff" />
+              <ContactInfoIcon item={item} size={20} color="#fff" />
             </View>
           </TouchableOpacity>
         ))}
-      </View>
+      </ScrollView>
     </View>
   ), [theme.textSecondary, t.followUs, openSocialLink, socialLinks]);
 
@@ -3154,7 +3205,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
 
   const targetReelId = String(route.params?.reelId || '');
   const targetReelPost = route.params?.reelPost;
-  const displayedReels = useMemo(() => {
+  const baseDisplayedReels = useMemo(() => {
     const reels = getDisplayedPosts();
     if (!targetReelId || reels.some(reel => String(reel.reelId || reel._id) === targetReelId)) {
       return reels;
@@ -3170,6 +3221,10 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       reelId: targetReelId,
     }, ...reels];
   }, [getDisplayedPosts, targetReelId, targetReelPost]);
+  const displayedReels = useMemo(
+    () => [...baseDisplayedReels, ...reelLoopCycles.flat()],
+    [baseDisplayedReels, reelLoopCycles]
+  );
 
   const loopedFeedData = useMemo(() => {
     if (activeTab !== 'ushaka' || !browseFeedPosts || browseFeedPosts.length === 0) return [];
@@ -3256,6 +3311,17 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       isExtendingFeedLoop.current = false;
     });
   }, [activeTab, feedPosts.length, handleFeedEndReached]);
+
+  const handleReelLoopEndReached = useCallback(() => {
+    if (activeTab !== 'videos' || baseDisplayedReels.length === 0) return;
+    const cycleIndex = reelLoopCycleCount.current++;
+    const nextCycle = shuffleArray(baseDisplayedReels).map(reel => ({
+      ...reel,
+      _reelLoopKey: `reel-loop-${cycleIndex}-${reel.reelId || reel._id}`,
+    }));
+    setReelLoopCycles(currentCycles => [...currentCycles, nextCycle]);
+    handleFeedEndReached();
+  }, [activeTab, baseDisplayedReels, handleFeedEndReached]);
 
   useEffect(() => { checkLoginStatus(); }, [checkLoginStatus]);
   useEffect(() => {
@@ -3395,7 +3461,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
                 toggleSave(item);
               }}
             >
-              <Ionicons name="bookmark" size={22} color={isDarkMode ? '#cecdcd' : '#888888'} />
+              <Ionicons name="bookmark" size={22} color="#d87428" />
             </TouchableOpacity>
           )}
         </TouchableOpacity>
@@ -3642,7 +3708,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
           onMessagePress={handleMessagePress}
           onReport={handleReport}
           onUserPress={handleUserPress}
-          onLoadMore={handleFeedEndReached}
+          onLoadMore={handleReelLoopEndReached}
           showLoginModal={(message) => showBottomSheet({
             type: 'login',
             title: t.loginRequired,
@@ -4448,11 +4514,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     padding: 0,
-    minHeight: 34,
+    minHeight: 30,
   },
   suggestionLogoBadge: {
-    width: 42,
-    height: 42,
+    width: 38,
+    height: 38,
     borderRadius: 21,
     backgroundColor: '#fff',
     justifyContent: 'center',
@@ -4476,7 +4542,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
   },
   suggestionStatusText: { fontSize: 10, fontWeight: '700', marginLeft: 8 },
-  suggestionSentText: { fontSize: 10, marginLeft: 8, fontStyle: 'italic', maxWidth: '60%' },
 
   sliderContainer: {
     position: 'relative',
@@ -4517,6 +4582,7 @@ const styles = StyleSheet.create({
   },
   floatingEyeButtonBackground: {
     position: 'absolute',
+
     top: (EYE_BUTTON_SIZE - EYE_BACKGROUND_SIZE) / 2,
     left: (EYE_BUTTON_SIZE - EYE_BACKGROUND_SIZE) / 2,
   },
@@ -4587,7 +4653,7 @@ const styles = StyleSheet.create({
   detailLinkText: { marginLeft: 8, fontSize: 14, flex: 1 },
   socialIconsFooter: { marginTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#ccc', paddingTop: 12 },
   followText: { fontSize: 14, fontWeight: '500', textAlign: 'center', marginBottom: 12 },
-  socialIconsRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 10 },
+  socialIconsRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 2 },
   socialIconSmall: { alignItems: 'center' },
   socialIconCircleSmall: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
 
@@ -4608,7 +4674,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     height: SCREEN_HEIGHT * 0.8,
-    backgroundColor: 'rgba(0,0,0,0.48)',
+    backgroundColor: 'transparent',
   },
   reportSheet: {
     width: '100%',

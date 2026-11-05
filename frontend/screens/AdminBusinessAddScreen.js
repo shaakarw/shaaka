@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 // screens/AdminBusinessAddScreen.js
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -177,7 +178,7 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
 
-  const getToken = async () => AsyncStorage.getItem('adminToken');
+  const getToken = async () => getAuthToken('adminToken');
 
   const fetchItems = useCallback(async () => {
     setLoadingList(true);
@@ -214,7 +215,7 @@ const AdminBusinessAddScreen = ({ navigation, language = 'English' }) => {
       setItems(data);
     } catch (error) {
       console.error('Fetch error:', error?.response?.data || error?.message || error);
-      if (error.response?.status === 401) {
+      if (['session_invalidated', 'session_ended'].includes(error.response?.data?.reason)) {
         showAdminFeedback(t.loginRequired, '', 'error', {
           buttonAction: () => navigation.replace('AdminLogin', { language }),
         });

@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import ContactInfoIcon from '../components/ContactInfoIcon';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useTheme } from '../context/ThemeContext';
 import SharedBottomNav from '../components/SharedBottomNav';
@@ -76,23 +77,25 @@ export default function HowItWorksScreen({ navigation, language = 'English' }) {
             <Ionicons name="share-social-outline" size={28} color={theme.accent} />
             <Text style={[styles.cardTitle, { color: theme.text }]}>{t.followUs}</Text>
           </View>
-          <View style={styles.socialGrid}>
-            {socialLinks.map((item, index) => (
-              <TouchableOpacity
-                key={index}
-                style={styles.socialItem}
-                onPress={() => openSocialLink(item.url, item.fallbackUrl)}
-                activeOpacity={0.7}
-              >
-                <View style={[styles.socialCircle, { backgroundColor: item.color }]}>
-                  <Ionicons name={item.icon} size={32} color="#fff" />
-                </View>
-                <Text style={[styles.socialName, { color: theme.textSecondary }]}>
-                  {item.name}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <View style={styles.socialGrid}>
+              {socialLinks.map((item, index) => (
+                <TouchableOpacity
+                  key={index}
+                  style={styles.socialItem}
+                  onPress={() => openSocialLink(item.url, item.fallbackUrl)}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.socialCircle, { backgroundColor: item.color }]}>
+                    <ContactInfoIcon item={item} size={32} color="#fff" />
+                  </View>
+                  <Text style={[styles.socialName, { color: theme.textSecondary }]}>
+                    {item.name}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </ScrollView>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -181,12 +184,12 @@ const styles = StyleSheet.create({
   // Social Grid
   socialGrid: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
     marginTop: 4,
   },
   socialItem: {
-    width: (width - 32) / 5 - 12, // 3 columns with spacing
+    width: (width - 32) / 5 - 12,
     alignItems: 'center',
     marginVertical: 12,
     marginHorizontal: 6,

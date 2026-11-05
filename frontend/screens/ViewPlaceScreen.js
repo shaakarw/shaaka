@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 // screens/ViewPlaceScreen.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
@@ -153,8 +154,8 @@ const getPrimaryMedia = ({ imageUrl, videoUrl }) => {
 
 // ----- Helper: get token -----
 const getToken = async () => {
-  let token = await AsyncStorage.getItem('userToken');
-  if (!token) token = await AsyncStorage.getItem('adminToken');
+  let token = await getAuthToken('userToken');
+  if (!token) token = await getAuthToken('adminToken');
   return token;
 };
 
@@ -692,7 +693,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
       );
     }
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (!token) return false;
       const res = await axios.get(`${BASE_URL}/api/places`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -1612,7 +1613,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
             return null;
           }}
           renderSectionHeader={renderSectionHeader}
-          ListHeaderComponent={() => (
+          ListHeaderComponent={(
             <View style={styles.content}>
               {!expanded && (
                 <>
@@ -1710,6 +1711,10 @@ export default function ViewPlaceScreen({ route, navigation }) {
                   {/* Contact row — horizontally scrollable, colored like ViewShopScreen */}
                   <ScrollView
                     horizontal
+                    nestedScrollEnabled
+                    directionalLockEnabled
+                    keyboardShouldPersistTaps="handled"
+                    overScrollMode="never"
                     showsHorizontalScrollIndicator={false}
                     style={styles.contactRowScroll}
                     contentContainerStyle={styles.contactRowContent}
@@ -1752,6 +1757,10 @@ export default function ViewPlaceScreen({ route, navigation }) {
                   {/* Action row – horizontally scrollable */}
                   <ScrollView
                     horizontal
+                    nestedScrollEnabled
+                    directionalLockEnabled
+                    keyboardShouldPersistTaps="handled"
+                    overScrollMode="never"
                     showsHorizontalScrollIndicator={false}
                     style={styles.actionRowScroll}
                     contentContainerStyle={styles.actionRowContent}
@@ -1802,19 +1811,19 @@ export default function ViewPlaceScreen({ route, navigation }) {
                     <TouchableOpacity
                       style={[
                         styles.actionBtn,
-                        { backgroundColor: theme.border },
+                        { backgroundColor: isFavorite ? '#d87428' : theme.border },
                       ]}
                       onPress={handleFavorite}
                     >
                       <Ionicons
-                        name={isFavorite ? 'heart' : 'heart-outline'}
+                        name={isFavorite ? 'bookmark' : 'bookmark-outline'}
                         size={22}
-                        color={isFavorite ? 'red' : theme.text}
+                        color={isFavorite ? '#fff' : theme.text}
                       />
                       <Text
                         style={[
                           styles.actionBtnText,
-                          { color: theme.text },
+                          { color: isFavorite ? '#fff' : theme.text },
                         ]}
                       >
                         {isFavorite ? 'Saved' : 'Save'}

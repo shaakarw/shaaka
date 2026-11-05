@@ -1,3 +1,4 @@
+﻿import { getAuthToken } from '../utils/authStorage';
 
 ﻿// screens/SearchScreen.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
@@ -14,10 +15,7 @@ import {
   Keyboard,
   ScrollView, Image,
 } from 'react-native';
-import {
-  SafeAreaView,
-  useSafeAreaInsets,
-} from 'react-native-safe-area-context';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useIsFocused } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
@@ -146,7 +144,6 @@ const HeroDeckSection = ({
 const SearchScreen = ({ navigation, route, language }) => {
   const { theme, isDarkMode } = useTheme();
   const { user: authUser } = useAuth();
-  const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
 
   const bgColor = theme.background || (isDarkMode ? '#111111' : '#FFFFFF');
@@ -158,6 +155,15 @@ const SearchScreen = ({ navigation, route, language }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [recentSearches, setRecentSearches] = useState([]);
+  const [popularSearches, setPopularSearches] = useState([]);
+  const [suggestions, setSuggestions] = useState([]);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(true);
+  const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(-1);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState('');
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  const [searchPage, setSearchPage] = useState(1);
+  const [correctedQuery, setCorrectedQuery] = useState('');
 
   const [allPosts, setAllPosts] = useState([]);
   const [trendingPosts, setTrendingPosts] = useState([]);
@@ -172,6 +178,9 @@ const SearchScreen = ({ navigation, route, language }) => {
   const [currentUser, setCurrentUser] = useState(authUser || null);
   const [loadingMore, setLoadingMore] = useState(false);
   const loadingMoreRef = useRef(false);
+  const searchLoadingMoreRef = useRef(false);
+  const searchRequestRef = useRef(0);
+  const activeSearchRef = useRef({ query: '', loading: false, results: [], correctedQuery: '', error: false, track: false });
 
   const didInitialLoadRef = useRef(false);
   const leftScreenRef = useRef(false);
@@ -185,6 +194,10 @@ const SearchScreen = ({ navigation, route, language }) => {
   const gridOffsetRef = useRef(0);
 
   const sectionGroups = useMemo(() => chunk(trendingPosts, 3), [trendingPosts]);
+  const recentSearchStorageKey = useMemo(
+    () => `${RECENT_SEARCHES_KEY}:${currentUser?._id || currentUser?.id || authUser?._id || authUser?.id || 'guest'}`,
+    [currentUser?._id, currentUser?.id, authUser?._id, authUser?.id]
+  );
 
   const translations = {
     English: {
@@ -200,6 +213,11 @@ const SearchScreen = ({ navigation, route, language }) => {
       results: 'Products',
       users: 'Users',
       recentSearches: 'Recent search',
+      popularSearches: 'Popular searches',
+      clearAll: 'Clear all',
+      didYouMean: 'Did you mean',
+      searchFailed: 'Search is temporarily unavailable.',
+      retry: 'Try again',
     },
     Kinyarwanda: {
       loading: 'Turigutunganya page neza...',
@@ -214,39 +232,49 @@ const SearchScreen = ({ navigation, route, language }) => {
       results: 'Ibicuruzwa',
       users: 'Abakoresha',
       recentSearches: 'Ibyashakishijwe vuba',
+      popularSearches: 'Ibyakunzwe gushakishwa',
+      clearAll: 'Siba byose',
+      didYouMean: 'Waba washakaga kuvuga',
+      searchFailed: 'Gushakisha ntibishobotse ubu.',
+      retry: 'Ongera ugerageze',
     },
   };
 
   const t = translations[language] || translations.English;
+  const searchFailedText = t.searchFailed;
 
   // ---------- Recent Searches Logic ----------
   useEffect(() => {
-    const loadRecent = async () => {
-      try {
-        const existing = await AsyncStorage.getItem(RECENT_SEARCHES_KEY);
-        if (existing) setRecentSearches(JSON.parse(existing));
-      } catch (e) {
-        console.error(e);
-      }
-    };
-    loadRecent();
-  }, []);
+    let active = true;
+    AsyncStorage.getItem(recentSearchStorageKey)
+      .then((existing) => {
+        if (!active) return;
+        const parsed = existing ? JSON.parse(existing) : [];
+        setRecentSearches(Array.isArray(parsed) ? parsed : []);
+      })
+      .catch((error) => console.error('Recent search load failed:', error));
+    return () => { active = false; };
+  }, [recentSearchStorageKey]);
 
-  const addRecentSearch = async (query) => {
+  const addRecentSearch = useCallback(async (query) => {
     try {
-      let list = [...recentSearches];
-      list = list.filter((item) => item.toLowerCase() !== query.toLowerCase());
-      list.unshift(query);
-      list = list.slice(0, 4);
+      const list = [query, ...recentSearches.filter(
+        (item) => item.toLowerCase() !== query.toLowerCase()
+      )].slice(0, 8);
       setRecentSearches(list);
-      await AsyncStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(list));
-    } catch (e) {
-      console.error(e);
+      await AsyncStorage.setItem(recentSearchStorageKey, JSON.stringify(list));
+    } catch (error) {
+      console.error('Recent search save failed:', error);
     }
-  };
+  }, [recentSearches, recentSearchStorageKey]);
 
   // ---------- Stable helpers ----------
-  const getToken = useCallback(async () => await AsyncStorage.getItem('userToken'), []);
+  const getToken = useCallback(async () => await getAuthToken('userToken'), []);
+
+  const trackSearchEvent = useCallback((query, event, postId) => {
+    axios.post(`${BASE_URL}/api/posts/search/analytics`, { query, event, postId })
+      .catch((error) => console.error('Search analytics request failed:', error.message));
+  }, []);
 
   const loadCurrentUser = useCallback(async () => {
     try {
@@ -255,6 +283,9 @@ const SearchScreen = ({ navigation, route, language }) => {
         if (authUser) {
           setCurrentUser(authUser);
           setIsLoggedIn(true);
+        } else {
+          setCurrentUser(null);
+          setIsLoggedIn(false);
         }
         return;
       }
@@ -272,6 +303,9 @@ const SearchScreen = ({ navigation, route, language }) => {
       if (authUser) {
         setCurrentUser(authUser);
         setIsLoggedIn(true);
+      } else {
+        setCurrentUser(null);
+        setIsLoggedIn(false);
       }
     }
   }, [authUser, getToken]);
@@ -284,7 +318,7 @@ const SearchScreen = ({ navigation, route, language }) => {
     } catch (error) {
       console.error(error);
     }
-  }, [loadCurrentUser]);
+  }, [authUser, loadCurrentUser]);
 
   // ---------- Data fetching ----------
   const fetchFeed = useCallback(async (pageNum = 1, limit = PAGE_SIZE) => {
@@ -401,47 +435,106 @@ const SearchScreen = ({ navigation, route, language }) => {
   // ---------------------------------------------------------------
   // SEARCH
   // ---------------------------------------------------------------
-  const runSearch = useCallback(
-    (rawQuery) => {
-      const q = (rawQuery || '').trim().toLowerCase();
-      const candidates = allPosts;
-      let productMatches = candidates;
-      let userMatches = [];
+  const runSearch = useCallback(async (rawQuery, pageNum = 1, track = false) => {
+    const query = String(rawQuery || '').trim();
+    if (!query) {
+      setSearchResults([]);
+      setSuggestions([]);
+      setSearchHasMore(false);
+      setSearchLoading(false);
+      return;
+    }
 
-      if (q) {
-        productMatches = candidates.filter(
-          (post) =>
-            post.productName?.toLowerCase().includes(q) ||
-            post.description?.toLowerCase().includes(q) ||
-            post.location?.toLowerCase().includes(q) ||
-            post.username?.toLowerCase().includes(q)
-        );
-
-        const userMap = new Map();
-        candidates.forEach((post) => {
-          const uname = post.username || '';
-          if (uname.toLowerCase().includes(q)) {
-            if (!userMap.has(uname)) {
-              userMap.set(uname, {
-                username: uname,
-                userId: post.userId,
-                avatar: post.userAvatar,
-                productCount: 0,
-              });
-            }
-            userMap.get(uname).productCount += 1;
-          }
-        });
-        userMatches = Array.from(userMap.values());
+    const activeSearch = activeSearchRef.current;
+    if (pageNum === 1 && activeSearch.query === query && activeSearch.loading) {
+      activeSearch.track = activeSearch.track || track;
+      return;
+    }
+    if (pageNum === 1 && activeSearch.query === query && !activeSearch.error) {
+      if (track) {
+        trackSearchEvent(query, 'search');
+        if (activeSearch.results.length === 0) trackSearchEvent(query, 'no_results');
+        if (activeSearch.correctedQuery) trackSearchEvent(query, 'typo');
       }
+      return;
+    }
 
-      productMatches.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-
-      setSearchResults(productMatches);
-      setMatchedUsers(userMatches);
-    },
-    [allPosts]
-  );
+    const requestId = ++searchRequestRef.current;
+    activeSearchRef.current = {
+      query,
+      loading: true,
+      results: [],
+      correctedQuery: '',
+      error: false,
+      track,
+    };
+    setSearchLoading(true);
+    setSearchError('');
+    if (pageNum === 1) {
+      setSearchResults([]);
+      setSearchPage(1);
+    }
+    try {
+      const response = await axios.get(`${BASE_URL}/api/posts/search`, {
+        params: { q: query, page: pageNum, limit: PAGE_SIZE },
+        timeout: 15000,
+      });
+      if (requestId !== searchRequestRef.current) return;
+      const data = response.data || {};
+      const posts = (data.posts || []).map(mapPost);
+      const usersById = new Map();
+      posts.forEach((post) => {
+        const username = post.username || '';
+        const userId = String(post.userId || '');
+        if (username.toLowerCase().includes(query.toLowerCase()) && userId) {
+          const user = usersById.get(userId) || {
+            username,
+            userId,
+            avatar: post.userAvatar,
+            productCount: 0,
+          };
+          user.productCount += 1;
+          usersById.set(userId, user);
+        }
+      });
+      setMatchedUsers((previous) => pageNum === 1
+        ? [...usersById.values()]
+        : [...new Map([...previous, ...usersById.values()].map((user) => [String(user.userId), user])).values()]);
+      setSearchResults((previous) => {
+        if (pageNum === 1) return posts;
+        const existingIds = new Set(previous.map((post) => String(post._id)));
+        return [...previous, ...posts.filter((post) => !existingIds.has(String(post._id)))];
+      });
+      setSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
+      setCorrectedQuery(data.correctedQuery || '');
+      setSearchHasMore(data.hasMore === true);
+      setSearchPage(pageNum);
+      setSubmittedQuery(query);
+      activeSearchRef.current.results = posts;
+      activeSearchRef.current.correctedQuery = data.correctedQuery || '';
+      activeSearchRef.current.loading = false;
+      const shouldTrack = activeSearchRef.current.track;
+      activeSearchRef.current.track = false;
+      if (shouldTrack) {
+        trackSearchEvent(query, 'search');
+        if (posts.length === 0 && pageNum === 1) trackSearchEvent(query, 'no_results');
+        if (data.correctedQuery) trackSearchEvent(query, 'typo');
+      }
+    } catch (error) {
+      if (requestId !== searchRequestRef.current) return;
+      console.error('Product search failed:', error.message);
+      setSearchError(searchFailedText);
+      setSearchResults([]);
+      setSearchHasMore(false);
+      activeSearchRef.current.error = true;
+    } finally {
+      if (requestId === searchRequestRef.current) {
+        setSearchLoading(false);
+        activeSearchRef.current.loading = false;
+      }
+      if (pageNum > 1) searchLoadingMoreRef.current = false;
+    }
+  }, [searchFailedText, trackSearchEvent]);
 
   useEffect(() => {
     const q = searchQuery.trim();
@@ -449,11 +542,15 @@ const SearchScreen = ({ navigation, route, language }) => {
       setSubmittedQuery('');
       setSearchResults([]);
       setMatchedUsers([]);
+      setSuggestions([]);
+      setCorrectedQuery('');
+      setSearchError('');
+      setSearchLoading(false);
+      setSearchHasMore(false);
       return undefined;
     }
 
     const timer = setTimeout(() => {
-      setSubmittedQuery(q);
       runSearch(q);
     }, 250);
 
@@ -461,13 +558,23 @@ const SearchScreen = ({ navigation, route, language }) => {
   }, [searchQuery, runSearch]);
 
   useEffect(() => {
+    let active = true;
+    axios.get(`${BASE_URL}/api/posts/search/popular`, { timeout: 10000 })
+      .then((response) => {
+        if (active && Array.isArray(response.data?.searches)) setPopularSearches(response.data.searches);
+      })
+      .catch((error) => console.error('Popular search load failed:', error.message));
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
     const initialQuery = route?.params?.searchQuery || '';
     if (initialQuery && initialQuery !== searchQuery) {
       setSearchQuery(initialQuery);
-      setSubmittedQuery(initialQuery);
-      runSearch(initialQuery);
+      setSuggestionsOpen(false);
+      trackSearchEvent(initialQuery, 'search');
     }
-  }, [route?.params?.searchQuery]);
+  }, [route?.params?.searchQuery, searchQuery, trackSearchEvent]);
 
   useEffect(() => {
     if (!didInitialLoadRef.current) {
@@ -545,32 +652,111 @@ const SearchScreen = ({ navigation, route, language }) => {
   }, [trendingPosts, allPosts]);
 
   const handleClear = () => {
+    searchRequestRef.current += 1;
+    activeSearchRef.current = { query: '', loading: false, results: [], correctedQuery: '', error: false, track: false };
     setSearchQuery('');
     setSubmittedQuery('');
     setSearchResults([]);
     setMatchedUsers([]);
+    setSuggestions([]);
+    setSearchError('');
+    setCorrectedQuery('');
+    setSearchLoading(false);
+    setSuggestionsOpen(true);
+    setSelectedSuggestionIndex(-1);
+    setSearchHasMore(false);
   };
 
   const handleSearchSubmit = () => {
+    if (suggestionsOpen && selectedSuggestionIndex >= 0 && suggestions[selectedSuggestionIndex]) {
+      handleSuggestionPress(suggestions[selectedSuggestionIndex]);
+      return;
+    }
     const q = searchQuery.trim();
     if (!q) {
       handleClear();
       return;
     }
-    setSubmittedQuery(q);
-    runSearch(q);
+    setSuggestionsOpen(false);
+    setSelectedSuggestionIndex(-1);
+    runSearch(q, 1, true);
     addRecentSearch(q);
     Keyboard.dismiss();
   };
 
   const handleRecentPress = (query) => {
     setSearchQuery(query);
-    setSubmittedQuery(query);
-    runSearch(query);
+    setSuggestionsOpen(false);
+    runSearch(query, 1, true);
+    addRecentSearch(query);
     Keyboard.dismiss();
   };
 
+  const handleSuggestionPress = (suggestion) => {
+    const query = typeof suggestion === 'string' ? suggestion : suggestion.label;
+    if (!query) return;
+    setSearchQuery(query);
+    setSuggestionsOpen(false);
+    setSelectedSuggestionIndex(-1);
+    runSearch(query, 1, true);
+    trackSearchEvent(query, 'suggestion');
+    addRecentSearch(query);
+    Keyboard.dismiss();
+  };
+
+  const handleRemoveRecentSearch = async (query) => {
+    const updated = recentSearches.filter((item) => item !== query);
+    setRecentSearches(updated);
+    try {
+      await AsyncStorage.setItem(recentSearchStorageKey, JSON.stringify(updated));
+    } catch (error) {
+      console.error('Recent search removal failed:', error);
+    }
+  };
+
+  const handleClearRecentSearches = async () => {
+    setRecentSearches([]);
+    try {
+      await AsyncStorage.removeItem(recentSearchStorageKey);
+    } catch (error) {
+      console.error('Recent search clear failed:', error);
+    }
+  };
+
+  const handleQueryChange = (value) => {
+    searchRequestRef.current += 1;
+    activeSearchRef.current = { query: '', loading: false, results: [], correctedQuery: '', error: false, track: false };
+    setSearchQuery(value);
+    setSuggestionsOpen(true);
+    setSelectedSuggestionIndex(-1);
+    setSuggestions([]);
+    setSearchResults([]);
+    setMatchedUsers([]);
+    setCorrectedQuery('');
+    setSearchError('');
+    setSearchLoading(Boolean(value.trim()));
+  };
+
+  const handleSuggestionKeyPress = (event) => {
+    if (!suggestionsOpen || suggestions.length === 0) return;
+    const key = event.nativeEvent.key;
+    if (key === 'ArrowDown') {
+      setSelectedSuggestionIndex((index) => (index + 1) % suggestions.length);
+    } else if (key === 'ArrowUp') {
+      setSelectedSuggestionIndex((index) => (index <= 0 ? suggestions.length - 1 : index - 1));
+    }
+  };
+
+  const loadMoreSearchResults = () => {
+    if (searchLoading || searchLoadingMoreRef.current || !searchHasMore) return;
+    searchLoadingMoreRef.current = true;
+    runSearch(searchQuery, searchPage + 1).finally(() => {
+      searchLoadingMoreRef.current = false;
+    });
+  };
+
   const handlePostPress = (item) => {
+    if (submittedQuery) trackSearchEvent(submittedQuery, 'product_view', item._id);
     if (!isLoggedIn) {
       showAppAlert(t.loginRequired, t.loginMessage, [
         { text: t.cancel, style: 'cancel' },
@@ -615,7 +801,11 @@ const SearchScreen = ({ navigation, route, language }) => {
           {item.productName}
         </Text>
         <Text style={[styles.resultSub, { color: subTextColor }]} numberOfLines={1}>
-          {item.location}
+          {[
+            item.storeName || (item.username ? `@${item.username}` : ''),
+            item.category,
+            item.location,
+          ].filter(Boolean).join(' · ')}
         </Text>
         {!!item.amount && (
           <Text style={[styles.resultAmount, { color: theme.login || '#47ae87' }]} numberOfLines={1}>
@@ -699,8 +889,9 @@ const SearchScreen = ({ navigation, route, language }) => {
             placeholder={t.placeholder}
             placeholderTextColor="#8E8E93"
             value={searchQuery}
-            onChangeText={setSearchQuery}
+            onChangeText={handleQueryChange}
             onSubmitEditing={handleSearchSubmit}
+            onKeyPress={handleSuggestionKeyPress}
             returnKeyType="search"
             autoFocus={false}
           />
@@ -710,28 +901,91 @@ const SearchScreen = ({ navigation, route, language }) => {
             </TouchableOpacity>
           )}
         </View>
+        {suggestionsOpen && searchQuery.trim() !== '' && suggestions.length > 0 && (
+          <View style={[styles.suggestionList, { backgroundColor: theme.cardBackground || inputBgColor, borderColor: softBorder }]}>
+            {suggestions.map((suggestion, index) => {
+              const label = typeof suggestion === 'string' ? suggestion : suggestion.label;
+              const matchStart = label.toLowerCase().indexOf(searchQuery.trim().toLowerCase());
+              return (
+                <TouchableOpacity
+                  key={`${suggestion.type || 'product'}-${label}-${index}`}
+                  style={[
+                    styles.suggestionItem,
+                    index === selectedSuggestionIndex && { backgroundColor: `${theme.login || '#47ae87'}22` },
+                  ]}
+                  onPress={() => handleSuggestionPress(suggestion)}
+                  activeOpacity={0.75}
+                >
+                  <Ionicons name="search-outline" size={17} color={subTextColor} />
+                  <Text style={[styles.suggestionText, { color: txtColor }]} numberOfLines={1}>
+                    {matchStart >= 0 ? (
+                      <>
+                        {label.slice(0, matchStart)}
+                        <Text style={{ color: theme.login || '#47ae87', fontWeight: '700' }}>
+                          {label.slice(matchStart, matchStart + searchQuery.trim().length)}
+                        </Text>
+                        {label.slice(matchStart + searchQuery.trim().length)}
+                      </>
+                    ) : label}
+                  </Text>
+                  <Text style={[styles.suggestionType, { color: subTextColor }]}>
+                    {suggestion.type && suggestion.type !== 'product' ? suggestion.type : ''}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
       </View>
     );
   };
 
   const renderRecentSearches = () => {
-    if (recentSearches.length === 0 || searchQuery.trim() !== '') return null;
+    if (searchQuery.trim() !== '' || recentSearches.length === 0) return null;
 
     return (
       <View style={styles.recentContainer}>
-        <Text style={[styles.recentTitle, { color: subTextColor }]}>
-          {t.recentSearches}
-        </Text>
+        <View style={styles.recentHeader}>
+          <Text style={[styles.recentTitle, { color: subTextColor }]}>{t.recentSearches}</Text>
+          <TouchableOpacity onPress={handleClearRecentSearches}>
+            <Text style={[styles.recentAction, { color: theme.login || '#47ae87' }]}>{t.clearAll}</Text>
+          </TouchableOpacity>
+        </View>
         {recentSearches.map((item, index) => (
-          <TouchableOpacity
+          <View
             key={`${item}-${index}`}
             style={styles.recentItem}
-            onPress={() => handleRecentPress(item)}
           >
-            <Text style={[styles.recentText, { color: txtColor }]}>{item}</Text>
-            <Ionicons name="return-up-back-outline" size={18} color={txtColor} />
-          </TouchableOpacity>
+            <TouchableOpacity style={styles.recentSearchPress} onPress={() => handleRecentPress(item)}>
+              <Ionicons name="time-outline" size={17} color={subTextColor} />
+              <Text style={[styles.recentText, { color: txtColor }]} numberOfLines={1}>{item}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => handleRemoveRecentSearch(item)} hitSlop={8}>
+              <Ionicons name="close" size={18} color={subTextColor} />
+            </TouchableOpacity>
+          </View>
         ))}
+      </View>
+    );
+  };
+
+  const renderPopularSearches = () => {
+    if (searchQuery.trim() !== '' || popularSearches.length === 0) return null;
+    return (
+      <View style={styles.recentContainer}>
+        <Text style={[styles.recentTitle, { color: subTextColor }]}>{t.popularSearches}</Text>
+        <View style={styles.popularChips}>
+          {popularSearches.map((item) => (
+            <TouchableOpacity
+              key={item}
+              style={[styles.popularChip, { borderColor: softBorder, backgroundColor: inputBgColor }]}
+              onPress={() => handleRecentPress(item)}
+            >
+              <Ionicons name="trending-up-outline" size={15} color={theme.login || '#47ae87'} />
+              <Text style={[styles.popularChipText, { color: txtColor }]}>{item}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
       </View>
     );
   };
@@ -742,12 +996,13 @@ const SearchScreen = ({ navigation, route, language }) => {
         <View style={{ flex: 1 }}>
           <ScrollView
             style={{ flex: 1, backgroundColor: bgColor }}
-            contentContainerStyle={[styles.emptyBrowseContent, { paddingTop: insets.top }]}
+            contentContainerStyle={styles.emptyBrowseContent}
             showsVerticalScrollIndicator={false}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={txtColor} />}
           >
             {renderSearchInput()}
             {renderRecentSearches()}
+            {renderPopularSearches()}
             <View style={styles.center}>
               <Ionicons name="flame-outline" size={48} color={subTextColor} />
               <Text style={{ color: subTextColor, fontSize: 15, marginTop: 12 }}>{t.noPosts}</Text>
@@ -763,9 +1018,10 @@ const SearchScreen = ({ navigation, route, language }) => {
     };
 
     const ListHeader = (
-      <View style={{ paddingTop: insets.top }}>
+      <View>
         {renderSearchInput()}
         {renderRecentSearches()}
+        {renderPopularSearches()}
 
         <View>
           <ScrollView
@@ -843,19 +1099,30 @@ const SearchScreen = ({ navigation, route, language }) => {
 
   const renderSearchResults = () => {
     const ListHeader = (
-      <View style={{ paddingTop: insets.top }}>
+      <View>
         {renderSearchInput()}
         {matchedUsers.length > 0 && (
           <>
             <Text style={[styles.sectionTitle, { color: txtColor, marginHorizontal: 16, marginTop: 6, marginBottom: 6 }]}>
               {t.users}
             </Text>
-            {matchedUsers.slice(0, 5).map((u) => (
-              <View key={`user-${u.username}`}>
-                {renderUserResultItem({ item: u })}
+            {matchedUsers.slice(0, 5).map((user) => (
+              <View key={`user-${user.userId}`}>
+                {renderUserResultItem({ item: user })}
               </View>
             ))}
           </>
+        )}
+        {correctedQuery && (
+          <TouchableOpacity
+            style={styles.correctionRow}
+            onPress={() => handleSuggestionPress(correctedQuery)}
+          >
+            <Text style={[styles.resultSub, { color: subTextColor }]}>{t.didYouMean} </Text>
+            <Text style={[styles.correctionText, { color: theme.login || '#47ae87' }]}>
+              {correctedQuery}
+            </Text>
+          </TouchableOpacity>
         )}
         <Text style={[styles.sectionTitle, { color: txtColor, marginHorizontal: 16, marginTop: 12, marginBottom: 6 }]}>
           {t.results}
@@ -878,10 +1145,32 @@ const SearchScreen = ({ navigation, route, language }) => {
         ListHeaderComponent={ListHeader}
         ListEmptyComponent={
           <View style={styles.center}>
-            <Ionicons name="search-outline" size={48} color={subTextColor} />
-            <Text style={{ color: subTextColor, fontSize: 15, marginTop: 12 }}>{t.noResults}</Text>
+            {searchLoading ? (
+              <ActivityIndicator size="large" color={theme.login || '#47ae87'} />
+            ) : searchError ? (
+              <>
+                <Ionicons name="cloud-offline-outline" size={42} color={subTextColor} />
+                <Text style={[styles.emptyMessage, { color: subTextColor }]}>{searchError}</Text>
+                <TouchableOpacity
+                  style={[styles.retryButton, { backgroundColor: theme.login || '#47ae87' }]}
+                  onPress={() => runSearch(searchQuery)}
+                >
+                  <Text style={styles.retryButtonText}>{t.retry}</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Ionicons name="search-outline" size={48} color={subTextColor} />
+                <Text style={[styles.emptyMessage, { color: subTextColor }]}>{t.noResults}</Text>
+              </>
+            )}
           </View>
         }
+        onEndReached={loadMoreSearchResults}
+        onEndReachedThreshold={0.5}
+        ListFooterComponent={searchLoading && searchResults.length > 0
+          ? <ActivityIndicator style={styles.loadMoreIndicator} color={theme.login || '#47ae87'} />
+          : null}
         keyboardShouldPersistTaps="handled"
         initialNumToRender={8}
         maxToRenderPerBatch={10}
@@ -893,9 +1182,9 @@ const SearchScreen = ({ navigation, route, language }) => {
   };
 
   const renderContent = () => {
-    if (loading && allPosts.length === 0) {
+    if (!searchQuery.trim() && loading && allPosts.length === 0) {
       return (
-        <View style={[styles.center, { backgroundColor: bgColor, paddingTop: insets.top }]}>
+        <View style={[styles.center, { backgroundColor: bgColor }]}>
           <ShaakaLoadingScreen message={t.loading} backgroundColor={bgColor} textColor={txtColor} compact />
         </View>
       );
@@ -922,7 +1211,7 @@ const styles = StyleSheet.create({
   /* ---------- Search Input ---------- */
   searchInputWrapper: {
     paddingHorizontal: 16,
-    paddingTop: 5,
+    paddingTop: 2,
     paddingBottom: 12,
   },
   searchContainer: {
@@ -940,6 +1229,21 @@ const styles = StyleSheet.create({
     paddingVertical: 0,
   },
   clearBtn: { marginLeft: 8, padding: 4 },
+  suggestionList: {
+    marginTop: 4,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  suggestionItem: {
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    gap: 10,
+  },
+  suggestionText: { flex: 1, fontSize: 14 },
+  suggestionType: { fontSize: 11, textTransform: 'capitalize' },
 
   /* ---------- Recent Searches ---------- */
   recentContainer: {
@@ -947,10 +1251,15 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
     marginTop: 10,
   },
+  recentHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
   recentTitle: {
     fontSize: 12,
     fontWeight: '400',
-    marginBottom: 10,
   },
   recentItem: {
     flexDirection: 'row',
@@ -958,10 +1267,34 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 8,
   },
+  recentSearchPress: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
   recentText: {
     fontSize: 14,
     fontWeight: '400',
+    flex: 1,
   },
+  recentAction: { fontSize: 12, fontWeight: '600' },
+  popularChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  popularChip: {
+    minHeight: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 18,
+    paddingHorizontal: 10,
+    gap: 5,
+  },
+  popularChipText: { fontSize: 12 },
+  correctionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 16,
+    marginTop: 8,
+  },
+  correctionText: { fontSize: 14, fontWeight: '700' },
+  emptyMessage: { fontSize: 15, marginTop: 12, textAlign: 'center', paddingHorizontal: 16 },
+  retryButton: { marginTop: 14, borderRadius: 18, paddingHorizontal: 16, paddingVertical: 8 },
+  retryButtonText: { color: '#fff', fontSize: 14, fontWeight: '700' },
 
   /* ---------- Section header ---------- */
   sectionTitle: {

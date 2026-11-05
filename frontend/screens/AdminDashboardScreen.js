@@ -1,3 +1,4 @@
+import { getAuthToken, removeAuthToken } from '../utils/authStorage';
 // screens/AdminDashboardScreen.js
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import {
@@ -9,9 +10,11 @@ import {
   Dimensions,
   ScrollView,
   Animated,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../context/ThemeContext';
+import { useAuth } from '../context/AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
@@ -266,6 +269,7 @@ const SectionHeader = ({ title, actionLabel, onAction, theme }) => (
 // ---------- Main Component ----------
 const AdminDashboardScreen = ({ navigation, language }) => {
   const { theme, isDarkMode } = useTheme();
+  const { logoutAdmin, setIsAdminAuthenticated } = useAuth();
   const t = translations[language] || translations.English;
 
   const [breakdownTab, setBreakdownTab] = useState('content');
@@ -288,13 +292,14 @@ const AdminDashboardScreen = ({ navigation, language }) => {
   const [statsLoading, setStatsLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  const getToken = async () => AsyncStorage.getItem('adminToken');
+  const getToken = async () => getAuthToken('adminToken');
 
   const fetchDashboardData = useCallback(async () => {
     setRefreshing(true);
     try {
       const token = await getToken();
       if (!token) {
+        setIsAdminAuthenticated(false);
         navigation.replace('AdminLogin');
         return;
       }
@@ -355,7 +360,11 @@ const AdminDashboardScreen = ({ navigation, language }) => {
       }
     } catch (error) {
       console.error('Fetch dashboard data error:', error);
-      if (error.response?.status === 401) navigation.replace('AdminLogin');
+      if (['session_invalidated', 'session_ended'].includes(error.response?.data?.reason)) {
+        await removeAuthToken('adminToken');
+        setIsAdminAuthenticated(false);
+        navigation.replace('AdminLogin', { forceLogin: true });
+      }
     } finally {
       setRefreshing(false);
       setStatsLoading(false);
@@ -368,10 +377,27 @@ const AdminDashboardScreen = ({ navigation, language }) => {
     }, [fetchDashboardData])
   );
 
-  const handleLogout = useCallback(async () => {
-    await AsyncStorage.removeItem('adminToken');
-    navigation.replace('AdminLogin');
-  }, [navigation]);
+  const handleLogout = useCallback(() => {
+    Alert.alert('Confirm Logout', 'You are about to log out of your admin account.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Confirm Logout',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const result = await logoutAdmin();
+            if (result.success) {
+              if (result.userSession) navigation.replace('Login');
+              else navigation.replace('AdminLogin', { forceLogin: true });
+            }
+          } catch (error) {
+            console.error('Admin logout failed:', error);
+            Alert.alert('Logout failed', 'Your admin session is still active. Please try again when you have a connection.');
+          }
+        },
+      },
+    ]);
+  }, [logoutAdmin, navigation]);
 
   // Top bar actions — kept in an array so the row stays compact & scrollable
   const topActions = useMemo(

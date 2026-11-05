@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
@@ -98,7 +99,7 @@ const WhatsAppChatScreen = ({ route, navigation }) => {
   const loadMessages = async () => {
     setRefreshing(true);
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       const url = `${BASE_URL}/api/messages/thread/${threadId}?limit=100`;
       const res = await axios.get(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
       const fetched = res.data.messages || [];
@@ -113,7 +114,7 @@ const WhatsAppChatScreen = ({ route, navigation }) => {
 
   const fetchNewMessages = async () => {
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       const url = `${BASE_URL}/api/messages/thread/${threadId}/latest`;
       const res = await axios.get(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
       const latest = res.data.messages || [];
@@ -149,7 +150,7 @@ const WhatsAppChatScreen = ({ route, navigation }) => {
       // upload image if any
       let imageUrl = null;
       if (selectedImage) {
-        const token = await AsyncStorage.getItem('userToken');
+        const token = await getAuthToken('userToken');
         const form = new FormData();
         const filename = selectedImage.split('/').pop();
         const match = /\.(\w+)$/.exec(filename);
@@ -159,7 +160,7 @@ const WhatsAppChatScreen = ({ route, navigation }) => {
         imageUrl = uploadRes.data.urls?.[0] || null;
       }
 
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       const payload = { threadId, text: temp.text, imageUrl, receiverId: otherUserId };
       const res = await axios.post(`${BASE_URL}/api/messages/send`, payload, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
       const sent = res.data.message;

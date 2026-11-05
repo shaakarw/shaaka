@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 // components/BottomBar.js
 import React, {
   useCallback,
@@ -97,7 +98,7 @@ const BottomBar = ({ state, navigation, theme, stackRouteName, language = 'Engli
 
   const checkExistingShopBeforeAdd = useCallback(async () => {
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       const userId = user?._id || user?.id;
       if (!token || !userId) return false;
 

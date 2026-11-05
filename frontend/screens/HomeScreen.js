@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 // screens/WelcomeHomeScreen.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
@@ -343,7 +344,7 @@ const WelcomeHomeScreen = ({
 
   const fetchUnreadNotifications = useCallback(async () => {
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (!token) { setUnreadNotifications(0); return; }
       if (!networkStatus.get().isOnline) { setUnreadNotifications(0); return; }
 

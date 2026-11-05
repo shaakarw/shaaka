@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 // screens/ProfileScreen.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
@@ -19,7 +20,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useIsFocused } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -76,6 +77,7 @@ const translations = {
     saveFirstPost: 'Save your first post/product',
     explorePosts: 'Explore Posts',
     settings: 'Settings',
+    changePassword: 'Password',
     logout: 'Logout',
     post: 'Post',
     editProfile: 'Edit Profile',
@@ -84,7 +86,8 @@ const translations = {
     cancel: 'Cancel',
     save: 'Save',
     logoutConfirmTitle: 'Are you sure you want to log out?',
-    logoutConfirmMessage: 'You can sign in again anytime.',
+    logoutConfirmMessage: 'You are about to log out of your Shaaka account. You will need to sign in again to continue.',
+    logoutConfirmButton: 'Confirm Logout',
     yes: 'Yes',
     no: 'No',
     profileUpdated: 'Profile updated successfully',
@@ -113,7 +116,7 @@ const translations = {
     tEditTitle: 'Change profile',
     tEditBody: 'Tap "Edit Profile" to update your name, username, location, and social links.',
     tMenuTitle: 'Menu',
-    tMenuBody: 'Tap these three lines to open the menu — quick access to Add Post, Map, Search, Messages, Settings, and Logout.',
+    tMenuBody: 'Tap these three lines to open the menu — quick access to Add Post, Map, Search, Settings, and Logout.',
     tDeleteTitle: 'Delete or unsave',
     tDeleteBody: 'Tap these 3 lines on any post to delete it. On saved posts, tap the bookmark icon at the bottom-right to unsave.',
   },
@@ -130,6 +133,7 @@ const translations = {
     saveFirstPost: 'Bika igicuruzwa cyawe cya mbere',
     explorePosts: 'Shakisha igicuruzwa',
     settings: 'Igenamiterere',
+    changePassword: 'Ijambo banga',
     logout: 'Sohoka',
     post: 'Igicuruzwa',
     editProfile: 'Hindura Ibikuranga',
@@ -138,7 +142,8 @@ const translations = {
     cancel: 'Reka',
     save: 'Bika',
     logoutConfirmTitle: 'Ese usha gusohoka?',
-    logoutConfirmMessage: 'Ushobora kwinjira igihe icyo aricyo cyose.',
+    logoutConfirmMessage: 'Ugiye gusohoka muri konti yawe ya Shaaka. Uzasabwa kongera kwinjira kugira ngo ukomeze.',
+    logoutConfirmButton: 'Emeza gusohoka',
     yes: 'Yego',
     no: 'Oya',
     profileUpdated: 'Porofile yahinduwe neza',
@@ -167,7 +172,7 @@ const translations = {
     tEditTitle: 'Hindura Ibikuranga',
     tEditBody: "Kanda 'Hindura Ibikuranga' kugira ngo uhindure amazina, izina rikoreshwa, aho uherereye, n'imiyoboro rusange.",
     tMenuTitle: 'Menyu',
-    tMenuBody: "Kanda kuri iyi mirongo itatu kugira ngo ufungure menyu — Ongeraho Igicuruzwa, Ikarita, Shakisha, Ubutumwa, Igenamiterere, no Gusohoka.",
+    tMenuBody: "Kanda kuri iyi mirongo itatu kugira ngo ufungure menyu — Ongeraho Igicuruzwa, Ikarita, Shakisha, Igenamiterere, no Gusohoka.",
     tDeleteTitle: 'Siba cyangwa ukure ku byabitswe',
     tDeleteBody: "Kanda kuri iyi mirongo itatu ku gicuruzwa cyose kugira ngo ugisibe. Ku bicuruzwa byabitswe, kanda ku kamenyetso k'igitabo kuri iburyo hasi kugira ngo ugikureho.",
   },
@@ -221,12 +226,15 @@ const sanitizeLocationField = (text) =>
 
 const cacheProfileUserImages = async (user) => {
   if (!user) return user;
-  const cachedUser = { ...user };
-  for (const key of ['avatar', 'coverImage', 'coverPhoto', 'bannerImage']) {
-    const imageUri = getImageUri(cachedUser[key]);
-    if (imageUri) cachedUser[key] = await mediaCache.cacheImage(imageUri);
-  }
-  return cachedUser;
+  const imageFields = ['avatar', 'coverImage', 'coverPhoto', 'bannerImage'];
+  const cachedImages = await Promise.all(imageFields.map(async key => {
+    const imageUri = getImageUri(user[key]);
+    return imageUri ? mediaCache.cacheImage(imageUri) : user[key];
+  }));
+  return imageFields.reduce((cachedUser, key, index) => {
+    cachedUser[key] = cachedImages[index];
+    return cachedUser;
+  }, { ...user });
 };
 
 const cacheProfilePostImages = async (posts) => Promise.all(posts.map(async (post) => {
@@ -420,8 +428,9 @@ const ProfileScreen = ({ navigation, route, language }) => {
   const [savedPostIds, setSavedPostIds] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const postsRequestInFlight = useRef(false);
-  const lastPostsSnapshot = useRef(null);
+  const profileTargetIdRef = useRef(null);
+  const profileUserVersionRef = useRef(0);
+  const profilePostsVersionRef = useRef(0);
 
   // Edit Profile Bottom Sheet
   const [editSheetVisible, setEditSheetVisible] = useState(false);
@@ -532,47 +541,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
   }, [activeTab, userPosts.length, savedPosts.length]);
 
   useEffect(() => {
-    loadData();
-  }, [paramUserId]);
-
-  useEffect(() => {
-    if (!isFocused || loading) return undefined;
-
-    const refreshPosts = async () => {
-      if (postsRequestInFlight.current || !networkStatus.get().isOnline) return;
-
-      const targetUserId = normaliseUserId(paramUserId)
-        || normaliseUserId(viewedUser?._id || currentUser?._id || currentUser?.id);
-      if (!targetUserId) return;
-
-      postsRequestInFlight.current = true;
-      try {
-        const token = await getToken();
-        if (!token) return;
-
-        const response = await axios.get(
-          `${BASE_URL}/api/posts/user/${encodeURIComponent(targetUserId)}`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-        const posts = response.data.posts || [];
-        const snapshot = JSON.stringify(posts);
-        if (snapshot === lastPostsSnapshot.current) return;
-
-        lastPostsSnapshot.current = snapshot;
-        await offlineDatabase.putRecord('profile-posts', targetUserId, posts, { priority: 'medium' });
-        setUserPosts(await cacheProfilePostImages(posts));
-      } catch {
-        // Keep current profile visible if the background refresh fails.
-      } finally {
-        postsRequestInFlight.current = false;
-      }
-    };
-
-    const intervalId = setInterval(refreshPosts, 1000);
-    return () => clearInterval(intervalId);
-  }, [isFocused, loading, paramUserId, viewedUser, currentUser]);
-
-  useEffect(() => {
     if (!isOwnProfile && activeTab === 'saved') {
       setActiveTab('posts');
     }
@@ -608,7 +576,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
     if (logoutSheetUnmountTimer.current) clearTimeout(logoutSheetUnmountTimer.current);
   }, []);
 
-  const getToken = async () => await AsyncStorage.getItem('userToken');
+  const getToken = useCallback(async () => getAuthToken('userToken'), []);
 
   const handleRefresh = async () => {
     if (refreshing) return;
@@ -620,9 +588,49 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
   };
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     setLoadError(false);
+
+    const applyProfilePosts = (posts, targetUserId) => {
+      const version = ++profilePostsVersionRef.current;
+      setUserPosts(posts);
+      cacheProfilePostImages(posts).then(cachedImages => {
+        if (
+          profileTargetIdRef.current === String(targetUserId) &&
+          profilePostsVersionRef.current === version
+        ) {
+          setUserPosts(cachedImages);
+        }
+      }).catch(error => {
+        console.warn('Profile post image caching failed:', error.message);
+      });
+    };
+
+    const applyProfileUser = (user, targetUserId, isOwn) => {
+      profileTargetIdRef.current = String(targetUserId);
+      const version = ++profileUserVersionRef.current;
+      setViewedUser(user);
+      setAvatarUri(getImageUri(user.avatar));
+      setUsername(user.username || user.phone || (isOwn ? '' : 'User'));
+      setName(user.name || user.username || (isOwn ? '' : 'User'));
+      setSocialLinks(Array.isArray(user.socialLinks)
+        ? user.socialLinks.filter(link => typeof link === 'string')
+        : []);
+      setIsOwnProfile(isOwn);
+
+      cacheProfileUserImages(user).then(cachedUser => {
+        if (
+          profileTargetIdRef.current === String(targetUserId) &&
+          profileUserVersionRef.current === version
+        ) {
+          setViewedUser(cachedUser);
+          setAvatarUri(getImageUri(cachedUser.avatar));
+        }
+      }).catch(error => {
+        console.warn('Profile image caching failed:', error.message);
+      });
+    };
 
     const token = await getToken();
     if (!token) {
@@ -630,10 +638,46 @@ const ProfileScreen = ({ navigation, route, language }) => {
       return;
     }
 
+    let me = null;
+    try {
+      const cached = await AsyncStorage.getItem('user');
+      if (cached) me = JSON.parse(cached);
+    } catch (error) {
+      console.warn('Could not read cached profile user:', error.message);
+    }
+
+    if (me) setCurrentUser(me);
+    const cachedMyId = normaliseUserId(me?._id) || normaliseUserId(me?.phone);
+    const normalisedParamUserId = normaliseUserId(paramUserId);
+    const cachedTargetUserId = normalisedParamUserId || cachedMyId;
+    const cachedOwnProfile = Boolean(
+      cachedMyId && (!normalisedParamUserId || String(normalisedParamUserId) === String(cachedMyId))
+    );
+    if (cachedTargetUserId) profileTargetIdRef.current = String(cachedTargetUserId);
+
+    if (cachedOwnProfile) {
+      applyProfileUser(me, cachedMyId, true);
+    } else if (cachedTargetUserId) {
+      try {
+        const cachedProfile = await offlineDatabase.getRecord('profiles', cachedTargetUserId);
+        if (cachedProfile) applyProfileUser(cachedProfile, cachedTargetUserId, false);
+      } catch (error) {
+        console.warn('Could not read cached profile:', error.message);
+      }
+    }
+
+    if (cachedTargetUserId) {
+      offlineDatabase.getRecord('profile-posts', cachedTargetUserId).then(cachedPosts => {
+        if (!Array.isArray(cachedPosts) || profileTargetIdRef.current !== String(cachedTargetUserId)) return;
+        applyProfilePosts(cachedPosts, cachedTargetUserId);
+      }).catch(error => {
+        console.warn('Could not read cached profile posts:', error.message);
+      });
+    }
+
     await networkStatus.start();
     const isOnline = networkStatus.get().isOnline;
 
-    let me = null;
     if (isOnline) {
       try {
         const meResponse = await axios.get(`${BASE_URL}/api/auth/me`, {
@@ -642,18 +686,13 @@ const ProfileScreen = ({ navigation, route, language }) => {
         if (meResponse.data.success) {
           me = meResponse.data.user;
           setCurrentUser(me);
-          await AsyncStorage.setItem('user', JSON.stringify(me));
+          AsyncStorage.setItem('user', JSON.stringify(me)).catch(error => {
+            console.warn('Could not cache current profile user:', error.message);
+          });
         }
       } catch (e) {
         console.warn('loadData -> /auth/me failed:', e.message);
       }
-    }
-
-    if (!me) {
-      try {
-        const cached = await AsyncStorage.getItem('user');
-        if (cached) me = JSON.parse(cached);
-      } catch {}
     }
 
     if (!me) {
@@ -662,7 +701,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
       return;
     }
 
-    const normalisedParamUserId = normaliseUserId(paramUserId);
     const myId = normaliseUserId(me._id) || normaliseUserId(me.phone);
     const isOwn = !normalisedParamUserId || String(normalisedParamUserId) === String(myId);
 
@@ -675,12 +713,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
 
     if (isOwn) {
-      const ownUser = await cacheProfileUserImages(me);
-      setAvatarUri(getImageUri(ownUser.avatar));
-      setUsername(ownUser.username || ownUser.phone || '');
-      setName(ownUser.name || ownUser.username || '');
-      setViewedUser(ownUser);
-      setSocialLinks(Array.isArray(ownUser.socialLinks) ? ownUser.socialLinks.filter(l => typeof l === 'string') : []);
+      applyProfileUser(me, targetUserId, true);
     } else {
       let cachedOtherUser = null;
       try {
@@ -689,7 +722,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
 
       let otherUser = { _id: targetUserId, username: paramUsername || 'User' };
       if (cachedOtherUser) {
-        otherUser = await cacheProfileUserImages(cachedOtherUser);
+        otherUser = cachedOtherUser;
       }
       if (isOnline) {
         try {
@@ -699,27 +732,23 @@ const ProfileScreen = ({ navigation, route, language }) => {
           );
           if (userResponse.data.success) {
             const fetchedUser = userResponse.data.user;
-            await offlineDatabase.putRecord('profiles', targetUserId, fetchedUser, { priority: 'medium' });
-            otherUser = await cacheProfileUserImages(fetchedUser);
+            offlineDatabase.putRecord('profiles', targetUserId, fetchedUser, { priority: 'medium' }).catch(error => {
+              console.warn('Could not cache profile data:', error.message);
+            });
+            otherUser = fetchedUser;
           }
         } catch (e) {
           console.warn('loadData -> /api/user/:id failed:', e.message);
         }
       }
-      setViewedUser(otherUser);
-      setAvatarUri(getImageUri(otherUser.avatar));
-      setUsername(otherUser.username || otherUser.phone || 'User');
-      setName(otherUser.name || otherUser.username || 'User');
-      setSocialLinks(Array.isArray(otherUser.socialLinks) ? otherUser.socialLinks.filter(l => typeof l === 'string') : []);
+      applyProfileUser(otherUser, targetUserId, false);
     }
-
-    setIsOwnProfile(isOwn);
 
     let cachedPosts = null;
     try {
       cachedPosts = await offlineDatabase.getRecord('profile-posts', targetUserId);
       if (Array.isArray(cachedPosts)) {
-        setUserPosts(await cacheProfilePostImages(cachedPosts));
+        applyProfilePosts(cachedPosts, targetUserId);
       }
     } catch {}
 
@@ -730,9 +759,10 @@ const ProfileScreen = ({ navigation, route, language }) => {
           { headers: { Authorization: `Bearer ${token}` } }
         );
         const posts = postsResponse.data.posts || [];
-        lastPostsSnapshot.current = JSON.stringify(posts);
-        await offlineDatabase.putRecord('profile-posts', targetUserId, posts, { priority: 'medium' });
-        setUserPosts(await cacheProfilePostImages(posts));
+        applyProfilePosts(posts, targetUserId);
+        offlineDatabase.putRecord('profile-posts', targetUserId, posts, { priority: 'medium' }).catch(error => {
+          console.warn('Could not cache profile posts:', error.message);
+        });
       } catch (e) {
         console.warn('loadData -> /api/posts/user/:id failed:', e.message);
         if (!Array.isArray(cachedPosts)) setUserPosts([]);
@@ -758,7 +788,13 @@ const ProfileScreen = ({ navigation, route, language }) => {
     }
 
     setLoading(false);
-  };
+  }, [navigation, paramUserId, paramUsername]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadData();
+    }, [loadData])
+  );
 
   // ---------- Avatar upload ----------
   const uploadImage = async (uri) => {
@@ -1037,33 +1073,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
     navigation.reset({ index: 0, routes: [{ name: 'Main' }] });
   };
 
-  const handleOpenUserChat = () => {
-    const user = viewedUser || currentUser;
-    const targetUserId = normaliseUserId(user?._id || user?.id || user?.userId);
-    const targetUserName = user?.username || user?.name || 'User';
-    const targetUserPhone = user?.phone || '';
-    const currentUserId = normaliseUserId(currentUser?._id || currentUser?.id || currentUser?.userId);
-
-    if (!targetUserId) {
-      Alert.alert('Error', 'User information is unavailable.');
-      return;
-    }
-
-    if (currentUserId && String(currentUserId) === String(targetUserId)) {
-      Alert.alert('Info', 'You cannot message yourself.');
-      return;
-    }
-
-    navigation.navigate('Chat', {
-      sellerId: targetUserId,
-      sellerName: targetUserName,
-      sellerPhone: targetUserPhone,
-      postId: '',
-      postTitle: '',
-      replyPost: null,
-    });
-  };
-
   const handleMenuOption = (option) => {
     closeSidebar();
     if (option === 'addPost') {
@@ -1074,12 +1083,12 @@ const ProfileScreen = ({ navigation, route, language }) => {
       try { navigation.navigate('Map'); } catch (e) { Alert.alert('Error', 'Map screen not found.'); }
     } else if (option === 'search') {
       try { navigation.navigate('Search'); } catch (e) { Alert.alert('Error', 'Search screen not found.'); }
-    } else if (option === 'messages') {
-      try { navigation.navigate('Message'); } catch (e) { Alert.alert('Error', 'Messages screen not found.'); }
     } else if (option === 'notifications') {
       try { navigation.navigate('Notifications'); } catch (e) { Alert.alert('Error', 'Notifications screen not found.'); }
     } else if (option === 'settings') {
       try { navigation.navigate('Main', { screen: 'Settings' }); } catch (e) { Alert.alert('Error', 'Settings screen not found.'); }
+    } else if (option === 'changePassword') {
+      try { navigation.navigate('ChangePassword', { adminMode: false }); } catch (e) { Alert.alert('Error', 'Change Password screen not found.'); }
     } else if (option === 'logout') {
       handleLogout();
     }
@@ -1286,8 +1295,8 @@ const ProfileScreen = ({ navigation, route, language }) => {
             )}
           </View>
 
-          <View style={styles.referenceActionRow}>
-            {isOwnProfile ? (
+          {isOwnProfile && (
+            <View style={styles.referenceActionRow}>
               <TouchableOpacity
                 ref={profileEditBtnRef}
                 style={[styles.referenceActionButton, { backgroundColor: theme.accent }]}
@@ -1295,13 +1304,7 @@ const ProfileScreen = ({ navigation, route, language }) => {
               >
                 <Text style={styles.referencePrimaryActionText}>{t.editProfile}</Text>
               </TouchableOpacity>
-            ) : (
-              <TouchableOpacity style={[styles.referenceActionButton, { backgroundColor: theme.accent }]} onPress={handleOpenUserChat}>
-                <Text style={styles.referencePrimaryActionText}>Message</Text>
-              </TouchableOpacity>
-            )}
 
-            {isOwnProfile && (
               <TouchableOpacity
                 ref={profileMenuBtnRef}
                 style={[styles.referenceActionButton, styles.referenceMenuButton, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}
@@ -1315,8 +1318,8 @@ const ProfileScreen = ({ navigation, route, language }) => {
                   <View style={[styles.referenceMenuLine, styles.referenceMenuLineBottom]} />
                 </View>
               </TouchableOpacity>
-            )}
-          </View>
+            </View>
+          )}
 
           {(user.bio || user.location || (socialLinks && socialLinks.length > 0)) && (
             <View style={styles.profileBioSection}>
@@ -1569,10 +1572,6 @@ const ProfileScreen = ({ navigation, route, language }) => {
               <Ionicons name="search-outline" size={20} color={theme.text} />
               <Text style={[styles.sidebarOptionText, { color: theme.text }]}>Search</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('messages')}>
-              <Ionicons name="chatbubble-outline" size={20} color={theme.text} />
-              <Text style={[styles.sidebarOptionText, { color: theme.text }]}>Messages</Text>
-            </TouchableOpacity>
             <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('notifications')}>
               <Ionicons name="notifications-outline" size={20} color={theme.text} />
               <Text style={[styles.sidebarOptionText, { color: theme.text }]}>Notifications</Text>
@@ -1580,6 +1579,10 @@ const ProfileScreen = ({ navigation, route, language }) => {
             <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('settings')}>
               <Ionicons name="settings-outline" size={20} color={theme.text} />
               <Text style={[styles.sidebarOptionText, { color: theme.text }]}>{t.settings}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.sidebarOption, { borderBottomColor: sidebarBorderColor }]} onPress={() => handleMenuOption('changePassword')}>
+              <Ionicons name="lock-closed-outline" size={20} color={theme.text} />
+              <Text style={[styles.sidebarOptionText, { color: theme.text }]}>{t.changePassword}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.sidebarOption} onPress={() => handleMenuOption('logout')}>
               <Ionicons name="log-out-outline" size={20} color="#d87428" />
@@ -1619,10 +1622,10 @@ const ProfileScreen = ({ navigation, route, language }) => {
             </Text>
             <View style={styles.logoutButtons}>
               <TouchableOpacity style={[styles.logoutBtn, { backgroundColor: '#47ae87' }]} onPress={closeLogoutSheet}>
-                <Text style={styles.logoutBtnText}>{t.no}</Text>
+                <Text style={styles.logoutBtnText}>{t.cancel}</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[styles.logoutBtn, { backgroundColor: '#d87428' }]} onPress={confirmLogout}>
-                <Text style={styles.logoutBtnText}>{t.yes}</Text>
+                <Text style={styles.logoutBtnText}>{t.logoutConfirmButton}</Text>
               </TouchableOpacity>
             </View>
           </Animated.View>

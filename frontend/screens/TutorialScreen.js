@@ -1,31 +1,33 @@
-
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
-  Dimensions,
   Image,
   ScrollView,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import { useTheme } from '../context/ThemeContext';
 import { BASE_URL } from '../constants';
 import { normalizeImageSource } from '../utils/imageUrl';
 
-
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-
-export default function TutorialScreen({ navigation, language = 'English' }) {
-  const { theme, isDarkMode } = useTheme();
-  const [imageUrl, setImageUrl] = useState(null);
+export default function TutorialScreen({ language = 'English' }) {
+  const { theme } = useTheme();
+  const [sections, setSections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const emptyBackground = isDarkMode ? '#dddddd' : '#111111';
+  const [imageAspectRatios, setImageAspectRatios] = useState({});
+  const isEnglish = language === 'English';
+  const tutorialImages = sections.flatMap((section, sectionIndex) =>
+    (section.images || []).map((image, imageIndex) => ({
+      ...image,
+      sectionId: section.id || `section-${sectionIndex}`,
+      sectionTitle: section.title,
+      imageIndex,
+    }))
+  );
 
   useEffect(() => {
     let active = true;
@@ -33,71 +35,106 @@ export default function TutorialScreen({ navigation, language = 'English' }) {
     axios.get(`${BASE_URL}/api/settings/tutorial-image`)
       .then((response) => {
         if (!response.data?.success) {
-          throw new Error(response.data?.message || 'Could not load the tutorial image.');
+          throw new Error(response.data?.message || 'Could not load the tutorial.');
         }
-        if (active) setImageUrl(response.data.tutorialImage?.url || null);
+        if (active) {
+          if (Array.isArray(response.data.sections)) {
+            setSections(response.data.sections);
+          } else if (response.data.tutorialImage?.url) {
+            setSections([{
+              id: 'tutorial',
+              title: isEnglish ? 'Tutorial' : 'Inyigisho',
+              images: [{ url: response.data.tutorialImage.url }],
+            }]);
+          }
+        }
       })
       .catch((requestError) => {
-        console.error('Could not load tutorial image:', requestError);
-        if (active) setError('Could not load the tutorial. Please try again later.');
+        console.error('Could not load tutorial:', requestError);
+        if (active) setError(isEnglish ? 'Could not load the tutorial. Please try again later.' : 'Ntibyashobotse kubona inyigisho. Ongera ugerageze nyuma.');
       })
       .finally(() => {
         if (active) setLoading(false);
       });
 
     return () => { active = false; };
-  }, []);
+  }, [isEnglish]);
 
   return (
-    <SafeAreaView
-      style={[styles.container, { backgroundColor: imageUrl ? theme.background : emptyBackground }]}
-      edges={['top', 'bottom']}
-    >
-      <TouchableOpacity
-        onPress={() => navigation.goBack()}
-        style={styles.backButton}
-        accessibilityRole="button"
-        accessibilityLabel={language === 'English' ? 'Go back' : 'Subira inyuma'}
-      >
-        <Ionicons
-          name="chevron-back"
-          size={26}
-          color={imageUrl ? theme.text : isDarkMode ? '#111111' : '#ffffff'}
-        />
-      </TouchableOpacity>
-      <View style={styles.content}>
-        {loading ? (
+    <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]} edges={['left', 'right', 'bottom']}>
+      {loading ? (
+        <View style={styles.centered}>
           <ActivityIndicator color={theme.accent} />
-        ) : error ? (
-          <Text style={[styles.error, { color: isDarkMode ? '#111111' : '#ffffff' }]}>{error}</Text>
-        ) : imageUrl ? (
-          <ScrollView style={styles.imageScroll} contentContainerStyle={styles.imageContent}>
-            <Image
-              source={normalizeImageSource({ uri: imageUrl })}
-              style={styles.image}
-              resizeMode="contain"
-              accessibilityLabel="Shaaka tutorial"
-              onError={() => setError('Could not display the tutorial image.')}
-            />
-          </ScrollView>
-        ) : null}
-      </View>
+        </View>
+      ) : error ? (
+        <View style={styles.centered}>
+          <Text style={[styles.message, { color: theme.textSecondary }]}>{error}</Text>
+        </View>
+      ) : tutorialImages.length ? (
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={styles.content}
+          showsVerticalScrollIndicator={false}
+        >
+          {tutorialImages.map(image => {
+            const imageKey = `${image.sectionId}-${image.storageKey || image.url || image.imageIndex}`;
+            const aspectRatio = imageAspectRatios[imageKey];
+            return (
+              <Image
+                key={imageKey}
+                source={normalizeImageSource({ uri: image.url })}
+                style={[
+                  styles.image,
+                  aspectRatio ? { aspectRatio, height: undefined } : null,
+                  { backgroundColor: theme.cardBackground || theme.background },
+                ]}
+                resizeMode="contain"
+                accessibilityLabel={`${image.sectionTitle}, ${isEnglish ? 'image' : 'ifoto'} ${image.imageIndex + 1}`}
+                onLoad={({ nativeEvent }) => {
+                  const { width, height } = nativeEvent.source || {};
+                  if (width > 0 && height > 0) {
+                    setImageAspectRatios(current => {
+                      const nextRatio = width / height;
+                      return current[imageKey] === nextRatio
+                        ? current
+                        : { ...current, [imageKey]: nextRatio };
+                    });
+                  }
+                }}
+                onError={() => setError(isEnglish ? 'Could not display a tutorial image.' : 'Ntibyashobotse kwerekana ifoto y’inyigisho.')}
+              />
+            );
+          })}
+        </ScrollView>
+      ) : (
+        <View style={styles.centered}>
+          <Text style={[styles.message, { color: theme.textSecondary }]}>
+            {isEnglish ? 'No tutorial has been added yet.' : 'Nta nyigisho irashyirwaho.'}
+          </Text>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  backButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  content: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  imageScroll: { flex: 1, width: '100%' },
-  imageContent: { paddingVertical: 2 },
+  scroll: { flex: 1 },
+  // 6px free space on top, left, right, and bottom — content centered
+  content: {
+    alignItems: 'center',        // centers each image horizontally
+    paddingTop: 6,
+    paddingBottom: 6,
+    paddingLeft: 6,
+    paddingRight: 6,
+  },
   image: {
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT * 0.82,
+    width: '96%',
+    height: 400,
+    borderRadius: 10,
+    marginBottom: 6,             // 6px gap between images
+    alignSelf: 'center',         // extra safety for centering
   },
-  error: {
-    paddingHorizontal: 24,
-    textAlign: 'center',
-  },
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  message: { fontSize: 15, textAlign: 'center' },
 });

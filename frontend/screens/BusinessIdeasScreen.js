@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 // screens/BusinessIdeasScreen.js
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useIsFocused } from '@react-navigation/native';
@@ -213,7 +214,7 @@ const BusinessIdeasScreen = ({ navigation, language = 'English', toggleLanguage 
   setErrorMessage('');
   try {
     // Retrieve auth token (optional; some endpoints may not require it)
-    const token = await AsyncStorage.getItem('userToken');
+    const token = await getAuthToken('userToken');
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
 
     // Fetch all three datasets in parallel from the backend

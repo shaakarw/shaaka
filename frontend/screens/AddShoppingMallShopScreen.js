@@ -1,3 +1,4 @@
+import { getAuthToken, removeAuthToken } from '../utils/authStorage';
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
@@ -351,7 +352,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
   const redirectToLogin = (message = t.sessionExpired) => {
     showThemedAlert(t.error, message, [
       { text: 'Login', onPress: async () => {
-          await AsyncStorage.removeItem('userToken');
+          await removeAuthToken('userToken');
           await AsyncStorage.removeItem('isLoggedIn');
           navigation.replace('Login');
         }
@@ -364,7 +365,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
   useEffect(() => {
     const init = async () => {
       try {
-        const token = await AsyncStorage.getItem('userToken');
+        const token = await getAuthToken('userToken');
         if (!token) {
           showThemedAlert(t.loginRequired, t.loginPrompt, [
             { text: 'Login', onPress: () => navigation.replace('Login') },
@@ -587,7 +588,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
 
   const checkSubscriptionLimit = async () => {
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (!token) return true;
       const res = await axios.get(`${BASE_URL}/api/user/me`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -622,7 +623,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
     setProgress(0);
 
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (!token) {
         showThemedAlert(t.error, t.loginRequired);
         setPublishing(false);
@@ -1181,7 +1182,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
                       )}
                       <View style={styles.previewHeroShade} />
                       <TouchableOpacity style={styles.previewFavoriteButton} accessibilityRole="button" accessibilityLabel="Save shop preview">
-                        <Ionicons name="heart-outline" size={22} color="#555" />
+                        <Ionicons name="bookmark-outline" size={22} color="#555" />
                       </TouchableOpacity>
                     </View>
                     <View style={styles.previewInfo}>

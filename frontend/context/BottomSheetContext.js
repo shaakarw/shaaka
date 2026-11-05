@@ -15,6 +15,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import ContactInfoIcon from '../components/ContactInfoIcon';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from './ThemeContext';
 
@@ -225,7 +226,7 @@ export const BottomSheet = ({ visible, config, onClose }) => {
               <Text style={[styles.title, { color: theme.text }]} numberOfLines={2}>
                 {title}
               </Text>
-              <View style={styles.socialIconsRow}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.socialIconsRow}>
                 {socialLinks.map((item, index) => (
                   <TouchableOpacity
                     key={index}
@@ -233,11 +234,11 @@ export const BottomSheet = ({ visible, config, onClose }) => {
                   >
                     {/* Social icons keep their brand colours — untouched */}
                     <View style={[styles.socialIconCircleSmall, { backgroundColor: item.color }]}>
-                      <Ionicons name={item.icon} size={18} color="#fff" />
+                      <ContactInfoIcon item={item} size={18} color="#fff" />
                     </View>
                   </TouchableOpacity>
                 ))}
-              </View>
+              </ScrollView>
               <TouchableOpacity style={styles.closeButton} onPress={closeSheet}>
                 <Text style={styles.closeButtonText}>Close</Text>
               </TouchableOpacity>
@@ -455,10 +456,10 @@ const styles = StyleSheet.create({
   },
   socialIconsRow: {
     flexDirection: 'row',
-    justifyContent: 'center',
-    flexWrap: 'wrap',
+    alignItems: 'center',
     gap: 12,
     marginBottom: 16,
+    paddingHorizontal: 2,
   },
   socialIconCircleSmall: {
     width: 40,

@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View,
@@ -89,7 +90,7 @@ const TopBar = ({ theme, language, toggleLanguage, showBackButton = false }) => 
           setAvatarUri(getImageUri(currentUser?.avatar));
 
           if (currentUser) {
-            const token = await AsyncStorage.getItem('userToken');
+            const token = await getAuthToken('userToken');
             if (!token) {
               if (isMounted) setUnreadNotifications(0);
               return;
@@ -221,7 +222,7 @@ const TopBar = ({ theme, language, toggleLanguage, showBackButton = false }) => 
           </TouchableOpacity>
 
           <TouchableOpacity
-            onPress={() => navigation.navigate('Main', { refreshKey: Date.now() })}
+            onPress={() => navigation.navigate('Main', { screen: 'WelcomeHome' })}
             hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
           >
             <Text style={[styles.appName, { color: theme.text }]} numberOfLines={1}>

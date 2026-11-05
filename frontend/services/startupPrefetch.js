@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL, LOCAL_LAN_BASE_URLS } from '../constants';
@@ -11,7 +12,7 @@ let running = false;
 const listeners = new Set();
 
 const getHeaders = async () => {
-  const token = await AsyncStorage.getItem('userToken');
+  const token = await getAuthToken('userToken');
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 

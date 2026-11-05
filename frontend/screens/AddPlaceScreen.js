@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 // screens/AddPlaceScreen.js
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
@@ -32,7 +33,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import ArrowUploadLoader from '../components/ArrowUploadLoader';
-import { normalizeRwandaPhone, isValidRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
+import { normalizeRwandaPhone } from '../utils/phoneNormalizer';
 import { compressImageForUpload } from '../utils/imageCompressor';
 import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
 import useScreenTutorial from '../hooks/useScreenTutorial';
@@ -126,7 +127,7 @@ const translations = {
     previewStatus: 'Open',
     call: 'Call',
     direction: 'Direction',
-    phoneError: 'Phone must start with 07 and be exactly 10 digits',
+    phoneError: 'Phone must be 10 digits with no spaces and start with 072, 073, 078, or 079',
     locating: 'Locating...',
     pleaseWait: 'Locating your position... Please wait...',
     geocodingFailed: 'Geocoding failed.',
@@ -146,7 +147,7 @@ const translations = {
     tStep3DescTitle: 'Description',
     tStep3DescBody: 'Describe your place so customers know what to expect (max 500 characters).',
     tStep3PhoneTitle: 'Contact phone',
-    tStep3PhoneBody: 'Add a Rwanda phone number starting with 07 so customers can call you.',
+    tStep3PhoneBody: 'Add a 10-digit Rwanda phone number starting with 072, 073, 078, or 079.',
     tStep4ImageTitle: 'Street image',
     tStep4ImageBody: 'Upload a clear photo of your street or place. This image is required.',
     tStep4ProductsTitle: 'Add products',
@@ -174,7 +175,7 @@ const translations = {
     addressDistrict: 'Akarere:',
     addressSector: 'Umurenge:',
     addressCell: 'Akagali:',
-    addressVillage: 'Umudugudu:',
+    addressVillage: 'Umudugudu',
     addressStreet: 'Umuhanda:',
     addressSelected: 'Ahantu hamaze gutoranywa ✓',
     addressLoading: 'Turabona aderesi...',
@@ -232,7 +233,7 @@ const translations = {
     previewStatus: 'Ifunguye',
     call: 'Guhamagara',
     direction: 'Inzira',
-    phoneError: 'Numero igomba gutangira na 07 kandi ibe imibare 10',
+    phoneError: 'Numero igomba kuba imibare 10 idafite imyanya kandi igatangira na 072, 073, 078, cyangwa 079',
     locating: 'Turahashakisha...',
     pleaseWait: 'Turashakisha ahantu... Nyamuneka tegereza...',
     geocodingFailed: 'Gushakisha byanze.',
@@ -252,7 +253,7 @@ const translations = {
     tStep3DescTitle: 'Ibisobanuro',
     tStep3DescBody: 'Sobanura ahantu hawe kugira ngo abakiriya bamenye ibyo kwitega (inyuguti 500 ntarengwa).',
     tStep3PhoneTitle: 'Numero ya telefone',
-    tStep3PhoneBody: 'Shyiraho numero ya telefone yo mu Rwanda itangira na 07 kugira ngo abakiriya baguhamagare.',
+    tStep3PhoneBody: 'Shyiraho numero ya telefone yo mu Rwanda y\'imibare 10 idafite imyanya itangira na 072, 073, 078, cyangwa 079.',
     tStep4ImageTitle: 'Ifoto y\'umuhanda',
     tStep4ImageBody: 'Shyira ifoto igaragara neza y\'umuhanda cyangwa ahantu hawe. Iyi foto irasabwa.',
     tStep4ProductsTitle: 'Ongeraho ibicuruzwa',
@@ -492,7 +493,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
     const fetchCurrentUser = async () => {
       try {
         await refreshUser();
-        const token = await AsyncStorage.getItem('userToken');
+        const token = await getAuthToken('userToken');
         if (!token) { setLoadingUser(false); return; }
         const response = await axios.get(`${BASE_URL}/api/auth/me`, {
           headers: { Authorization: `Bearer ${token}` },
@@ -518,7 +519,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
   useEffect(() => {
     const fetchExisting = async () => {
       try {
-        const token = await AsyncStorage.getItem('userToken');
+        const token = await getAuthToken('userToken');
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
         const [placesRes, shopsRes] = await Promise.all([
           axios.get(`${BASE_URL}/api/places`, { headers }),
@@ -539,7 +540,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
     let isActive = true;
     const checkExistingBusiness = async () => {
       try {
-        const token = await AsyncStorage.getItem('userToken');
+        const token = await getAuthToken('userToken');
         if (!token) return;
         const headers = { Authorization: `Bearer ${token}` };
         const [placesResponse, shopsResponse] = await Promise.all([
@@ -600,7 +601,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
   // ----- Phone validation -----
   const validatePhone = (phone) => {
     if (!phone) return true;
-    return isValidRwandaPhone(phone);
+    return /^07[2389]\d{7}$/.test(phone);
   };
 
   // ----- Map HTML -----
@@ -826,15 +827,15 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
   // ----- Form handlers -----
   const updateForm = (key, value) => setForm({ ...form, [key]: value });
   const handlePhoneChange = (key, text) => {
-    const formatted = formatPhoneInput(text);
+    const digits = text.replace(/\D/g, '').slice(0, 10);
     if (key === 'phone') {
       setForm(prev => ({
         ...prev,
-        phone: formatted,
-        ...(whatsappSameAsPhone ? { whatsapp: formatted } : {}),
+        phone: digits,
+        ...(whatsappSameAsPhone ? { whatsapp: digits } : {}),
       }));
     } else {
-      setForm(prev => ({ ...prev, [key]: formatted }));
+      setForm(prev => ({ ...prev, [key]: digits }));
     }
   };
 
@@ -912,7 +913,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
     setPublishing(true);
     setProgress(0);
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (!token) { showMapMessage(t.error, t.loginRequired, 'error'); setPublishing(false); return; }
       
       const mallShopsRes = await axios.get(`${BASE_URL}/api/mall-shops/mine`, {

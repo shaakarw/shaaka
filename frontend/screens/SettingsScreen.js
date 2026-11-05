@@ -1,4 +1,3 @@
-
 // screens/SettingsScreen.js
 import React, { useState, useEffect } from 'react';
 import {
@@ -28,7 +27,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useBottomSheet } from '../context/BottomSheetContext';
-import { getTutorialPreferences, setTutorialPreference, subscribeTutorialPreferences } from '../services/tutorialPreferences';
 import AppAlert from '../utils/alert';
 import { OFFLINE_STORAGE_ENABLED_KEY, offlineDatabase, setOfflineStorageEnabled } from '../services/offlineDatabase';
 import { offlineStorage } from '../services/offlineStorage';
@@ -36,6 +34,7 @@ import { mediaCache } from '../services/mediaCache';
 import { reelVideoCache } from '../services/reelVideoCache';
 import { startupPrefetch } from '../services/startupPrefetch';
 import { useContactInfo, useContactLinks } from '../services/contactInfo';
+import ContactInfoIcon from '../components/ContactInfoIcon';
 import { normalizeImageSource } from '../utils/imageUrl';
 
 
@@ -58,16 +57,11 @@ const translations = {
     offlineDataCleared: 'Offline data cleared',
     offlineDataClearFailed: 'Could not clear offline data. Please try again.',
     darkMode: 'Dark Mode',
-    showTutorials: 'Show Tutorials',
-    showTutorialsDescription: 'Automatically show page guides up to two times.',
-    showMeTutorial: 'Show me tutorial',
-    tutorialPreferenceError: 'Could not save your tutorial preference. Please try again.',
     account: 'Account',
     personalInfo: 'Personal Information',
     changePassword: 'Change Password',
     notifications: 'Notifications',
-    pushNotifications: 'Push Notifications',
-    notificationPreferences: 'Notification Preferences',
+    tutorial: 'Tutorial',
     supportAbout: 'Support & About',
     howItWorks: 'How the App Works',
     howItWorksDesc: 'SHAAKA helps you buy and sell locally. Post your products, browse shops, and connect with buyers.',
@@ -77,7 +71,8 @@ const translations = {
     login: 'Log In',
     adminLogin: 'Admin Login',
     logoutConfirmTitle: 'Are you sure you want to log out?',
-    logoutConfirmMessage: 'You can sign in again anytime.',
+    logoutConfirmMessage: 'You are about to log out of your Shaaka account. You will need to sign in again to continue.',
+    logoutConfirmButton: 'Confirm Logout',
     yes: 'Yes',
     no: 'No',
     language: 'Language',
@@ -132,16 +127,11 @@ const translations = {
     offlineDataCleared: 'Amakuru yabitswe yasibwe',
     offlineDataClearFailed: 'Ntibyashobotse gusiba amakuru yabitswe. Ongera ugerageze.',
     darkMode: 'Kwijima',
-    showTutorials: 'Erekana inyigisho',
-    showTutorialsDescription: 'Erekana inyigisho z’impapuro kugeza inshuro ebyiri.',
-    showMeTutorial: 'Nyereka inyigisho',
-    tutorialPreferenceError: 'Ntibyashobotse kubika uko ushaka kwerekwa inyigisho. Ongera ugerageze.',
     account: 'Konti',
     personalInfo: 'Amakuru bwite',
     changePassword: 'Hindura ijambobanga',
     notifications: 'Imenyesha',
-    pushNotifications: 'Kukumenyesha',
-    notificationPreferences: 'Uko imenyesha rikora',
+    tutorial: 'Inyigisho',
     supportAbout: 'Ubufasha n\'amakuru',
     howItWorks: 'Uko shaaka ikora',
     howItWorksDesc: 'SHAAKA igufasha kugura no kugurisha. Tangaza ibicuruzwa byawe, reba amaduka, andi uvugane n\'abaguzi.',
@@ -151,7 +141,8 @@ const translations = {
     login: 'Kwinjira',
     adminLogin: 'Kwinjira nk\'umuyobozi',
     logoutConfirmTitle: 'Ese urashaka gusohoka?',
-    logoutConfirmMessage: 'Ushobora kwinjira igihe icyo aricyo cyose.',
+    logoutConfirmMessage: 'Ugiye gusohoka muri konti yawe ya Shaaka. Uzasabwa kongera kwinjira kugira ngo ukomeze.',
+    logoutConfirmButton: 'Emeza gusohoka',
     yes: 'Yego',
     no: 'Oya',
     language: 'Ururimi',
@@ -206,41 +197,12 @@ export default function SettingsScreen({ navigation, route, language = 'English'
   const [refreshing, setRefreshing] = useState(false);
   const [offlineDataEnabled, setOfflineDataEnabled] = useState(true);
   const [updatingOfflineData, setUpdatingOfflineData] = useState(false);
-  const [tutorialPreferences, setTutorialPreferences] = useState({
-    enabled: true,
-  });
   const t = translations[language] || translations.English;
-
-  // ---------- Screen state ----------
-  const [pushNotifications, setPushNotifications] = useState(true);
-  const [adminSession, setAdminSession] = useState(false);
-
-  useEffect(() => {
-    const checkAdminSession = async () => {
-      const token = await AsyncStorage.getItem('adminToken');
-      setAdminSession(Boolean(token));
-    };
-    checkAdminSession();
-  }, []);
 
   useEffect(() => {
     AsyncStorage.getItem(OFFLINE_STORAGE_ENABLED_KEY)
       .then(value => setOfflineDataEnabled(value !== 'false'))
       .catch(() => setOfflineDataEnabled(true));
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    getTutorialPreferences()
-      .then(value => {
-        if (active) setTutorialPreferences(value);
-      })
-      .catch(error => console.error('Could not load tutorial preferences:', error));
-    const unsubscribe = subscribeTutorialPreferences(setTutorialPreferences);
-    return () => {
-      active = false;
-      unsubscribe();
-    };
   }, []);
 
   // Collapsible sections
@@ -264,14 +226,6 @@ export default function SettingsScreen({ navigation, route, language = 'English'
     });
   };
 
-  const handleTutorialPreferenceChange = async (key, value) => {
-    try {
-      await setTutorialPreference(key, value);
-    } catch (error) {
-      openBottomSheet(t.error, t.tutorialPreferenceError);
-    }
-  };
-
   const openSocialSheet = () => {
     showBottomSheet({
       type: 'social',
@@ -290,8 +244,8 @@ export default function SettingsScreen({ navigation, route, language = 'English'
       title: t.logoutConfirmTitle,
       message: t.logoutConfirmMessage,
       icon: 'log-out-outline',
-      buttonText: t.yes,
-      secondaryButtonText: t.no,
+      buttonText: t.logoutConfirmButton,
+      secondaryButtonText: t.cancel,
       buttonAction: async () => {
         await logout();
         if (navigation && navigation.reset) {
@@ -369,7 +323,7 @@ export default function SettingsScreen({ navigation, route, language = 'English'
   const renderSocialIcons = () => (
     <View style={styles.socialIconsFooter}>
       <Text style={[styles.followText, { color: theme.textSecondary }]}>{t.followUs}</Text>
-      <View style={styles.socialIconsRow}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.socialIconsRow}>
         {socialLinks.map((item, index) => (
           <TouchableOpacity
             key={index}
@@ -378,11 +332,11 @@ export default function SettingsScreen({ navigation, route, language = 'English'
             activeOpacity={0.7}
           >
             <View style={[styles.socialIconCircleSmall, { backgroundColor: item.color }]}>
-              <Ionicons name={item.icon} size={20} color="#fff" />
+              <ContactInfoIcon item={item} size={20} color="#fff" />
             </View>
           </TouchableOpacity>
         ))}
-      </View>
+      </ScrollView>
     </View>
   );
 
@@ -398,8 +352,16 @@ export default function SettingsScreen({ navigation, route, language = 'English'
   const defaultAvatar = require('../assets/profile1.png');
 
   const profileImageSource = user?.avatar ? { uri: user.avatar } : defaultAvatar;
-  const isAdmin = user?.role === 'admin';
-  const hasAdminAccess = isAdmin || adminSession;
+
+  // Only real admin accounts can see the Admin Login row.
+  const isAdminAccount =
+    String(user?.role || '').trim().toLowerCase() === 'admin';
+
+  // Optional: keep the original super-admin identity check if you need it elsewhere.
+  const isSuperAdminAccount =
+    isAdminAccount &&
+    String(user?.username || '').trim().toLowerCase() === 'shaaka' &&
+    String(user?.phone || '').replace(/\D/g, '') === '07998882580';
 
   // ---------- Handlers with login checks ----------
   const handleSubscriptionPress = () => {
@@ -412,7 +374,7 @@ export default function SettingsScreen({ navigation, route, language = 'English'
   };
 
   const handleAdminLogin = () => {
-    navigation.navigate('AdminLogin');
+    navigation.navigate('AdminLogin', { forceLogin: true });
   };
 
   const handleProfilePress = () => {
@@ -446,7 +408,6 @@ export default function SettingsScreen({ navigation, route, language = 'English'
           >
             <Image
               source={normalizeImageSource(profileImageSource)}
-
               style={styles.profileAvatar}
             />
             <View style={styles.profileInfo}>
@@ -464,10 +425,9 @@ export default function SettingsScreen({ navigation, route, language = 'English'
           </TouchableOpacity>
         </View>
 
-        {/* SUBSCRIPTION / ADMIN */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionHeader, { color: theme.textSecondary }]}></Text>
-          {hasAdminAccess && (
+        {/* ADMIN LOGIN (only for admin accounts) */}
+        {isAdminAccount && (
+          <View style={styles.section}>
             <TouchableOpacity onPress={handleAdminLogin}>
               <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -477,8 +437,8 @@ export default function SettingsScreen({ navigation, route, language = 'English'
                 <Ionicons name="arrow-forward-circle" size={20} color={theme.textSecondary} />
               </View>
             </TouchableOpacity>
-          )}
-        </View>
+          </View>
+        )}
 
         {/* APPEARANCE */}
         <View style={styles.section}>
@@ -494,32 +454,6 @@ export default function SettingsScreen({ navigation, route, language = 'English'
             />
           </View>
 
-          <View style={[styles.settingRow, { borderBottomColor: theme.border, alignItems: 'center' }]}>
-            <View style={{ flex: 1, paddingRight: 12 }}>
-              <Text style={[styles.settingText, { color: theme.text }]}>{t.showTutorials}</Text>
-              <Text style={[styles.versionText, { color: theme.textSecondary, marginTop: 4 }]}>
-                {t.showTutorialsDescription}
-              </Text>
-            </View>
-            <Switch
-              value={tutorialPreferences.enabled}
-              onValueChange={value => handleTutorialPreferenceChange('enabled', value)}
-              trackColor={{ false: '#767577', true: theme.accent }}
-              thumbColor={tutorialPreferences.enabled ? '#fff' : '#f4f3f4'}
-              accessibilityLabel={t.showTutorials}
-            />
-          </View>
-
-          <TouchableOpacity
-            style={[styles.settingRow, { borderBottomColor: theme.border }]}
-            onPress={() => navigateTo('Tutorial')}
-            accessibilityRole="button"
-            accessibilityLabel={t.showMeTutorial}
-          >
-            <Text style={[styles.settingText, { color: theme.text }]}>{t.showMeTutorial}</Text>
-            <Ionicons name="chevron-forward" size={20} color={theme.textSecondary} />
-          </TouchableOpacity>
-
           <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
             <Text style={[styles.settingText, { color: theme.text }]}>{t.language}</Text>
             <TouchableOpacity onPress={toggleLanguageHandler} style={styles.languageToggle}>
@@ -529,6 +463,16 @@ export default function SettingsScreen({ navigation, route, language = 'English'
               <Ionicons name="chevron-forward" size={20} color={theme.textSecondary} />
             </TouchableOpacity>
           </View>
+
+          <TouchableOpacity
+            style={[styles.settingRow, { borderBottomColor: theme.border }]}
+            onPress={() => navigateTo('Tutorial')}
+            accessibilityRole="button"
+            accessibilityLabel={t.tutorial}
+          >
+            <Text style={[styles.settingText, { color: theme.text }]}>{t.tutorial}</Text>
+            <Ionicons name="chevron-forward" size={20} color={theme.textSecondary} />
+          </TouchableOpacity>
         </View>
 
         {/* OFFLINE DATA */}
@@ -564,12 +508,9 @@ export default function SettingsScreen({ navigation, route, language = 'English'
           {showAccount && (
             <>
               <TouchableOpacity onPress={() => navigateTo('ProfileEdit')}>
-                <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
-                  <Text style={[styles.settingText, { color: theme.text }]}>{t.personalInfo}</Text>
-                  <Text style={[styles.chevron, { color: theme.textSecondary }]}>›</Text>
-                </View>
+
               </TouchableOpacity>
-              <TouchableOpacity onPress={() => navigateTo('ChangePassword', { adminMode: hasAdminAccess })}>
+              <TouchableOpacity onPress={() => navigateTo('ChangePassword', { adminMode: false })}>
                 <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
                   <Text style={[styles.settingText, { color: theme.text }]}>{t.changePassword}</Text>
                   <Text style={[styles.chevron, { color: theme.textSecondary }]}>›</Text>
@@ -581,16 +522,10 @@ export default function SettingsScreen({ navigation, route, language = 'English'
 
         {/* NOTIFICATIONS */}
         <View style={styles.section}>
-          <Text style={[styles.sectionHeader, { color: theme.textSecondary }]}>{t.notifications}</Text>
+         
           <TouchableOpacity onPress={() => navigateTo('Notifications')}>
             <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
               <Text style={[styles.settingText, { color: theme.text }]}>{t.notifications}</Text>
-              <Text style={[styles.chevron, { color: theme.textSecondary }]}>›</Text>
-            </View>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => navigateTo('NotificationPreferences')}>
-            <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
-              <Text style={[styles.settingText, { color: theme.text }]}>{t.notificationPreferences}</Text>
               <Text style={[styles.chevron, { color: theme.textSecondary }]}>›</Text>
             </View>
           </TouchableOpacity>
@@ -766,9 +701,9 @@ const styles = StyleSheet.create({
   },
   socialIconsRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
+    alignItems: 'center',
     gap: 10,
+    paddingHorizontal: 2,
   },
   socialIconSmall: {
     alignItems: 'center',

@@ -1,3 +1,4 @@
+import { getAuthToken, removeAuthToken } from '../utils/authStorage';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -22,13 +23,14 @@ const CONTACT_FIELDS = [
   { key: 'twitter', label: 'X / Twitter', placeholder: 'X profile URL or username', keyboardType: 'url' },
   { key: 'youtube', label: 'YouTube', placeholder: 'YouTube channel URL or handle', keyboardType: 'url' },
   { key: 'facebook', label: 'Facebook', placeholder: 'Facebook profile URL', keyboardType: 'url' },
-  { key: 'tiktok', label: 'TikTok', placeholder: 'TikTok profile URL or username', keyboardType: 'url' },
   { key: 'email', label: 'Email', placeholder: 'support@example.com', keyboardType: 'email-address' },
   { key: 'whatsapp', label: 'WhatsApp', placeholder: 'Phone number or WhatsApp link', keyboardType: 'phone-pad' },
-  { key: 'phone', label: 'Phone', placeholder: '+250...', keyboardType: 'phone-pad' },
-  { key: 'alternatePhone', label: 'Alternate phone', placeholder: '+250...', keyboardType: 'phone-pad' },
   { key: 'website', label: 'Website', placeholder: 'https://example.com', keyboardType: 'url' },
-  { key: 'other', label: 'Other contact link', placeholder: 'https://example.com/contact', keyboardType: 'url' },
+  { key: 'other', label: 'Other contact 1', placeholder: 'https://example.com/contact', keyboardType: 'url' },
+  { key: 'other2', label: 'Other contact 2', placeholder: 'https://example.com/contact', keyboardType: 'url' },
+  { key: 'other3', label: 'Other contact 3', placeholder: 'https://example.com/contact', keyboardType: 'url' },
+  { key: 'other4', label: 'Other contact 4', placeholder: 'https://example.com/contact', keyboardType: 'url' },
+  { key: 'other5', label: 'Other contact 5', placeholder: 'https://example.com/contact', keyboardType: 'url' },
 ];
 
 export default function AdminContactInfoScreen({ navigation, language = 'English' }) {
@@ -39,7 +41,7 @@ export default function AdminContactInfoScreen({ navigation, language = 'English
   const isEnglish = language === 'English';
 
   const getAdminToken = useCallback(async () => {
-    const token = await AsyncStorage.getItem('adminToken');
+    const token = await getAuthToken('adminToken');
     if (!token) navigation.replace('AdminLogin');
     return token;
   }, [navigation]);
@@ -94,8 +96,8 @@ export default function AdminContactInfoScreen({ navigation, language = 'English
       );
     } catch (error) {
       console.error('Could not save admin contact information:', error);
-      if ([401, 403].includes(error.response?.status)) {
-        await AsyncStorage.removeItem('adminToken');
+      if (['session_invalidated', 'session_ended'].includes(error.response?.data?.reason)) {
+        await removeAuthToken('adminToken');
         navigation.replace('AdminLogin');
       } else {
         showAdminFeedback(

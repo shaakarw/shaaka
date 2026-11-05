@@ -1,3 +1,4 @@
+import { getAuthToken, removeAuthToken, setAuthToken } from '../utils/authStorage';
 
 
 // screens/AdminLoginScreen.js
@@ -17,6 +18,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../context/ThemeContext';
+import { useAuth } from '../context/AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
@@ -52,8 +54,9 @@ const translations = {
   },
 };
 
-const AdminLoginScreen = ({ navigation, language }) => {
+const AdminLoginScreen = ({ navigation, route, language }) => {
   const { theme, isDarkMode } = useTheme();
+  const { clearAdminSessionInvalidated, setIsAdminAuthenticated } = useAuth();
   const t = translations[language] || translations.English;
   const [checkingSession, setCheckingSession] = useState(true);
 
@@ -63,21 +66,29 @@ const AdminLoginScreen = ({ navigation, language }) => {
   const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
+    if (route?.params?.forceLogin) {
+      setCheckingSession(false);
+      return undefined;
+    }
     let isActive = true;
     const checkToken = async () => {
       try {
-        const token = await AsyncStorage.getItem('adminToken');
+        const token = await getAuthToken('adminToken');
         if (!token) return;
 
         const response = await axios.get(`${BASE_URL}/api/admin/stats`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (isActive && response.data?.success) {
+          setIsAdminAuthenticated(true);
           navigation.replace('AdminDashboard', { language });
         }
       } catch (error) {
-        if ([401, 403].includes(error.response?.status)) {
-          await AsyncStorage.removeItem('adminToken');
+        if (error.response?.data?.reason === 'session_invalidated' || error.response?.data?.reason === 'session_ended') {
+          await removeAuthToken('adminToken');
+          setIsAdminAuthenticated(false);
+        } else if (isActive) {
+          setIsAdminAuthenticated(true);
         }
       } finally {
         if (isActive) setCheckingSession(false);
@@ -85,7 +96,7 @@ const AdminLoginScreen = ({ navigation, language }) => {
     };
     checkToken();
     return () => { isActive = false; };
-  }, [language, navigation]);
+  }, [clearAdminSessionInvalidated, language, navigation, route?.params?.forceLogin, setIsAdminAuthenticated]);
 
   const handleLogin = async () => {
     const trimmedPhone = phone.trim();
@@ -106,7 +117,9 @@ const AdminLoginScreen = ({ navigation, language }) => {
       const { success, token, message } = response.data;
 
       if (success && token) {
-        await AsyncStorage.setItem('adminToken', token);
+        await setAuthToken('adminToken', token);
+        setIsAdminAuthenticated(true);
+        clearAdminSessionInvalidated();
         navigation.replace('AdminDashboard', { language });
       } else {
         showAdminFeedback(t.adminLogin, message || t.invalidCredentials, 'error');

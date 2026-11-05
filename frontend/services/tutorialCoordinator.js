@@ -1,47 +1,43 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getTutorialPreferences } from './tutorialPreferences';
 
 const DISPLAY_LIMIT = 2;
-const COUNT_KEY_PREFIX = 'shaaka_tutorial_display_counts_v1:';
+const DISPLAY_COUNT_KEY = 'shaaka_tutorial_display_count_install_v1';
 let current = null;
+let tutorialsReady = false;
 const queue = [];
+const readinessListeners = new Set();
 
-const getUserScope = async () => {
-  try {
-    const storedUser = await AsyncStorage.getItem('user');
-    const user = storedUser ? JSON.parse(storedUser) : null;
-    return String(user?._id || user?.id || 'guest');
-  } catch (error) {
-    console.error('Could not identify the tutorial counter owner:', error);
-    throw error;
-  }
-};
+export function areTutorialsReady() {
+  return tutorialsReady;
+}
 
-const readCounts = async (scope) => {
+export function setTutorialsReady() {
+  if (tutorialsReady) return;
+  tutorialsReady = true;
+  readinessListeners.forEach((listener) => listener());
+}
+
+export function subscribeTutorialReadiness(listener) {
+  readinessListeners.add(listener);
+  return () => readinessListeners.delete(listener);
+}
+
+const readDisplayCount = async () => {
   try {
-    const storedCounts = await AsyncStorage.getItem(`${COUNT_KEY_PREFIX}${scope}`);
-    return storedCounts ? JSON.parse(storedCounts) : {};
+    const storedCount = await AsyncStorage.getItem(DISPLAY_COUNT_KEY);
+    return Math.max(0, Number(storedCount) || 0);
   } catch (error) {
     console.error('Could not load tutorial display counts:', error);
     throw error;
   }
 };
 
-const grantTutorial = async (id, countDisplay) => {
-  const { enabled } = await getTutorialPreferences();
-  if (!enabled) return false;
-  if (!countDisplay) return true;
-
-  const scope = await getUserScope();
-  const counts = await readCounts(scope);
-  const displayCount = Number(counts[id]) || 0;
+const grantTutorial = async () => {
+  const displayCount = await readDisplayCount();
   if (displayCount >= DISPLAY_LIMIT) return false;
 
   try {
-    await AsyncStorage.setItem(
-      `${COUNT_KEY_PREFIX}${scope}`,
-      JSON.stringify({ ...counts, [id]: displayCount + 1 })
-    );
+    await AsyncStorage.setItem(DISPLAY_COUNT_KEY, String(displayCount + 1));
     return true;
   } catch (error) {
     console.error('Could not save tutorial display count:', error);
@@ -54,7 +50,7 @@ const grantNextQueued = async () => {
     const next = queue.shift();
     current = next.id;
     try {
-      const granted = await grantTutorial(next.id, next.countDisplay);
+      const granted = await grantTutorial();
       if (!granted) {
         current = null;
         next.resolve(false);
@@ -69,17 +65,16 @@ const grantNextQueued = async () => {
   }
 };
 
-export async function requestTutorial(id, { countDisplay = true } = {}) {
-  const { enabled } = await getTutorialPreferences();
-  if (!enabled) return false;
+export async function requestTutorial(id) {
+  if (!tutorialsReady) return false;
 
   if (current) {
-    return new Promise((resolve) => queue.push({ id, countDisplay, resolve }));
+    return new Promise((resolve) => queue.push({ id, resolve }));
   }
 
   current = id;
   try {
-    const granted = await grantTutorial(id, countDisplay);
+    const granted = await grantTutorial();
     if (!granted) {
       current = null;
       await grantNextQueued();
@@ -106,9 +101,4 @@ export function cancelTutorial(id) {
 
 export function getActiveTutorial() {
   return current;
-}
-
-export async function getTutorialDisplayCounts(userId) {
-  const scope = userId || await getUserScope();
-  return readCounts(scope);
 }

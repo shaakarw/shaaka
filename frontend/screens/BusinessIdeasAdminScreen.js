@@ -1,3 +1,4 @@
+import { getAuthToken, removeAuthToken } from '../utils/authStorage';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, RefreshControl,
@@ -74,7 +75,7 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
   const latestRequest = useRef(0);
 
   const tokenOrRedirect = useCallback(async () => {
-    const token = await AsyncStorage.getItem('adminToken');
+    const token = await getAuthToken('adminToken');
     if (!token) navigation.replace('AdminLogin');
     return token;
   }, [navigation]);
@@ -103,8 +104,8 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
       setCategories(response.data.categories || []);
     } catch (requestError) {
       if (requestId !== latestRequest.current) return;
-      if ([401, 403].includes(requestError.response?.status)) {
-        await AsyncStorage.removeItem('adminToken');
+      if (['session_invalidated', 'session_ended'].includes(requestError.response?.data?.reason)) {
+        await removeAuthToken('adminToken');
         navigation.replace('AdminLogin');
       } else {
         const message = requestError.response?.data?.message || requestError.message || 'Could not load business ideas.';
@@ -178,8 +179,8 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
       await loadIdeas(1);
       showAdminFeedback('Saved', editing ? 'Business idea changes were saved.' : published ? 'Business idea published.' : 'Business idea saved as a draft.', 'success');
     } catch (saveError) {
-      if ([401, 403].includes(saveError.response?.status)) {
-        await AsyncStorage.removeItem('adminToken');
+      if (['session_invalidated', 'session_ended'].includes(saveError.response?.data?.reason)) {
+        await removeAuthToken('adminToken');
         navigation.replace('AdminLogin');
       } else if (saveError.response?.data?.errors) {
         setErrors(saveError.response.data.errors);
@@ -204,8 +205,8 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
       await loadIdeas(page);
       showAdminFeedback('Updated', published ? 'Business idea published.' : 'Business idea unpublished.', 'success');
     } catch (statusError) {
-      if ([401, 403].includes(statusError.response?.status)) {
-        await AsyncStorage.removeItem('adminToken');
+      if (['session_invalidated', 'session_ended'].includes(statusError.response?.data?.reason)) {
+        await removeAuthToken('adminToken');
         navigation.replace('AdminLogin');
       } else showAdminFeedback('Could not update status', statusError.response?.data?.message || statusError.message, 'error');
     }
@@ -224,8 +225,8 @@ const BusinessIdeasAdminScreen = ({ navigation }) => {
         await loadIdeas(1);
         showAdminFeedback('Deleted', 'Business idea deleted.', 'success');
       } catch (deleteError) {
-        if ([401, 403].includes(deleteError.response?.status)) {
-          await AsyncStorage.removeItem('adminToken');
+        if (['session_invalidated', 'session_ended'].includes(deleteError.response?.data?.reason)) {
+          await removeAuthToken('adminToken');
           navigation.replace('AdminLogin');
         } else showAdminFeedback('Could not delete', deleteError.response?.data?.message || deleteError.message, 'error');
       }

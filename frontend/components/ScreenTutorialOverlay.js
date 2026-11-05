@@ -12,10 +12,6 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
-import {
-  getTutorialPreferences,
-  subscribeTutorialPreferences,
-} from '../services/tutorialPreferences';
 
 export default function ScreenTutorialOverlay({
   visible,
@@ -30,7 +26,6 @@ export default function ScreenTutorialOverlay({
   scrollY = 0,                 // signal to re-check visibility on scroll
   waitForVisibility = false,   // wait for off-screen targets
   shakeOnOutsidePress = true,
-  automatic = true,
 }) {
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState(null);
@@ -69,22 +64,6 @@ export default function ScreenTutorialOverlay({
   };
 
   const currentStep = steps[index];
-
-  useEffect(() => {
-    if (!automatic) return undefined;
-    let active = true;
-    const handlePreferenceChange = ({ enabled }) => {
-      if (!enabled && active && visible) onFinish();
-    };
-    getTutorialPreferences()
-      .then(handlePreferenceChange)
-      .catch((error) => console.error('Could not check tutorial preferences:', error));
-    const unsubscribe = subscribeTutorialPreferences(handlePreferenceChange);
-    return () => {
-      active = false;
-      unsubscribe();
-    };
-  }, [automatic, onFinish, visible]);
 
   useEffect(() => {
     if (visible) {

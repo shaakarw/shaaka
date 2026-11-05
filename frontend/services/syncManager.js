@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '../constants';
@@ -8,7 +9,7 @@ let running = false;
 const listeners = new Set();
 
 const authConfig = async () => {
-  const token = await AsyncStorage.getItem('userToken');
+  const token = await getAuthToken('userToken');
   return token ? { headers: { Authorization: `Bearer ${token}` } } : null;
 };
 
@@ -54,12 +55,43 @@ export const syncManager = {
         try {
           const response = await processAction(action);
           if (action.actionType === 'SEND_MESSAGE' && response?.data?.message) {
-            await offlineDatabase.putRecord('messages', response.data.message._id, response.data.message, { priority: 'high', protected: true });
+            const serverMessage = response.data.message;
+            if (action.entityId && String(action.entityId) !== String(serverMessage._id)) {
+              await offlineDatabase.deleteRecord('messages', action.entityId);
+            }
+            await offlineDatabase.putRecord('messages', serverMessage._id, serverMessage, { priority: 'high', protected: true });
+            listeners.forEach(listener => listener({
+              status: 'message-sent',
+              clientMessageId: String(action.payload?.clientMessageId || action.entityId || ''),
+              message: serverMessage,
+            }));
           }
           await offlineDatabase.completeAction(action.id);
           synced += 1;
         } catch (error) {
-          await offlineDatabase.deferAction(action, error);
+          if (error.response?.status >= 400 && error.response.status < 500) {
+            await offlineDatabase.completeAction(action.id);
+            if (action.actionType === 'SEND_MESSAGE') {
+              const clientMessageId = String(action.payload?.clientMessageId || action.entityId || '');
+              const message = clientMessageId
+                ? await offlineDatabase.getRecord('messages', clientMessageId)
+                : null;
+              if (message) {
+                await offlineDatabase.putRecord('messages', clientMessageId, {
+                  ...message,
+                  syncStatus: 'failed',
+                  syncError: error.response.data?.message || error.message,
+                }, { priority: 'high', protected: true });
+              }
+              listeners.forEach(listener => listener({
+                status: 'message-failed',
+                clientMessageId,
+                message: error.response.data?.message || error.message,
+              }));
+            }
+          } else {
+            await offlineDatabase.deferAction(action, error);
+          }
         }
       }
       await pullChanges();

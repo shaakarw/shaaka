@@ -8,6 +8,7 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
+      "bundleIdentifier": "com.anonymous.shaaka",
       "supportsTablet": true
     },
     "android": {
@@ -17,7 +18,9 @@
       },
       "package": "com.anonymous.shaaka",
       "permissions": [
-        "INTERNET"
+        "INTERNET",
+        "POST_NOTIFICATIONS",
+        "VIBRATE"
       ]
     },
     "web": {
@@ -47,6 +50,13 @@
         }
       ],
       "expo-video",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#47ae87"
+        }
+      ],
       "expo-sqlite",
       "expo-status-bar",
       "expo-font"

@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 // screens/AddPostScreen.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
@@ -521,7 +522,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
   const fetchLimitsAndUsage = async () => {
     try {
       await refreshUser();
-      const token = await AsyncStorage.getItem('userToken');
+      const token = await getAuthToken('userToken');
       if (!token) {
         setLimitsLoading(false);
         return;
@@ -958,7 +959,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
     setError('');
   };
 
-  const getToken = async () => await AsyncStorage.getItem('userToken');
+  const getToken = async () => await getAuthToken('userToken');
 
   const handlePost = async () => {
     if (loading || videoValidationRef.current) return;
@@ -1235,9 +1236,6 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
           <View style={styles.step4HeroWrap}>
             <Image source={normalizeImageSource({ uri: previewImage })} style={styles.step4HeroImage} resizeMode="contain" />
             <View style={styles.step4HeroShade} />
-            <TouchableOpacity style={styles.step4FavoriteButton} accessibilityRole="button" accessibilityLabel="Save preview">
-              <Ionicons name="heart-outline" size={22} color="#555" />
-            </TouchableOpacity>
             {formData.images.length > 1 && (
               <View style={styles.step4ImageCountBadge}>
                 <Ionicons name="images-outline" size={14} color="#fff" />
@@ -1823,17 +1821,6 @@ const styles = StyleSheet.create({
   step4HeroWrap: { height: 220, position: 'relative', backgroundColor: '#000' },
   step4HeroImage: { width: '100%', height: '100%' },
   step4HeroShade: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.04)' },
-  step4FavoriteButton: {
-    position: 'absolute',
-    right: 14,
-    bottom: 14,
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   step4ImageCountBadge: {
     position: 'absolute',
     left: 14,

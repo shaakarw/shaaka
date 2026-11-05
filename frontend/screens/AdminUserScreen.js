@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 // screens/AdminUserScreen.js
 import React, { useState, useCallback, useEffect, useRef } from 'react';
@@ -284,7 +285,7 @@ const AdminUserScreen = ({ navigation, language }) => {
   ).current;
 
   // ---------- API helpers ----------
-  const getToken = async () => AsyncStorage.getItem('adminToken');
+  const getToken = async () => getAuthToken('adminToken');
 
   const showStatus = (title, message) => {
     showAdminFeedback(title, message, title === t.error ? 'error' : 'success', { buttonText: t.ok });
@@ -312,7 +313,7 @@ const AdminUserScreen = ({ navigation, language }) => {
       }
     } catch (error) {
       console.error('Fetch users error:', error);
-      if (error.response?.status === 401) {
+      if (['session_invalidated', 'session_ended'].includes(error.response?.data?.reason)) {
         navigation.replace('AdminLogin');
       } else {
         showAdminFeedback(t.error, 'An error occurred while fetching users.', 'error');

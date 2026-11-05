@@ -3,6 +3,7 @@
   "dependencies": {
     "expo": "^57.0.2",
     "expo-blur": "~15.0.8",
+    "expo-secure-store": "~57.0.4",
     "streamifier": "^0.1.1"
   }
 }

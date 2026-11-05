@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 
 // screens/MessageScreen.js
@@ -32,13 +33,62 @@ import { isReelsActive } from '../services/reelActivity';
 import { logDebug, warnDebug } from '../utils/debugLogger';
 import { showAdminFeedback } from '../utils/adminFeedback';
 import { useContactInfo, useContactLinks } from '../services/contactInfo';
+import ContactInfoIcon from '../components/ContactInfoIcon';
 import { normalizeImageSource } from '../utils/imageUrl';
+import { networkStatus } from '../services/networkStatus';
+import { offlineDatabase } from '../services/offlineDatabase';
 
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const DEFAULT_AVATAR = require('../assets/profile1.png');
 const loadingLogo = require('../assets/logos.png');
 const MessageBackground = require('../assets/message.png');
+
+const getConversationTimestamp = (conversation) => {
+  const timestamp = new Date(conversation?.lastMessage?.createdAt || 0).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const deduplicateConversationsByUser = (conversations) => {
+  const groups = new Set();
+  const groupByIdentifier = new Map();
+
+  conversations.forEach((conversation) => {
+    if (!conversation?.lastMessage) return;
+    const identifiers = [conversation.otherUserId, conversation.otherUserPhone]
+      .filter(Boolean)
+      .map(identifier => String(identifier).trim().toLowerCase())
+      .filter(Boolean);
+    if (identifiers.length === 0) return;
+
+    const matchingGroups = new Set(
+      identifiers.map(identifier => groupByIdentifier.get(identifier)).filter(Boolean)
+    );
+    let group = matchingGroups.values().next().value;
+    if (!group) {
+      group = { conversation, identifiers: new Set() };
+      groups.add(group);
+    } else {
+      if (getConversationTimestamp(conversation) > getConversationTimestamp(group.conversation)) {
+        group.conversation = conversation;
+      }
+      matchingGroups.forEach((matchingGroup) => {
+        if (matchingGroup === group) return;
+        if (getConversationTimestamp(matchingGroup.conversation) > getConversationTimestamp(group.conversation)) {
+          group.conversation = matchingGroup.conversation;
+        }
+        matchingGroup.identifiers.forEach(identifier => group.identifiers.add(identifier));
+        groups.delete(matchingGroup);
+      });
+    }
+
+    identifiers.forEach(identifier => group.identifiers.add(identifier));
+    group.identifiers.forEach(identifier => groupByIdentifier.set(identifier, group));
+  });
+
+  return Array.from(groups, group => group.conversation)
+    .sort((a, b) => getConversationTimestamp(b) - getConversationTimestamp(a));
+};
 
 // ---------- Translations ----------
 const translations = {
@@ -54,9 +104,14 @@ const translations = {
     success: 'Success',
     updates: 'Updates',
     noUpdates: 'No updates available',
+    conversationsUnavailable: 'Could not load conversations. Pull to refresh when you are back online.',
+    noConversations: 'No conversations yet',
     followUs: 'Follow us on social media',
     typing: 'Typing...',
     youPrefix: 'You: ',
+    photo: 'Photo',
+    video: 'Video',
+    voiceMessage: 'Voice message',
   },
   Kinyarwanda: {
     messages: 'Ubutumwa',
@@ -70,9 +125,14 @@ const translations = {
     success: 'Byakunze',
     updates: 'Amakuru mashya',
     noUpdates: 'Nta makuru mashya ahari',
+    conversationsUnavailable: 'Ntibyashobotse kubona ibiganiro. Ongera ugerageze umaze kongera kubona interineti.',
+    noConversations: 'Nta biganiro birahari',
     followUs: 'Twandikire ku mbuga nkoranyambaga',
     typing: 'Arikwandika...',
     youPrefix: 'Wowe: ',
+    photo: 'Ifoto',
+    video: 'Videwo',
+    voiceMessage: "Ubutumwa bw'amajwi",
   },
 };
 
@@ -137,7 +197,7 @@ const UpdatesRow = React.memo(({ updates, onUpdatePress, theme }) => {
         horizontal
         showsHorizontalScrollIndicator={false}
         data={updates}
-        keyExtractor={(item) => String(item._id || item.id || Math.random())}
+        keyExtractor={(item, index) => String(item._id || item.id || `update-${index}`)}
         renderItem={({ item }) => (
           <UpdateItem update={item} onPress={onUpdatePress} theme={theme} />
         )}
@@ -150,7 +210,8 @@ const UpdatesRow = React.memo(({ updates, onUpdatePress, theme }) => {
 // ---------- Conversation Row ----------
 const ConversationRow = React.forwardRef(({ conversation, onPress, theme, currentUserId, isOnline, isTyping, t }, ref) => {
   const lastMsg = conversation.lastMessage;
-  const isSentByMe = lastMsg?.senderId === currentUserId;
+  const isSentByMe = String(lastMsg?.senderId || '') === String(currentUserId || '');
+  const messageDate = lastMsg?.createdAt ? new Date(lastMsg.createdAt) : null;
 
   const typingLabel = t?.typing || 'Typing...';
   const youPrefix = t?.youPrefix || 'You: ';
@@ -159,7 +220,10 @@ const ConversationRow = React.forwardRef(({ conversation, onPress, theme, curren
   if (isTyping) {
     displayMessage = typingLabel;
   } else {
-    displayMessage = lastMsg?.text || '';
+    displayMessage = lastMsg?.text
+      || (lastMsg?.imageUrl || lastMsg?.imageUrls?.length ? t?.photo : '')
+      || (lastMsg?.videoUrl ? t?.video : '')
+      || (lastMsg?.audioUrl ? t?.voiceMessage : '');
   }
 
   return (
@@ -190,8 +254,8 @@ const ConversationRow = React.forwardRef(({ conversation, onPress, theme, curren
             {conversation.otherUserName || 'User'}
           </Text>
           <Text style={[styles.timestamp, { color: theme.textSecondary }]}>
-            {lastMsg?.createdAt
-              ? new Date(lastMsg.createdAt).toLocaleTimeString([], {
+            {messageDate && !Number.isNaN(messageDate.getTime())
+              ? messageDate.toLocaleTimeString([], {
                   hour: '2-digit',
                   minute: '2-digit',
                 })
@@ -230,15 +294,26 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
   const DETAIL_SHEET_HEIGHT = SCREEN_HEIGHT * 0.65;
 
   const [conversations, setConversations] = useState([]);
-  const [filtered, setFiltered] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [fetchError, setFetchError] = useState(null);
   const [currentUser, setCurrentUser] = useState(null);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [onlineUsers, setOnlineUsers] = useState({});
   const [typingUsers, setTypingUsers] = useState({});
   const socketRef = useRef(null);
+  const filtered = useMemo(() => {
+    const query = searchQuery.trim().toLocaleLowerCase();
+    if (!query) return conversations;
+    return conversations.filter((conversation) => (
+      [
+        conversation.otherUserName,
+        conversation.postTitle,
+        conversation.lastMessage?.text,
+      ].some(value => String(value || '').toLocaleLowerCase().includes(query))
+    ));
+  }, [conversations, searchQuery]);
 
   // Auto-clear timers for typing indicators (per user)
   const typingClearTimersRef = useRef({});
@@ -259,38 +334,59 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
 
   const scaleAnim = useRef(new Animated.Value(1)).current;
   useEffect(() => {
+    let animation;
     if (loading) {
-      Animated.loop(
+      animation = Animated.loop(
         Animated.sequence([
           Animated.timing(scaleAnim, { toValue: 1.2, duration: 1000, useNativeDriver: true }),
           Animated.timing(scaleAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
         ])
-      ).start();
+      );
+      animation.start();
     }
-  }, [loading]);
+    return () => animation?.stop();
+  }, [loading, scaleAnim]);
 
   const spinAnim = useRef(new Animated.Value(0)).current;
   const spin = spinAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
 
   useEffect(() => {
+    let animation;
     if (refreshing) {
-      Animated.loop(
+      animation = Animated.loop(
         Animated.timing(spinAnim, { toValue: 1, duration: 1000, useNativeDriver: true })
-      ).start();
+      );
+      animation.start();
     } else {
       spinAnim.stopAnimation();
       spinAnim.setValue(0);
     }
-  }, [refreshing]);
+    return () => animation?.stop();
+  }, [refreshing, spinAnim]);
 
-  const getToken = async () => adminMode
-    ? AsyncStorage.getItem('adminToken')
-    : AsyncStorage.getItem('userToken');
+  const getToken = useCallback(async () => adminMode
+    ? getAuthToken('adminToken')
+    : getAuthToken('userToken'), [adminMode]);
+
+  const getConversationCacheKey = useCallback(async () => {
+    let user = currentUser;
+    if (!user) {
+      try {
+        const storedUser = await AsyncStorage.getItem('sessionUser') || await AsyncStorage.getItem('user');
+        user = storedUser ? JSON.parse(storedUser) : null;
+      } catch (error) {
+        console.warn('Could not read the cached message account:', error.message);
+      }
+    }
+    const userId = user?._id || user?.id || user?.userId || user?.phone;
+    return userId ? `${adminMode ? 'admin' : 'user'}:${String(userId)}` : null;
+  }, [adminMode, currentUser]);
 
   // ---------- Fetch online statuses ----------
   const fetchOnlineStatuses = useCallback(async (userIds) => {
     if (!userIds || userIds.length === 0) return;
     try {
+      if (!(await networkStatus.start()).isOnline) return;
       const token = await getToken();
       if (!token) return;
       const response = await axios.post(
@@ -300,18 +396,20 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       );
       if (response.data.success) {
         const statuses = response.data.statuses || {};
-        const newOnline = { ...onlineUsers };
-        Object.keys(statuses).forEach((uid) => {
-          newOnline[uid] = statuses[uid] === true;
+        setOnlineUsers(previous => {
+          const next = { ...previous };
+          Object.entries(statuses).forEach(([uid, status]) => {
+            next[uid] = status === true;
+          });
+          return next;
         });
-        setOnlineUsers(newOnline);
       }
     } catch (error) {
       if (error.response?.status !== 404) {
         warnDebug('Failed to fetch online statuses:', error.message);
       }
     }
-  }, [onlineUsers]);
+  }, [getToken]);
 
   // ---------- Socket presence ----------
   const connectPresenceSocket = useCallback(async () => {
@@ -405,7 +503,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     socket.on('connect_error', (err) => {
       logDebug('[MsgScreen Socket] connect_error:', err?.message);
     });
-  }, [isLoggedIn, currentUser]);
+  }, [getToken, isLoggedIn, currentUser]);
 
   useEffect(() => {
     connectPresenceSocket();
@@ -454,6 +552,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
   // ---------- Fetch notes ----------
   const fetchNotes = useCallback(async () => {
     try {
+      if (!(await networkStatus.start()).isOnline) return [];
       const response = await axios.get(`${BASE_URL}/api/notes`);
       if (response.data.success) {
         const viewedTimestamps = await loadViewedTimestamps();
@@ -483,59 +582,76 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     try {
       const token = await getToken();
       if (!token) {
+        setFetchError(t.conversationsUnavailable);
         setLoading(false);
+        return;
+      }
+      const cacheKey = await getConversationCacheKey();
+      if (!(await networkStatus.start()).isOnline) {
+        const cached = cacheKey ? await offlineDatabase.getRecord('conversations', cacheKey) : null;
+        if (Array.isArray(cached)) {
+          const unique = deduplicateConversationsByUser(cached);
+          setConversations(unique);
+          setFetchError(unique.length ? null : t.conversationsUnavailable);
+        } else {
+          setFetchError(t.conversationsUnavailable);
+        }
         return;
       }
       const response = await axios.get(`${BASE_URL}/api/messages/conversations`, {
         headers: { Authorization: `Bearer ${token}` },
       });
 
-      if (response.data.success) {
-        const convs = (Array.isArray(response.data.conversations)
-          ? response.data.conversations
-          : []).filter(conversation => conversation?.lastMessage);
-        const map = new Map();
-        convs.forEach((c) => {
-          const id = c.otherUserId;
-          if (!id) return;
-          if (!map.has(id)) {
-            map.set(id, c);
-          } else {
-            const existing = map.get(id);
-            const existingTime = new Date(existing.lastMessage?.createdAt || 0);
-            const newTime = new Date(c.lastMessage?.createdAt || 0);
-            if (newTime > existingTime) {
-              map.set(id, c);
-            }
-          }
-        });
-        const unique = Array.from(map.values());
-        setConversations(unique);
-        setFiltered(unique);
+      if (!response.data?.success || !Array.isArray(response.data.conversations)) {
+        throw new Error('The conversations response was not successful or had an invalid format');
+      }
 
-        const userIds = unique.map(c => c.otherUserId).filter(Boolean);
-        if (userIds.length > 0) {
-          await fetchOnlineStatuses(userIds);
+      const unique = deduplicateConversationsByUser(response.data.conversations);
+      setConversations(unique);
+      setFetchError(null);
+      if (cacheKey) {
+        try {
+          await offlineDatabase.putRecord('conversations', cacheKey, unique, { priority: 'high' });
+        } catch (cacheError) {
+          console.warn('Could not cache message conversations:', cacheError.message);
         }
-      } else {
-        setConversations([]);
-        setFiltered([]);
+      }
+
+      const userIds = [...new Set(unique.map(c => c.otherUserId).filter(Boolean))];
+      if (userIds.length > 0) {
+        await fetchOnlineStatuses(userIds);
       }
     } catch (error) {
-      setConversations([]);
-      setFiltered([]);
+      console.error('Error fetching conversations:', error);
+      try {
+        const cacheKey = await getConversationCacheKey();
+        const cached = cacheKey ? await offlineDatabase.getRecord('conversations', cacheKey) : null;
+        if (Array.isArray(cached)) {
+          setConversations(deduplicateConversationsByUser(cached));
+        }
+      } catch (cacheError) {
+        console.warn('Could not read cached message conversations:', cacheError.message);
+      }
+      setFetchError(t.conversationsUnavailable);
     } finally {
       setLoading(false);
     }
-  }, [fetchOnlineStatuses]);
+  }, [fetchOnlineStatuses, getConversationCacheKey, getToken, t.conversationsUnavailable]);
 
   // ---------- Refresh all ----------
   const refreshAll = useCallback(async () => {
-    if (!isLoggedIn || !currentUser || isReelsActive()) return;
-    await fetchConversations();
-    const notesData = await fetchNotes();
-    setNotes(notesData);
-  }, [isLoggedIn, currentUser, fetchConversations, fetchNotes]);
+    if (!isLoggedIn || isReelsActive() || isFetchingRef.current) return;
+    isFetchingRef.current = true;
+    try {
+      const [notesData] = await Promise.all([
+        fetchNotes(),
+        fetchConversations(),
+      ]);
+      setNotes(notesData);
+    } finally {
+      isFetchingRef.current = false;
+    }
+  }, [isLoggedIn, fetchConversations, fetchNotes]);
 
   // ---------- Auto‑refresh ----------
   useEffect(() => {
@@ -547,12 +663,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
 
       autoRefreshInterval.current = setInterval(() => {
         if (isReelsActive()) return;
-        if (!isFetchingRef.current) {
-          isFetchingRef.current = true;
-          refreshAll().finally(() => {
-            isFetchingRef.current = false;
-          });
-        }
+        refreshAll();
       }, 5000);
     } else {
       if (autoRefreshInterval.current) {
@@ -575,18 +686,21 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
 
   const checkLoginStatus = async () => {
     try {
-      const loggedIn = await AsyncStorage.getItem('isLoggedIn');
-      const isAuthenticated = adminMode
-        ? Boolean(await AsyncStorage.getItem('adminToken'))
-        : loggedIn === 'true';
+      const isAuthenticated = Boolean(await getToken());
       setIsLoggedIn(isAuthenticated);
-      if (isAuthenticated) {
-        await loadCurrentUser();
-        await refreshAll();
-      } else {
+      if (!isAuthenticated) {
         setLoading(false);
+        return;
       }
-    } catch (e) {
+
+      const [notesData] = await Promise.all([
+        fetchNotes(),
+        fetchConversations(),
+        loadCurrentUser(),
+      ]);
+      setNotes(notesData);
+    } catch (error) {
+      console.error('Could not check message screen authentication:', error);
       setLoading(false);
     }
   };
@@ -595,11 +709,24 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     try {
       const token = await getToken();
       if (!token) return;
+      if (!(await networkStatus.start()).isOnline) {
+        const storedUser = await AsyncStorage.getItem('sessionUser') || await AsyncStorage.getItem('user');
+        if (storedUser) setCurrentUser(JSON.parse(storedUser));
+        return;
+      }
       const response = await axios.get(`${BASE_URL}/api/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (response.data.success) setCurrentUser(response.data.user);
-    } catch (e) {}
+    } catch (error) {
+      console.warn('Could not load the current message account:', error.message);
+      try {
+        const storedUser = await AsyncStorage.getItem('sessionUser') || await AsyncStorage.getItem('user');
+        if (storedUser) setCurrentUser(JSON.parse(storedUser));
+      } catch (storageError) {
+        console.warn('Could not restore the cached message account:', storageError.message);
+      }
+    }
   };
 
   useFocusEffect(
@@ -610,25 +737,15 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await refreshAll();
-    setRefreshing(false);
+    try {
+      await refreshAll();
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   const handleSearch = (text) => {
     setSearchQuery(text);
-    if (!text.trim()) {
-      setFiltered(conversations);
-      return;
-    }
-    const lower = text.toLowerCase();
-    const f = conversations.filter((conv) => {
-      return (
-        conv.otherUserName?.toLowerCase().includes(lower) ||
-        conv.postTitle?.toLowerCase().includes(lower) ||
-        conv.lastMessage?.text?.toLowerCase().includes(lower)
-      );
-    });
-    setFiltered(f);
   };
 
   // ---------- Navigate to Chat ----------
@@ -708,7 +825,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
   const renderSocialIcons = () => (
     <View style={styles.socialIconsFooter}>
       <Text style={[styles.followText, { color: theme.textSecondary }]}>{t.followUs}</Text>
-      <View style={styles.socialIconsRow}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.socialIconsRow}>
         {socialLinks.map((item, index) => (
           <TouchableOpacity
             key={index}
@@ -717,11 +834,11 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
             activeOpacity={0.7}
           >
             <View style={[styles.socialIconCircleSmall, { backgroundColor: item.color }]}>
-              <Ionicons name={item.icon} size={20} color="#fff" />
+              <ContactInfoIcon item={item} size={20} color="#fff" />
             </View>
           </TouchableOpacity>
         ))}
-      </View>
+      </ScrollView>
     </View>
   );
 
@@ -748,6 +865,10 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
     </Modal>
   );
 
+  if (loading) {
+    return <ShaakaLoadingScreen message={t.loading} backgroundColor={theme.background} textColor={theme.text} />;
+  }
+
   // ---------- Login required ----------
   if (!isLoggedIn) {
     return (
@@ -765,10 +886,6 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
         </View>
       </View>
     );
-  }
-
-  if (loading) {
-    return <ShaakaLoadingScreen message={t.loading} backgroundColor={theme.background} textColor={theme.text} />;
   }
 
   // ---------- Main render ----------
@@ -826,15 +943,25 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
 
         <FlatList
           data={filtered}
-          keyExtractor={(item) => String(item.otherUserId || item._id || Math.random())}
+          keyExtractor={(item) => `${item.postId || 'direct'}:${item.otherUserId || item._id || item.lastMessage?._id || 'conversation'}`}
           ListHeaderComponent={
             <View style={styles.updatesSectionWrapper}>
+              {fetchError ? (
+                <Text style={[styles.noUpdatesText, { color: theme.textSecondary }]}>
+                  {fetchError}
+                </Text>
+              ) : null}
               <Text style={[styles.updatesSectionTitle, { color: theme.textSecondary }]}>
                 {t.updates}
               </Text>
               <UpdatesRow updates={notes} onUpdatePress={openDetailSheet} theme={theme} />
             </View>
           }
+          ListEmptyComponent={!loading && !fetchError ? (
+            <Text style={[styles.noUpdatesText, { color: theme.textSecondary }]}>
+              {t.noConversations}
+            </Text>
+          ) : null}
           renderItem={({ item, index }) => (
             <ConversationRow
               conversation={item}
@@ -846,7 +973,7 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
                 item
               )}
               theme={theme}
-              currentUserId={currentUser?._id}
+              currentUserId={String(currentUser?._id || currentUser?.id || currentUser?.userId || '')}
               isOnline={onlineUsers[String(item.otherUserId)] || false}
               isTyping={!!typingUsers[String(item.otherUserId)]}
               t={t}
@@ -1156,9 +1283,9 @@ const styles = StyleSheet.create({
   },
   socialIconsRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
+    alignItems: 'center',
     gap: 10,
+    paddingHorizontal: 2,
   },
   socialIconSmall: {
     alignItems: 'center',

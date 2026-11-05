@@ -1,3 +1,4 @@
+import { getAuthToken } from '../utils/authStorage';
 
 // screens/ViewShopScreen.js
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
@@ -45,35 +46,43 @@ const HANDLE_HEIGHT = height * 0.05;
 const ADD_PRODUCT_SHEET_HEIGHT = height * 0.65;
 
 const getToken = async () => {
-  let token = await AsyncStorage.getItem('userToken');
-  if (!token) token = await AsyncStorage.getItem('adminToken');
+  let token = await getAuthToken('userToken');
+  if (!token) token = await getAuthToken('adminToken');
   return token;
 };
 
+const normalizeFavoriteShopId = (shop) => {
+  const id = shop && typeof shop === 'object' ? shop._id || shop.id : shop;
+  return id == null ? '' : String(id);
+};
+
 // ----- Helper: toggle favorite (shop) -----
-const toggleFavoriteShop = async (shopId) => {
+const toggleFavoriteShop = async (shopId, isFavorite) => {
   try {
     const token = await getToken();
     if (!token) throw new Error('Not authenticated');
 
-    const favShopsJson = await AsyncStorage.getItem('favoriteShops');
-    let favShops = favShopsJson ? JSON.parse(favShopsJson) : [];
-    const isCurrentlyFav = favShops.includes(shopId);
-
-    const method = isCurrentlyFav ? 'DELETE' : 'POST';
+    const normalizedShopId = normalizeFavoriteShopId(shopId);
+    if (!normalizedShopId) throw new Error('Invalid shop ID');
+    const method = isFavorite ? 'DELETE' : 'POST';
     const url = `${BASE_URL}/api/favorites/shops`;
 
     const response = await axios({
       method,
       url,
-      data: { shopId },
+      data: { shopId: normalizedShopId },
       headers: { Authorization: `Bearer ${token}` },
     });
 
     if (response.data.success) {
-      const newFavs = response.data.favoriteShops.map(s => s._id || s.id);
+      if (!Array.isArray(response.data.favoriteShops)) {
+        throw new Error('Favorite response is invalid');
+      }
+      const newFavs = response.data.favoriteShops
+        .map(normalizeFavoriteShopId)
+        .filter(Boolean);
       await AsyncStorage.setItem('favoriteShops', JSON.stringify(newFavs));
-      return !isCurrentlyFav;
+      return newFavs.includes(normalizedShopId);
     } else {
       throw new Error(response.data.message || 'Failed to toggle favorite');
     }
@@ -385,7 +394,9 @@ export default function ViewShopScreen({ route, navigation }) {
       const favShopsJson = await AsyncStorage.getItem('favoriteShops');
       if (favShopsJson) {
         const favShops = JSON.parse(favShopsJson);
-        setIsFavorite(favShops.includes(shopId));
+        setIsFavorite(
+          favShops.map(normalizeFavoriteShopId).includes(normalizeFavoriteShopId(shopId))
+        );
       } else {
         setIsFavorite(false);
       }
@@ -515,9 +526,8 @@ export default function ViewShopScreen({ route, navigation }) {
   // ---- Favorite toggle ----
   const handleFavorite = async () => {
     try {
-      const newState = await toggleFavoriteShop(shopId);
+      const newState = await toggleFavoriteShop(shopId, isFavorite);
       setIsFavorite(newState);
-      await loadFavoriteStatus();
     } catch (error) {
       showStatusModal({ title: 'Error', message: 'Could not update favorite. Please try again.', type: 'error' });
     }
@@ -1129,9 +1139,9 @@ export default function ViewShopScreen({ route, navigation }) {
                       <Ionicons name="share-social" size={22} color={theme.text} />
                       <Text style={[styles.actionBtnText, { color: theme.text }]}>Share</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity style={[styles.actionBtn, { backgroundColor: theme.border }]} onPress={handleFavorite}>
-                      <Ionicons name={isFavorite ? 'heart' : 'heart-outline'} size={22} color={isFavorite ? 'red' : theme.text} />
-                      <Text style={[styles.actionBtnText, { color: theme.text }]}>{isFavorite ? 'Saved' : 'Save'}</Text>
+                    <TouchableOpacity style={[styles.actionBtn, { backgroundColor: isFavorite ? '#d87428' : theme.border }]} onPress={handleFavorite}>
+                      <Ionicons name={isFavorite ? 'bookmark' : 'bookmark-outline'} size={22} color={isFavorite ? '#fff' : theme.text} />
+                      <Text style={[styles.actionBtnText, { color: isFavorite ? '#fff' : theme.text }]}>{isFavorite ? 'Saved' : 'Save'}</Text>
                     </TouchableOpacity>
                     {isOwner && (
                       <TouchableOpacity style={[styles.actionBtn, styles.deleteShopBtn]} onPress={handleDeleteShop}>
