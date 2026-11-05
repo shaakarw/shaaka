@@ -12,8 +12,14 @@ const {
   getUserPosts,
   getPostById,
   deletePost,
+  searchPosts,
+  getPopularSearches,
+  trackSearchEvent,
 } = require('../controllers/postController');
 
+router.get('/search', searchPosts);
+router.get('/search/popular', getPopularSearches);
+router.post('/search/analytics', trackSearchEvent);
 router.get('/', getAllPosts);
 router.post('/', auth, upload.fields([
   { name: 'images', maxCount: 10 },

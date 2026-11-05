@@ -2,18 +2,8 @@
 // Cron jobs for daily reset, auto-delete messages, and plan expiry
 
 const User = require('./models/User');
-const Message = require('./models/Message');
-const storageService = require('./services/storage/storageService');
-const { getMessageStorageKeys, deleteStorageKeys } = require('./utils/deletionCleanup');
-
-const PLAN_FEATURES = {
-  basic: { retentionDays: 7 },
-  standard: { retentionDays: 8 },
-  premium: { retentionDays: 10 },
-  enterprise: { retentionDays: 15 },
-};
-
-const FREE_RETENTION_DAYS = 4;
+const { cleanupOldMessages } = require('./utils/messageRetention');
+const { processPendingNotifications } = require('./services/pushNotificationService');
 
 /**
  * 1. Daily Reset Cron Job
@@ -41,70 +31,20 @@ const runDailyReset = async () => {
 
 /**
  * 2. Auto-Delete Cron Job
- * Deletes message images older than the user's tier retention period.
- * Since we don't store the tier on each message, we find messages
- * with imageUrl older than the maximum possible retention (15 days)
- * and check each message's sender's current tier.
+ * Deletes messages and their media after the fixed 30-day retention period.
  */
 const runAutoDelete = async () => {
   console.log('[Cron] Running auto-delete check...');
 
   try {
-    // Find the oldest possible retention across all tiers
-    const maxRetention = Math.max(
-      FREE_RETENTION_DAYS,
-      ...Object.values(PLAN_FEATURES).map(f => f.retentionDays)
-    );
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - maxRetention);
-
-    const oldMessages = await Message.find({
-      imageUrl: { $exists: true, $ne: '' },
-      createdAt: { $lt: cutoff },
-    }).populate('senderId', 'paymentHistory');
-
-    let deletedCount = 0;
-    for (const msg of oldMessages) {
-      const sender = msg.senderId;
-      if (!sender) {
-        // No sender found, delete after max retention
-        const storageKeys = getMessageStorageKeys(msg);
-        await Message.findByIdAndDelete(msg._id);
-        await deleteStorageKeys(storageKeys);
-        deletedCount++;
-        continue;
-      }
-
-      // Determine retention days for this user at the time of upload
-      // We use the message's createdAt to check which payments were active then
-      const msgDate = msg.createdAt || cutoff;
-      const activePayments = (sender.paymentHistory || []).filter(
-        p => p.status === 'success' && p.expiryDate && new Date(p.expiryDate) > msgDate
+    const result = await cleanupOldMessages();
+    if (result.totalMessagesDeleted > 0 || result.totalAssetsFailed > 0) {
+      console.log(
+        `[Cron] Expired message cleanup: ${result.totalMessagesDeleted} message(s) deleted, `
+        + `${result.totalAssetsFailed} asset deletion(s) failed`
       );
-
-      let retentionDays = FREE_RETENTION_DAYS;
-      activePayments.forEach(p => {
-        const features = PLAN_FEATURES[p.plan];
-        if (features && features.retentionDays > retentionDays) {
-          retentionDays = features.retentionDays;
-        }
-      });
-
-      const msgCutoff = new Date(msgDate);
-      msgCutoff.setDate(msgCutoff.getDate() + retentionDays);
-
-      if (new Date() > msgCutoff) {
-        const storageKeys = getMessageStorageKeys(msg);
-        await Message.findByIdAndDelete(msg._id);
-        await deleteStorageKeys(storageKeys);
-        deletedCount++;
-      }
-    }
-
-    if (deletedCount > 0) {
-      console.log(`[Cron] Deleted ${deletedCount} old message image(s)`);
     } else {
-      console.log('[Cron] No old messages to delete.');
+      console.log('[Cron] No messages expired.');
     }
   } catch (error) {
     console.error('[Cron] Auto-delete error:', error);
@@ -173,11 +113,19 @@ const initCronJobs = ({ initialDelayMs = 0 } = {}) => {
     runDailyReset();
     runAutoDelete();
     runPlanExpiry();
+    processPendingNotifications().catch(error => {
+      console.error('[Cron] Push notification queue error:', error);
+    });
 
     const HOUR_IN_MS = 60 * 60 * 1000;
     setInterval(runDailyReset, HOUR_IN_MS);
     setInterval(runAutoDelete, HOUR_IN_MS);
     setInterval(runPlanExpiry, HOUR_IN_MS);
+    setInterval(() => {
+      processPendingNotifications().catch(error => {
+        console.error('[Cron] Push notification queue error:', error);
+      });
+    }, 60 * 1000);
   };
 
   if (initialDelayMs > 0) setTimeout(startJobs, initialDelayMs);

@@ -9,7 +9,7 @@ const { normalizeRwandaPhone, isValidRwandaPhone, normalizeForAuth } = require('
 const { notifyUser } = require('../services/notificationService');
 
 const generateToken = (id, tokenVersion = 0, sessionId = '', deviceId = '') => {
-  return jwt.sign({ id, tokenVersion, sessionId, deviceId }, process.env.JWT_SECRET, { expiresIn: '30d' });
+  return jwt.sign({ id, tokenVersion, sessionId, deviceId }, process.env.JWT_SECRET);
 };
 
 // @route   POST /api/auth/register
@@ -135,6 +135,7 @@ exports.login = async (req, res) => {
         location: user.location,
         bio: user.bio,
       },
+      session: { sessionId, deviceId },
     });
 
     // notify previous session (force logout) if connected via socket
@@ -292,7 +293,7 @@ exports.resetPassword = async (req, res) => {
       user.resetPasswordToken = undefined;
       user.resetPasswordExpire = undefined;
       await user.save();
-      try { await notifyUser({ userId: user._id, type: 'PASSWORD_CHANGED', title: 'Password Changed', message: 'Your password was successfully changed.' }); } catch (notificationError) { console.error('Password notification error:', notificationError); }
+      try { await notifyUser({ userId: user._id, type: 'PASSWORD_CHANGED', title: 'Password Changed', message: 'Your password was successfully changed.', eventKey: `PASSWORD_CHANGED:${user._id}:${user.updatedAt.getTime()}` }); } catch (notificationError) { console.error('Password notification error:', notificationError); }
 
       return res.json({ success: true, message: 'Password updated' });
     }
@@ -315,7 +316,7 @@ exports.resetPassword = async (req, res) => {
       user.resetPasswordToken = undefined;
       user.resetPasswordExpire = undefined;
       await user.save();
-      try { await notifyUser({ userId: user._id, type: 'PASSWORD_CHANGED', title: 'Password Changed', message: 'Your password was successfully changed.' }); } catch (notificationError) { console.error('Password notification error:', notificationError); }
+      try { await notifyUser({ userId: user._id, type: 'PASSWORD_CHANGED', title: 'Password Changed', message: 'Your password was successfully changed.', eventKey: `PASSWORD_CHANGED:${user._id}:${user.updatedAt.getTime()}` }); } catch (notificationError) { console.error('Password notification error:', notificationError); }
 
       return res.json({ success: true, message: 'Password updated' });
     }
@@ -358,7 +359,7 @@ exports.changePassword = async (req, res) => {
     if (await bcrypt.compare(newPassword, user.password)) return res.status(400).json({ success: false, message: 'Password already used' });
     user.password = newPassword;
     await user.save();
-    try { await notifyUser({ userId: user._id, type: 'PASSWORD_CHANGED', title: 'Password Changed', message: 'Your password was successfully changed.' }); } catch (notificationError) { console.error('Password notification error:', notificationError); }
+    try { await notifyUser({ userId: user._id, type: 'PASSWORD_CHANGED', title: 'Password Changed', message: 'Your password was successfully changed.', eventKey: `PASSWORD_CHANGED:${user._id}:${user.updatedAt.getTime()}` }); } catch (notificationError) { console.error('Password notification error:', notificationError); }
     res.json({ success: true, message: 'Password updated' });
   } catch (error) {
     console.error('Change password error:', error);

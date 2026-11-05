@@ -1,68 +1,64 @@
 // middleware/auth.js
 const jwt = require('jsonwebtoken');
-const mongoose = require('mongoose');
+const User = require('../models/User');
 
-// ✅ Get the User model from Mongoose to avoid circular dependency
-const User = mongoose.model('User');
+const reject = (res, status, message, reason) =>
+  res.status(status).json({ success: false, message, reason });
 
 module.exports = async (req, res, next) => {
   const token = req.header('Authorization')?.replace('Bearer ', '');
-  if (!token) {
-    return res.status(401).json({
-      success: false,
-      message: 'No token provided',
-      reason: 'no_token',
-    });
+  if (!token) return reject(res, 401, 'No token provided', 'no_token');
+
+  let decoded;
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET, { ignoreExpiration: true });
+  } catch (error) {
+    return reject(res, 401, 'Token is malformed or has an invalid signature', 'invalid_token');
   }
 
+  const userId = decoded.id || decoded.userId || decoded._id;
+  if (!userId) return reject(res, 401, 'No user ID in token', 'no_user_id');
+
+  let user;
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    user = await User.findById(userId).select('-password');
+  } catch (error) {
+    console.error('Auth user lookup failed:', error);
+    return reject(res, 503, 'Authentication service is temporarily unavailable', 'auth_unavailable');
+  }
 
-    // Find user by ID (try common field names)
-    let userId = decoded.id || decoded.userId || decoded._id;
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        message: 'No user ID in token',
-        reason: 'no_user_id',
-      });
+  if (!user) return reject(res, 401, 'User not found', 'user_not_found');
+  if (user.blocked) {
+    return reject(res, 403, 'Your account has been blocked. Please contact support.', 'user_blocked');
+  }
+
+  const currentSessionId = user.currentSession?.sessionId;
+  const tokenSessionId = decoded.sessionId;
+  const tokenVersion = Number(decoded.tokenVersion ?? 0);
+  const currentTokenVersion = Number(user.tokenVersion ?? 0);
+  if (
+    tokenVersion !== currentTokenVersion
+    || (tokenSessionId && (!currentSessionId || tokenSessionId !== currentSessionId))
+  ) {
+    if (currentSessionId && tokenSessionId && tokenSessionId !== currentSessionId) {
+      return reject(res, 401, 'signed_in_elsewhere', 'session_invalidated');
     }
+    return reject(res, 401, 'session_ended', 'session_ended');
+  }
 
-    const user = await User.findById(userId).select('-password');
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'User not found',
-        reason: 'user_not_found',
-      });
-    }
-
-    // Blocked user check
-    if (user.blocked) {
-      return res.status(403).json({
-        success: false,
-        message: 'Your account has been blocked. Please contact support.',
-        reason: 'user_blocked',
-      });
-    }
-
-    const now = new Date();
-    const lastActiveAt = user.lastActiveAt ? new Date(user.lastActiveAt) : null;
-    const throttleWindowMs = 5 * 60 * 1000;
-    if (!lastActiveAt || (now.getTime() - lastActiveAt.getTime()) > throttleWindowMs) {
+  const now = new Date();
+  const lastActiveAt = user.lastActiveAt ? new Date(user.lastActiveAt) : null;
+  if (!lastActiveAt || (now.getTime() - lastActiveAt.getTime()) > 5 * 60 * 1000) {
+    try {
       user.lastActiveAt = now;
       await user.save();
+    } catch (error) {
+      console.error('Could not update authenticated user activity:', error);
+      return reject(res, 503, 'Authentication service is temporarily unavailable', 'auth_unavailable');
     }
-
-    // ✅ All checks passed – attach user to request
-    req.user = user;
-    next();
-  } catch (err) {
-    console.error('❌ Auth error:', err.message);
-    return res.status(401).json({
-      success: false,
-      message: 'Token is not valid (expired or malformed)',
-      reason: 'jwt_invalid',
-    });
   }
+
+  req.user = user;
+  req.authToken = decoded;
+  next();
 };

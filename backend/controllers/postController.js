@@ -1,5 +1,4 @@
 // controllers/postController.js
-const mongoose = require('mongoose');
 const Post = require('../models/Post');
 const User = require('../models/User');
 const SavedPost = require('../models/SavedPost');
@@ -9,6 +8,14 @@ const { uploadImageWithVariants } = require('../services/imageUpload');
 const { deletePostWithCleanup } = require('../utils/deletionCleanup');
 const { normalizeRwandaPhone, isValidRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
+const { getClient } = require('../config/db');
+const {
+  normalizeSearchText,
+  expandSearchTerms,
+  scoreProduct,
+  suggestCorrection,
+  getSuggestions,
+} = require('../utils/smartSearch');
 
 // ----- Import subscription helpers -----
 const {
@@ -17,10 +24,16 @@ const {
   MAX_IMAGES_PER_POST,
 } = require('../utils/subscriptionHelpers_clean');
 
-const encodePostCursor = post => Buffer.from(JSON.stringify({
-  createdAt: post.createdAt.toISOString(),
-  id: String(post._id),
-})).toString('base64url');
+const encodePostCursor = post => {
+  const createdAt = new Date(post.createdAt);
+  if (!Number.isFinite(createdAt.getTime())) {
+    throw new TypeError('Cannot encode a post cursor without a valid createdAt timestamp.');
+  }
+  return Buffer.from(JSON.stringify({
+    createdAt: createdAt.toISOString(),
+    id: String(post._id),
+  })).toString('base64url');
+};
 
 const decodePostCursor = value => {
   try {
@@ -328,6 +341,7 @@ exports.getAllPosts = async (req, res) => {
         status: { $ne: 'stopped' },
         createdAt: { $type: 'date' },
       };
+
       if (req.query.trending === 'true') filter.trending = true;
 
       if (req.query.cursor) {
@@ -337,7 +351,7 @@ exports.getAllPosts = async (req, res) => {
         }
         filter.$or = [
           { createdAt: { $lt: cursor.createdAt } },
-          { createdAt: cursor.createdAt, _id: { $lt: new mongoose.Types.ObjectId(cursor.id) } },
+          { createdAt: cursor.createdAt, _id: { $lt: cursor.id } },
         ];
       }
 
@@ -418,6 +432,194 @@ exports.getAllPosts = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+const SEARCH_MATCH_LIMIT = 250;
+const SEARCH_RECENT_LIMIT = 450;
+const SEARCH_PAGE_SIZE = 20;
+
+const searchPostSql = `
+  SELECT p.payload, u.payload AS user_payload
+  FROM posts p
+  JOIN users u ON u.id = p.user_id
+  WHERE (p.status IS NULL OR lower(p.status) != 'stopped')
+    AND COALESCE(json_extract(u.payload, '$.blocked'), 0) != 1
+    AND COALESCE(json_extract(u.payload, '$.accountDeletionStatus'), 'active') != 'deleted'
+`;
+
+const decodeSearchRows = (rows) => rows.map((row) => {
+  const post = JSON.parse(row.payload);
+  const user = JSON.parse(row.user_payload);
+  post.user = {
+    _id: user._id || user.id,
+    username: user.username || '',
+    avatar: user.avatar || '',
+    avatarVariants: user.avatarVariants || [],
+  };
+  return post;
+});
+
+const searchCandidates = async (query) => {
+  const database = getClient();
+  const compact = query.replace(/\s+/g, '');
+  const terms = expandSearchTerms(query).slice(0, 10);
+  const expressions = [
+    "lower(json_extract(p.payload, '$.productName'))",
+    "lower(json_extract(p.payload, '$.brand'))",
+    "lower(json_extract(p.payload, '$.model'))",
+    "lower(json_extract(p.payload, '$.modelName'))",
+    'lower(p.category)',
+    "lower(json_extract(p.payload, '$.subcategory'))",
+    "lower(json_extract(p.payload, '$.description'))",
+    "lower(json_extract(p.payload, '$.tags'))",
+    "lower(json_extract(p.payload, '$.searchKeywords'))",
+    "lower(json_extract(p.payload, '$.keywords'))",
+    "lower(json_extract(p.payload, '$.attributes'))",
+    "lower(json_extract(p.payload, '$.storeName'))",
+    "lower(json_extract(p.payload, '$.location'))",
+    'lower(u.username)',
+  ];
+  const conditions = [];
+  const args = [];
+  for (const term of terms) {
+    for (const expression of expressions) {
+      conditions.push(`${expression} GLOB ?`);
+      args.push(`${term}*`);
+    }
+  }
+
+  const matchingRows = conditions.length
+    ? await database.execute({
+      sql: `${searchPostSql} AND (${conditions.join(' OR ')}) ORDER BY p.created_at DESC LIMIT ?`,
+      args: [...args, SEARCH_MATCH_LIMIT],
+    })
+    : { rows: [] };
+  const typoPrefixes = [...new Set([compact.slice(0, 1), compact.slice(0, 2)])]
+    .filter((term) => term.length >= 1);
+  const typoExpressions = [
+    "lower(json_extract(p.payload, '$.productName'))",
+    "lower(json_extract(p.payload, '$.brand'))",
+    "lower(json_extract(p.payload, '$.model'))",
+    "lower(json_extract(p.payload, '$.modelName'))",
+  ];
+  const typoConditions = [];
+  const typoArgs = [];
+  for (const prefix of typoPrefixes) {
+    for (const expression of typoExpressions) {
+      typoConditions.push(`${expression} GLOB ?`);
+      typoArgs.push(`${prefix}*`);
+    }
+  }
+  const typoRows = await database.execute({
+    sql: `${searchPostSql} AND (${typoConditions.join(' OR ')}) ORDER BY p.created_at DESC LIMIT ?`,
+    args: [...typoArgs, 150],
+  });
+  const recentRows = await database.execute({
+    sql: `${searchPostSql} ORDER BY p.created_at DESC LIMIT ?`,
+    args: [SEARCH_RECENT_LIMIT],
+  });
+  const unique = new Map();
+  for (const post of [
+    ...decodeSearchRows(matchingRows.rows),
+    ...decodeSearchRows(typoRows.rows),
+    ...decodeSearchRows(recentRows.rows),
+  ]) {
+    unique.set(String(post._id || post.id), post);
+  }
+  return [...unique.values()];
+};
+
+const orderSearchResults = (query, posts) => posts
+  .map((post) => ({ post, relevance: scoreProduct(query, post) }))
+  .filter((entry) => entry.relevance > 0)
+  .sort((left, right) => (
+    right.relevance - left.relevance
+    || Number(Boolean(right.post.featured)) - Number(Boolean(left.post.featured))
+    || Number(Boolean(right.post.trending)) - Number(Boolean(left.post.trending))
+    || new Date(right.post.createdAt || 0) - new Date(left.post.createdAt || 0)
+  ));
+
+exports.searchPosts = async (req, res) => {
+  try {
+    const rawQuery = String(req.query.q || '').slice(0, 80);
+    const query = normalizeSearchText(rawQuery);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || SEARCH_PAGE_SIZE, 1), 40);
+    if (!query) {
+      return res.json({ success: true, posts: [], suggestions: [], hasMore: false, page: 1 });
+    }
+
+    const candidates = await searchCandidates(query);
+    const ranked = orderSearchResults(query, candidates);
+    const offset = (page - 1) * limit;
+    const posts = ranked.slice(offset, offset + limit).map(({ post }) => post);
+    return res.json({
+      success: true,
+      posts,
+      suggestions: getSuggestions(query, ranked.slice(0, 80).map(({ post }) => post)),
+      correctedQuery: ranked.length ? suggestCorrection(query, ranked.slice(0, 40).map(({ post }) => post)) : null,
+      hasMore: offset + posts.length < ranked.length,
+      page,
+    });
+  } catch (error) {
+    console.error('POST SEARCH ERROR:', error.code || error.message || 'Unknown error');
+    return res.status(500).json({ success: false, message: 'Search is temporarily unavailable.' });
+  }
+};
+
+exports.getPopularSearches = async (_req, res) => {
+  try {
+    const result = await getClient().execute({
+      sql: `SELECT query FROM search_analytics WHERE search_count > 0
+        ORDER BY search_count DESC, updated_at DESC LIMIT 8`,
+    });
+    return res.json({ success: true, searches: result.rows.map((row) => row.query) });
+  } catch (error) {
+    console.error('POPULAR SEARCHES ERROR:', error.code || error.message || 'Unknown error');
+    return res.status(500).json({ success: false, message: 'Popular searches are temporarily unavailable.' });
+  }
+};
+
+exports.trackSearchEvent = async (req, res) => {
+  try {
+    const query = normalizeSearchText(String(req.body.query || '').slice(0, 80));
+    const event = String(req.body.event || 'search');
+    if (!query || !['search', 'no_results', 'suggestion', 'typo', 'product_view'].includes(event)) {
+      return res.status(400).json({ success: false, message: 'A valid search query and event are required.' });
+    }
+    if (event === 'product_view') {
+      const postId = String(req.body.postId || '');
+      if (!/^[a-f\d]{24}$/i.test(postId)) {
+        return res.status(400).json({ success: false, message: 'A valid product id is required.' });
+      }
+      await getClient().execute({
+        sql: `INSERT INTO search_product_analytics (post_id, view_count)
+          VALUES (?, 1)
+          ON CONFLICT(post_id) DO UPDATE SET
+            view_count = view_count + 1,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+        args: [postId],
+      });
+      return res.json({ success: true });
+    }
+    const key = query.slice(0, 80);
+    const column = event === 'no_results' ? 'no_result_count'
+      : event === 'suggestion' ? 'suggestion_count'
+        : event === 'typo' ? 'typo_count' : 'search_count';
+    await getClient().execute({
+      sql: `INSERT INTO search_analytics (query_key, query, ${column})
+        VALUES (?, ?, 1)
+        ON CONFLICT(query_key) DO UPDATE SET
+          ${column} = ${column} + 1,
+          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+      args: [key, query],
+    });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('SEARCH ANALYTICS ERROR:', error.code || error.message || 'Unknown error');
+    return res.status(500).json({ success: false, message: 'Search analytics could not be recorded.' });
+  }
+};
+
 // ---------- GET MY POSTS (protected) ----------
 // @route   GET /api/posts/me
 exports.getMyPosts = async (req, res) => {

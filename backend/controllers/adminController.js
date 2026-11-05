@@ -5,7 +5,7 @@ const Place = require('../models/Place');
 const MallShop = require('../models/MallShop');
 const Report = require('../models/Report');
 const BusinessIdea = require('../models/BusinessIdea');
-const mongoose = require('mongoose');
+const { isValidObjectId } = require('../utils/objectId');
 const { computeAggregatedLimits, getActiveSubscriptions } = require('../utils/subscriptionHelpers_clean');
 const { deleteMallShopWithCleanup, deleteShopWithCleanup } = require('../utils/deletionCleanup');
 
@@ -416,7 +416,7 @@ exports.getManagedBusinessIdeas = async (req, res) => {
 };
 
 exports.getManagedBusinessIdea = async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.ideaId)) {
+  if (!isValidObjectId(req.params.ideaId)) {
     return res.status(400).json({ success: false, message: 'Invalid business idea ID' });
   }
   try {
@@ -453,7 +453,7 @@ exports.createManagedBusinessIdea = async (req, res) => {
 };
 
 exports.updateManagedBusinessIdea = async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.ideaId)) {
+  if (!isValidObjectId(req.params.ideaId)) {
     return res.status(400).json({ success: false, message: 'Invalid business idea ID' });
   }
   const { data, errors } = normalizeManagedIdea(req.body, req.adminUser._id);
@@ -478,7 +478,7 @@ exports.updateManagedBusinessIdea = async (req, res) => {
 };
 
 exports.updateManagedBusinessIdeaStatus = async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.ideaId)) {
+  if (!isValidObjectId(req.params.ideaId)) {
     return res.status(400).json({ success: false, message: 'Invalid business idea ID' });
   }
   if (typeof req.body?.published !== 'boolean') {
@@ -499,7 +499,7 @@ exports.updateManagedBusinessIdeaStatus = async (req, res) => {
 };
 
 exports.deleteManagedBusinessIdea = async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.ideaId)) {
+  if (!isValidObjectId(req.params.ideaId)) {
     return res.status(400).json({ success: false, message: 'Invalid business idea ID' });
   }
   try {

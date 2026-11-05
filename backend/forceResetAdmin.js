@@ -1,20 +1,19 @@
 // forceResetAdmin.js
-const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const dotenv = require('dotenv');
 dotenv.config();
+const connectDB = require('./config/db');
+const { closeDB } = connectDB;
 
 // Direct import of the User model (or you can use the connection)
 const User = require('./models/User');
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/your_database_name';
-
 const forceReset = async () => {
   try {
-    await mongoose.connect(MONGO_URI);
-    console.log('🔌 Connected to MongoDB');
+    await connectDB();
 
     const phone = process.env.ADMIN_PHONE;
+    const username = process.env.ADMIN_USERNAME || 'shaaka';
     const newPassword = process.env.ADMIN_PASSWORD;
     if (!phone || !newPassword) {
       throw new Error('ADMIN_PHONE and ADMIN_PASSWORD must be configured');
@@ -24,7 +23,7 @@ const forceReset = async () => {
     // Option 1: Use findOneAndUpdate with model (bypasses pre-save hooks if any)
     const result = await User.findOneAndUpdate(
       { phone },
-      { password: hashed, role: 'admin' },
+      { username, password: hashed, role: 'admin' },
       { new: true, runValidators: false } // skip validators to be safe
     );
 
@@ -32,7 +31,7 @@ const forceReset = async () => {
       console.log('❌ User not found – creating one...');
       const newUser = await User.create({
         phone,
-        username: 'Admin',
+        username,
         idNumber: '1234567890123456',
         password: newPassword,
         role: 'admin',
@@ -54,7 +53,7 @@ const forceReset = async () => {
     const isMatch = await bcrypt.compare(newPassword, verifyUser.password);
     console.log('🔐 Verification password match:', isMatch);
 
-    await mongoose.disconnect();
+    await closeDB();
     process.exit(0);
   } catch (err) {
     console.error('❌ Error:', err.message);

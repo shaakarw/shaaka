@@ -1,82 +1,80 @@
-// backend/utils/messageRetention.js
-// Utility to clean up old messages and Cloudinary assets based on user retention settings
-
-const mongoose = require('mongoose');
 const Message = require('../models/Message');
-const User = require('../models/User');
 const storageService = require('../services/storage/storageService');
-const { getMessageStorageKeys, deleteStorageKeys } = require('./deletionCleanup');
+const { getMessageStorageKeys } = require('./deletionCleanup');
 
-async function cleanupOldMessages(options = {}) {
-  const { batchSize = 1000, dryRun = false } = options;
-  const now = new Date();
+const MESSAGE_RETENTION_DAYS = 30;
+
+async function cleanupOldMessages({ batchSize = 1000, dryRun = false, now = new Date() } = {}) {
+  const cutoff = new Date(now);
+  cutoff.setDate(cutoff.getDate() - MESSAGE_RETENTION_DAYS);
+
   let totalMessagesDeleted = 0;
   let totalAssetsDeleted = 0;
   let totalAssetsFailed = 0;
+  let messagesChecked = 0;
+  const failedMessageIds = [];
 
-  console.log(`[Retention] Starting cleanup at ${now.toISOString()} (dryRun=${dryRun})`);
+  while (true) {
+    const filter = { createdAt: { $lt: cutoff } };
+    if (failedMessageIds.length) filter._id = { $nin: failedMessageIds };
+    const oldMessages = await Message.find(filter)
+      .sort({ createdAt: 1 })
+      .limit(batchSize)
+      .lean();
+    if (!oldMessages.length) break;
+    messagesChecked += oldMessages.length;
 
-  const users = await User.find({}, { _id: 1, imagesPerMessage: 1, imagesRetentionDays: 1, messagesRetentionDays: 1 });
-  console.log(`[Retention] Found ${users.length} users to process`);
-
-  for (const user of users) {
-    const userId = user._id;
-    const imagesRetentionDays = typeof user.imagesRetentionDays === 'number' ? user.imagesRetentionDays : 5;
-    const messagesRetentionDays = typeof user.messagesRetentionDays === 'number' ? user.messagesRetentionDays : 30;
-
-    const imageCutoff = new Date(now);
-    imageCutoff.setDate(imageCutoff.getDate() - imagesRetentionDays);
-
-    const messageCutoff = new Date(now);
-    messageCutoff.setDate(messageCutoff.getDate() - messagesRetentionDays);
-
-    const oldImageMessages = await Message.find({
-      senderId: userId,
-      imageUrl: { $exists: true, $ne: '' },
-      createdAt: { $lt: imageCutoff },
-    }).limit(batchSize).lean();
-
-    if (oldImageMessages.length > 0) {
-      const storageKeys = oldImageMessages.flatMap(getMessageStorageKeys);
-      const messageIds = oldImageMessages.map(m => m._id);
-      if (!dryRun) {
-        await Message.deleteMany({ _id: { $in: messageIds } });
-        for (const key of storageKeys) {
-          try {
-            await storageService.deleteMedia(key);
-            totalAssetsDeleted++;
-          } catch (error) {
-            totalAssetsFailed++;
-            console.error('[Retention] B2 media deletion failed:', error.code || 'B2_OPERATION_FAILED');
-          }
-        }
-      } else {
+    for (const message of oldMessages) {
+      const storageKeys = getMessageStorageKeys(message);
+      if (dryRun) {
+        totalMessagesDeleted += 1;
         totalAssetsDeleted += storageKeys.length;
+        continue;
       }
-      totalMessagesDeleted += oldImageMessages.length;
+
+      const deletionResults = await Promise.allSettled(
+        storageKeys.map(key => storageService.deleteMedia(key))
+      );
+      const failedDeletions = deletionResults.filter(result => result.status === 'rejected');
+      totalAssetsDeleted += deletionResults.length - failedDeletions.length;
+      totalAssetsFailed += failedDeletions.length;
+
+      if (failedDeletions.length) {
+        failedMessageIds.push(message._id);
+        failedDeletions.forEach(result => {
+          console.error(
+            '[Retention] Message media deletion failed:',
+            result.reason?.code || result.reason?.message || 'B2_OPERATION_FAILED'
+          );
+        });
+        continue;
+      }
+
+      try {
+        const deletedMessage = await Message.findByIdAndDelete(message._id);
+        if (deletedMessage) totalMessagesDeleted += 1;
+      } catch (error) {
+        failedMessageIds.push(message._id);
+        console.error(
+          '[Retention] Could not delete expired message record:',
+          error.code || error.message || 'DATABASE_DELETE_FAILED'
+        );
+      }
     }
 
-    const oldMessages = await Message.find({
-      senderId: userId,
-      imageUrl: { $or: [{ $exists: false }, { $eq: '' }] },
-      createdAt: { $lt: messageCutoff },
-    }).limit(batchSize).lean();
-
-    if (oldMessages.length > 0) {
-      const messageIds = oldMessages.map(m => m._id);
-      if (!dryRun) {
-        await Message.deleteMany({ _id: { $in: messageIds } });
-      }
-      totalMessagesDeleted += oldMessages.length;
-    }
+    if (dryRun || oldMessages.length < batchSize) break;
   }
 
-  console.log(`[Retention] Cleanup complete. Messages deleted: ${totalMessagesDeleted}, Assets deleted: ${totalAssetsDeleted}, Assets failed: ${totalAssetsFailed}`);
+  console.log(
+    `[Retention] Cleanup complete. Messages deleted: ${totalMessagesDeleted}, `
+    + `Assets deleted: ${totalAssetsDeleted}, Assets failed: ${totalAssetsFailed}`
+  );
   return {
     totalMessagesDeleted,
     totalAssetsDeleted,
     totalAssetsFailed,
-    usersProcessed: users.length,
+    messagesChecked,
+    retentionDays: MESSAGE_RETENTION_DAYS,
   };
 }
 
@@ -88,4 +86,5 @@ async function cleanupOrphanedMedia() {
 module.exports = {
   cleanupOldMessages,
   cleanupOrphanedMedia,
+  MESSAGE_RETENTION_DAYS,
 };

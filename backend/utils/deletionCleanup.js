@@ -1,4 +1,3 @@
-const mongoose = require('mongoose');
 const Place = require('../models/Place');
 const Post = require('../models/Post');
 const Message = require('../models/Message');
@@ -7,6 +6,7 @@ const SavedPost = require('../models/SavedPost');
 const Report = require('../models/Report');
 const MallShop = require('../models/MallShop');
 const storageService = require('../services/storage/storageService');
+const { isValidObjectId } = require('./objectId');
 
 function collectStorageKeys(urls) {
   const keys = [];
@@ -36,12 +36,14 @@ function getPostStorageKeys(post) {
 function getMessageStorageKeys(message) {
   return [
     message.imageStorageKey,
+    ...(Array.isArray(message.imageStorageKeys) ? message.imageStorageKeys : []),
     message.videoStorageKey,
     message.audioStorageKey,
     storageService.getStorageKeyFromUrl(message.imageUrl),
+    ...collectStorageKeys(Array.isArray(message.imageUrls) ? message.imageUrls : []),
     storageService.getStorageKeyFromUrl(message.videoUrl),
     storageService.getStorageKeyFromUrl(message.audioUrl),
-  ].filter(storageService.isStorageKey);
+  ].filter(storageService.isStorageKey).filter((key, index, keys) => keys.indexOf(key) === index);
 }
 
 function getPlaceStorageKeys(place) {
@@ -74,7 +76,7 @@ async function deleteStorageKeys(keys) {
 }
 
 async function deleteMessagesForPost(postId) {
-  if (!postId || !mongoose.Types.ObjectId.isValid(postId)) return;
+  if (!postId || !isValidObjectId(String(postId))) return;
   const messages = await Message.find({ postId: String(postId) }).lean();
   if (!messages.length) return;
   const keys = messages.flatMap(getMessageStorageKeys);
@@ -83,7 +85,7 @@ async function deleteMessagesForPost(postId) {
 }
 
 async function deleteMessagesReplyPost(postId) {
-  if (!postId || !mongoose.Types.ObjectId.isValid(postId)) return;
+  if (!postId || !isValidObjectId(String(postId))) return;
   await Message.updateMany(
     { 'replyPost.postId': postId },
     {
@@ -103,7 +105,7 @@ async function deleteMessagesReplyPost(postId) {
 }
 
 async function deletePostWithCleanup(postId) {
-  if (!postId || !mongoose.Types.ObjectId.isValid(postId)) throw new Error('Invalid post ID');
+  if (!postId || !isValidObjectId(String(postId))) throw new Error('Invalid post ID');
   const post = await Post.findById(postId).lean();
   if (!post) return;
   const keys = getPostStorageKeys(post);
@@ -117,7 +119,7 @@ async function deletePostWithCleanup(postId) {
 }
 
 async function deletePlaceWithCleanup(placeId) {
-  if (!placeId || !mongoose.Types.ObjectId.isValid(placeId)) throw new Error('Invalid place ID');
+  if (!placeId || !isValidObjectId(String(placeId))) throw new Error('Invalid place ID');
   const place = await Place.findById(placeId).lean();
   if (!place) return;
 
@@ -140,7 +142,7 @@ async function deletePlaceWithCleanup(placeId) {
 }
 
 async function deleteMallShopWithCleanup(shopId) {
-  if (!shopId || !mongoose.Types.ObjectId.isValid(shopId)) throw new Error('Invalid mall shop ID');
+  if (!shopId || !isValidObjectId(String(shopId))) throw new Error('Invalid mall shop ID');
   const shop = await MallShop.findById(shopId).lean();
   if (!shop) return;
 
@@ -167,7 +169,7 @@ async function deleteMallShopWithCleanup(shopId) {
   const relatedPostIds = [...new Set(shopMessages.flatMap(message => [
     message.postId,
     message.replyPost?.postId ? String(message.replyPost.postId) : '',
-  ]).filter(id => id && mongoose.Types.ObjectId.isValid(id)))];
+  ]).filter(id => id && isValidObjectId(String(id))))];
   const relatedPosts = await Post.find({ _id: { $in: relatedPostIds } })
     .select('_id houseImages houseImageStorageKeys houseImageVariants videoUrl videoStorageKey videoThumbnail videoThumbnailStorageKey').lean();
   for (const post of relatedPosts) keys.push(...getPostStorageKeys(post));
@@ -181,7 +183,7 @@ async function deleteMallShopWithCleanup(shopId) {
 }
 
 async function deleteShopWithCleanup(shopId) {
-  if (!shopId || !mongoose.Types.ObjectId.isValid(shopId)) throw new Error('Invalid shop ID');
+  if (!shopId || !isValidObjectId(String(shopId))) throw new Error('Invalid shop ID');
   const shop = await Place.findById(shopId).lean();
   if (!shop) return;
 

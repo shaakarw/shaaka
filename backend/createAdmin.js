@@ -1,22 +1,20 @@
 // createAdmin.js
-const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const dotenv = require('dotenv');
 
 dotenv.config();
+const connectDB = require('./config/db');
+const { closeDB } = connectDB;
 
 // Adjust path to your User model if needed
 const User = require('./models/User');
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/your_database_name';
-
 const createAdmin = async () => {
   try {
-    console.log('🔌 Connecting to MongoDB...');
-    await mongoose.connect(MONGO_URI);
-    console.log('✅ Connected to MongoDB');
+    await connectDB();
 
     const phone = process.env.ADMIN_PHONE;
+    const username = process.env.ADMIN_USERNAME || 'shaaka';
     const password = process.env.ADMIN_PASSWORD;
     if (!phone || !password) {
       throw new Error('ADMIN_PHONE and ADMIN_PASSWORD must be configured');
@@ -36,6 +34,11 @@ const createAdmin = async () => {
         console.log('✅ User promoted to admin');
       }
 
+      if (existing.username !== username) {
+        existing.username = username;
+        await existing.save();
+      }
+
       const isMatch = await bcrypt.compare(password, existing.password);
       if (!isMatch) {
         existing.password = password;
@@ -52,7 +55,7 @@ const createAdmin = async () => {
 
       const admin = await User.create({
         phone,
-        username: 'Admin',
+        username,
         idNumber: idNumber,          // Now 16 digits
         password,
         role: 'admin',
@@ -66,7 +69,7 @@ const createAdmin = async () => {
       console.log(`   Phone: ${phone}`);
     }
 
-    await mongoose.disconnect();
+    await closeDB();
     console.log('👋 Done.');
     process.exit(0);
   } catch (err) {

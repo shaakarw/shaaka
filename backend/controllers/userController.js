@@ -381,7 +381,7 @@ exports.updateProfile = async (req, res) => {
     ).select('-password');
 
     if (username && existingUser && existingUser.username !== updateData.username) {
-      try { await notifyUser({ userId: user._id, type: 'NAME_CHANGED', title: 'Name Changed', message: 'Your account name was successfully changed.' }); } catch (notificationError) { console.error('Name notification error:', notificationError); }
+      try { await notifyUser({ userId: user._id, type: 'NAME_CHANGED', title: 'Name Changed', message: 'Your account name was successfully changed.', eventKey: `NAME_CHANGED:${user._id}:${user.updatedAt.getTime()}` }); } catch (notificationError) { console.error('Name notification error:', notificationError); }
     }
 
     res.json({ success: true, user });

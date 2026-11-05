@@ -17,11 +17,17 @@ router.post('/logout', auth, async (req, res) => {
 		const io = socketHelper.getIO();
 		const user = await User.findById(req.user.id);
 		if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+		const previousSocketId = user.currentSession?.socketId;
 		user.currentSession = {};
 		user.tokenVersion = (user.tokenVersion || 0) + 1; // revoke tokens
 		user.isOnline = false;
 		user.lastSeen = new Date();
 		await user.save();
+		try {
+			if (io && previousSocketId) io.to(previousSocketId).emit('force-logout', { message: 'You have logged out of this account.' });
+		} catch (error) {
+			console.error('Could not disconnect the logged-out session:', error);
+		}
 		// update in-memory and broadcast
 		onlineStore.setOnline(user._id, false);
 		if (io) io.emit('user-offline', { userId: String(user._id), lastSeen: user.lastSeen });

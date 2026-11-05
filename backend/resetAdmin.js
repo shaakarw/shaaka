@@ -1,19 +1,18 @@
 // resetAdmin.js
-const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const dotenv = require('dotenv');
 dotenv.config();
+const connectDB = require('./config/db');
+const { closeDB } = connectDB;
 
 const User = require('./models/User');
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/your_database_name';
-
 const resetAdmin = async () => {
   try {
-    await mongoose.connect(MONGO_URI);
-    console.log('🔌 Connected to MongoDB');
+    await connectDB();
 
     const phone = process.env.ADMIN_PHONE;
+    const username = process.env.ADMIN_USERNAME || 'shaaka';
     const password = process.env.ADMIN_PASSWORD;
     if (!phone || !password) {
       throw new Error('ADMIN_PHONE and ADMIN_PASSWORD must be configured');
@@ -21,7 +20,7 @@ const resetAdmin = async () => {
 
     const user = await User.findOneAndUpdate(
       { phone },
-      { password: await bcrypt.hash(password, 10), role: 'admin' },
+      { username, password: await bcrypt.hash(password, 10), role: 'admin' },
       { new: true, runValidators: false }
     );
     if (!user) {
@@ -32,7 +31,7 @@ const resetAdmin = async () => {
     console.log('✅ Admin password reset and role set to admin');
     console.log('   Phone:', user.phone);
 
-    await mongoose.disconnect();
+    await closeDB();
     process.exit(0);
   } catch (err) {
     console.error('❌ Error:', err.message);

@@ -5,19 +5,25 @@ const path = require('path');
 const AppSetting = require('../models/AppSetting');
 const { adminAuth } = require('../middleware/adminAuth');
 const storageService = require('../services/storage/storageService');
+const {
+  getTutorialStorageKeys,
+  parseTutorialSections,
+  serializeTutorialSections,
+} = require('../utils/tutorialSettings');
 
 const DEFAULT_CONTACT_INFO = {
   instagram: 'https://www.instagram.com/shaaka_rw/',
   youtube: 'https://www.youtube.com/@shaaka-rw',
   twitter: 'https://x.com/shaaka_rw',
   facebook: 'https://www.facebook.com/profile.php?id=61592686307072',
-  tiktok: '',
   email: 'shaakarw@gmail.com',
   whatsapp: '+250799882580',
-  phone: '+250796640462',
-  alternatePhone: '+250799882580',
   website: '',
   other: '',
+  other2: '',
+  other3: '',
+  other4: '',
+  other5: '',
 };
 const CONTACT_INFO_KEYS = Object.keys(DEFAULT_CONTACT_INFO);
 
@@ -37,7 +43,7 @@ const uploadTutorialImage = multer({
     if (tutorialImageTypes[mimeType]?.includes(extension)) return callback(null, true);
     return callback(new Error('Only JPEG, PNG, WEBP, or GIF tutorial images are allowed.'));
   },
-}).single('image');
+}).array('images', 30);
 
 const handleTutorialImageUpload = (req, res, next) => {
   uploadTutorialImage(req, res, (error) => {
@@ -153,10 +159,19 @@ router.put('/share-link', adminAuth, async (req, res) => {
 router.get('/tutorial-image', async (req, res) => {
   try {
     const setting = await AppSetting.findOne({ key: 'tutorialimage' }).lean();
-    const url = setting?.value ? storageService.getPublicMediaUrl(setting.value) : null;
+    const sections = parseTutorialSections(setting?.value).map(section => ({
+      id: section.id,
+      title: section.title,
+      images: section.images.map(image => ({
+        url: storageService.getPublicMediaUrl(image.storageKey),
+      })),
+    }));
     return res.json({
       success: true,
-      tutorialImage: url ? { url, updatedAt: setting.updatedAt } : null,
+      sections,
+      tutorialImage: sections[0]?.images[0]
+        ? { ...sections[0].images[0], updatedAt: setting.updatedAt }
+        : null,
     });
   } catch (error) {
     console.error('Could not load tutorial image:', error);
@@ -165,55 +180,128 @@ router.get('/tutorial-image', async (req, res) => {
 });
 
 router.post('/tutorial-image', adminAuth, handleTutorialImageUpload, async (req, res) => {
-  let uploadedStorageKey = null;
+  const uploadedStorageKeys = [];
   try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: 'Choose an image to upload.' });
+    let submittedSections;
+    try {
+      submittedSections = JSON.parse(req.body?.sections || '');
+    } catch {
+      return res.status(400).json({ success: false, message: 'Tutorial sections must be valid JSON.' });
+    }
+    if (!Array.isArray(submittedSections) || submittedSections.length > 30) {
+      return res.status(400).json({ success: false, message: 'Tutorial sections must be a list of up to 30 sections.' });
     }
 
-    const uploadResult = await storageService.uploadMedia({
-      buffer: req.file.buffer,
-      mimeType: req.file.mimetype,
-      folder: 'tutorial',
-      maxBytes: TUTORIAL_IMAGE_MAX_BYTES,
-    });
-    uploadedStorageKey = uploadResult.storageKey;
-    const url = storageService.getPublicMediaUrl(uploadedStorageKey);
     const previousSetting = await AppSetting.findOne({ key: 'tutorialimage' }).lean();
+    const previousSections = parseTutorialSections(previousSetting?.value);
+    const existingKeys = new Set(getTutorialStorageKeys(previousSections));
+    const usedStorageKeys = new Set();
+    const usedUploadIndexes = new Set();
+    const sectionIds = new Set();
+    const normalizedSections = [];
+    let imageCount = 0;
+
+    for (const section of submittedSections) {
+      if (!section || typeof section.id !== 'string' || !section.id.trim()
+        || typeof section.title !== 'string' || !section.title.trim() || section.title.trim().length > 100
+        || !Array.isArray(section.images) || sectionIds.has(section.id.trim())) {
+        return res.status(400).json({ success: false, message: 'Each tutorial section needs an ID, a title, and an image list.' });
+      }
+      sectionIds.add(section.id.trim());
+
+      const images = [];
+      for (const image of section.images) {
+        imageCount += 1;
+        if (imageCount > 30 || !image || typeof image !== 'object') {
+          return res.status(400).json({ success: false, message: 'A tutorial can contain up to 30 images.' });
+        }
+
+        if (Number.isInteger(image.uploadIndex)
+          && image.uploadIndex >= 0
+          && image.uploadIndex < (req.files || []).length
+          && !usedUploadIndexes.has(image.uploadIndex)) {
+          usedUploadIndexes.add(image.uploadIndex);
+          images.push({ uploadIndex: image.uploadIndex });
+        } else if (typeof image.storageKey === 'string'
+          && existingKeys.has(image.storageKey)
+          && !usedStorageKeys.has(image.storageKey)) {
+          usedStorageKeys.add(image.storageKey);
+          images.push({ storageKey: image.storageKey });
+        } else {
+          return res.status(400).json({ success: false, message: 'A tutorial image is invalid or no longer available.' });
+        }
+      }
+
+      normalizedSections.push({
+        id: section.id.trim(),
+        title: section.title.trim(),
+        images,
+      });
+    }
+
+    if (usedUploadIndexes.size !== (req.files || []).length) {
+      return res.status(400).json({ success: false, message: 'One or more uploaded images are not assigned to a section.' });
+    }
+
+    for (const section of normalizedSections) {
+      for (const image of section.images) {
+        if (image.uploadIndex === undefined) continue;
+        const file = req.files[image.uploadIndex];
+        const uploadResult = await storageService.uploadMedia({
+          buffer: file.buffer,
+          mimeType: file.mimetype,
+          folder: 'tutorial',
+          maxBytes: TUTORIAL_IMAGE_MAX_BYTES,
+        });
+        uploadedStorageKeys.push(uploadResult.storageKey);
+        image.storageKey = uploadResult.storageKey;
+        delete image.uploadIndex;
+      }
+    }
+
+    const sections = normalizedSections.map(section => ({
+      id: section.id,
+      title: section.title,
+      images: section.images.map(image => ({
+        url: storageService.getPublicMediaUrl(image.storageKey),
+        storageKey: image.storageKey,
+      })),
+    }));
 
     await AppSetting.findOneAndUpdate(
       { key: 'tutorialimage' },
       {
         key: 'tutorialimage',
-        value: uploadedStorageKey,
-        description: 'Public tutorial image storage key',
+        value: serializeTutorialSections(normalizedSections),
+        description: 'Public tutorial sections and image storage keys',
         updatedBy: req.user?._id || null,
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
-    uploadedStorageKey = null;
 
-    if (previousSetting?.value && previousSetting.value !== uploadResult.storageKey) {
+    const retainedKeys = new Set(getTutorialStorageKeys(normalizedSections));
+    for (const previousKey of getTutorialStorageKeys(previousSections)) {
+      if (retainedKeys.has(previousKey)) continue;
       try {
-        await storageService.deleteMedia(previousSetting.value);
+        await storageService.deleteMedia(previousKey);
       } catch (cleanupError) {
-        console.error('Could not delete the replaced tutorial image:', cleanupError);
+        console.error('Could not delete a removed tutorial image:', cleanupError);
       }
     }
 
-    return res.json({ success: true, tutorialImage: { url } });
+    return res.json({ success: true, sections });
   } catch (error) {
-    if (uploadedStorageKey) {
+    for (const storageKey of uploadedStorageKeys) {
       try {
-        await storageService.deleteMedia(uploadedStorageKey);
+        await storageService.deleteMedia(storageKey);
       } catch (cleanupError) {
         console.error('Could not clean up an unsaved tutorial image:', cleanupError);
       }
     }
-    console.error('Could not save tutorial image:', error);
+    console.error('Could not save tutorial sections:', error);
     return res.status(error.statusCode || 500).json({
       success: false,
-      message: error.statusCode ? error.message : 'Could not save tutorial image.',
+      message: error.statusCode ? error.message : 'Could not save tutorial sections.',
     });
   }
 });
@@ -222,7 +310,9 @@ router.delete('/tutorial-image', adminAuth, async (req, res) => {
   try {
     const setting = await AppSetting.findOneAndDelete({ key: 'tutorialimage' });
     if (setting?.value) {
-      await storageService.deleteMedia(setting.value);
+      for (const storageKey of getTutorialStorageKeys(parseTutorialSections(setting.value))) {
+        await storageService.deleteMedia(storageKey);
+      }
     }
     return res.json({ success: true, tutorialImage: null });
   } catch (error) {

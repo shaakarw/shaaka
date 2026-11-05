@@ -1,11 +1,13 @@
 // controllers/messageController.js
-const mongoose = require('mongoose');
 const Message = require('../models/Message');
 const User = require('../models/User');
 const Post = require('../models/Post');
 const storageService = require('../services/storage/storageService');
 const { computeAggregatedLimits } = require('../utils/subscriptionHelpers_clean');
 const socketHelper = require('../socket');
+const { notifyUser } = require('../services/notificationService');
+const { isValidObjectId } = require('../utils/objectId');
+const { getMessageStorageKeys } = require('../utils/deletionCleanup');
 
 const privateMediaUrl = (key, req) => key
   ? storageService.getMediaUrl(key, { origin: storageService.getRequestOrigin(req), isPrivate: true })
@@ -57,13 +59,26 @@ const getTodayRange = () => {
 exports.sendMessage = async (req, res) => {
   const uploadedStorageKeys = [];
   try {
+    const senderId = String(req.user?._id || req.user?.id || '');
+    if (!senderId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+    const receiverId = String(req.body.receiverId || '').trim();
+    if (!receiverId) return res.status(400).json({ success: false, message: 'Receiver is required' });
+    if (receiverId === senderId) return res.status(400).json({ success: false, message: 'You cannot message yourself' });
+
     const clientMessageId = String(req.body.clientMessageId || '').trim();
     if (clientMessageId) {
       const existingMessage = await Message.findOne({ clientMessageId });
-      if (existingMessage) return res.status(200).json({ success: true, message: refreshMessageMediaUrls(existingMessage, req), idempotent: true });
+      if (existingMessage) {
+        if (
+          String(existingMessage.senderId) !== senderId
+          || String(existingMessage.receiverId || '') !== receiverId
+        ) {
+          return res.status(409).json({ success: false, message: 'Message ID is already in use' });
+        }
+        return res.status(200).json({ success: true, message: refreshMessageMediaUrls(existingMessage, req), idempotent: true });
+      }
     }
-    const senderId = req.user?.id || req.body.senderId;
-    if (!senderId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
     let audioUrl = null, audioStorageKey = '', videoUrlFromFile = null, videoStorageKey = '', audioDuration = null;
     const audioFile = req.files?.audio?.[0];
@@ -110,7 +125,7 @@ exports.sendMessage = async (req, res) => {
     let replyPostData = null;
     if (replyPost && replyPost.postId) {
       const contextType = replyPost.contextType || 'post';
-      const postExists = contextType === 'post' && mongoose.Types.ObjectId.isValid(replyPost.postId)
+      const postExists = contextType === 'post' && isValidObjectId(String(replyPost.postId))
         ? await Post.findById(replyPost.postId)
         : null;
       replyPostData = {
@@ -146,7 +161,6 @@ exports.sendMessage = async (req, res) => {
 
     // ---- Enforce image active limit for messages with imageUrl (user-specific limit and retention) ----
     if (submittedImageUrls.length) {
-      const senderId = req.body.senderId || req.user.id;
       const senderUser = await User.findById(senderId);
       if (!senderUser) return res.status(404).json({ success: false, message: 'Sender user not found' });
 
@@ -214,24 +228,51 @@ exports.sendMessage = async (req, res) => {
     await message.save();
     uploadedStorageKeys.length = 0;
 
-    const receiverId = String(message.receiverId || '');
-    const room = receiverId
-      ? `chat_${[String(message.senderId), receiverId].sort().join('_')}`
+    const messageReceiverId = String(message.receiverId || '');
+    const room = messageReceiverId
+      ? `chat_${[String(message.senderId), messageReceiverId].sort().join('_')}`
       : null;
     const io = socketHelper.getIO();
     if (io && room) {
-      const chatId = message.postId || `direct_${[String(message.senderId), receiverId].sort().join('_')}`;
+      const chatId = message.postId || `direct_${[String(message.senderId), messageReceiverId].sort().join('_')}`;
       io.to(room).emit('new-message', {
         chatId: String(chatId),
         senderId: String(message.senderId),
-        receiverId,
+        receiverId: messageReceiverId,
         message,
       });
     }
 
+    try {
+      await notifyUser({
+        userId: message.receiverId,
+        actorId: message.senderId,
+        type: 'NEW_MESSAGE',
+        title: req.user?.name || req.user?.username || 'New message',
+        message: message.imageUrl || message.videoUrl || message.audioUrl
+          ? 'You received a new message'
+          : 'You have a new message',
+        image: req.user?.avatar || '',
+        eventKey: `message:${message._id}`,
+        messageId: message._id,
+        conversationId: room || '',
+        destination: 'Chat',
+        destinationParams: {
+          sellerId: String(message.senderId),
+          sellerName: req.user?.name || req.user?.username || '',
+          sellerPhone: req.user?.phone || '',
+          sellerAvatar: req.user?.avatar || '',
+          postId: message.postId || '',
+          postTitle: message.postTitle || '',
+        },
+      });
+    } catch (notificationError) {
+      console.error('[Notifications] Could not queue incoming message notification:', notificationError?.message || notificationError);
+    }
+
     // Increment dailyMessagesUsed if this message has an image
     if (imageUrl) {
-      await User.findByIdAndUpdate(req.body.senderId, { $inc: { dailyMessagesUsed: 1 } });
+      await User.findByIdAndUpdate(senderId, { $inc: { dailyMessagesUsed: 1 } });
     }
 
     res.status(201).json({ success: true, message });
@@ -250,29 +291,29 @@ exports.getMessages = async (req, res) => {
     const { userId1, userId2 } = req.params;
     const firstUser = String(userId1 || '').trim();
     const secondUser = String(userId2 || '').trim();
+    const postId = String(req.query.postId || req.params.postId || '').trim();
 
-    const authenticatedUserId = String(req.user?.id || '').trim();
-    if (authenticatedUserId !== firstUser && authenticatedUserId !== secondUser) {
+    const authenticatedUserIds = [req.user?._id, req.user?.id, req.user?.phone]
+      .filter(Boolean)
+      .map(value => String(value).trim());
+    if (!authenticatedUserIds.includes(firstUser) && !authenticatedUserIds.includes(secondUser)) {
       return res.status(403).json({ success: false, message: 'You are not a participant in this conversation' });
     }
 
-    const mongoose = require('mongoose');
-    const isId1 = mongoose.Types.ObjectId.isValid(firstUser);
-    const isId2 = mongoose.Types.ObjectId.isValid(secondUser);
-
-    const conditions = [];
-    if (isId1 && isId2) {
-      conditions.push(
-        { senderId: firstUser, receiverId: secondUser },
-        { senderId: secondUser, receiverId: firstUser }
-      );
-    }
-    conditions.push(
+    const conditions = [
+      { senderId: firstUser, receiverId: secondUser },
+      { senderId: secondUser, receiverId: firstUser },
       { senderPhone: firstUser, receiverPhone: secondUser },
-      { senderPhone: secondUser, receiverPhone: firstUser }
-    );
+      { senderPhone: secondUser, receiverPhone: firstUser },
+      { senderId: firstUser, receiverPhone: secondUser },
+      { senderPhone: firstUser, receiverId: secondUser },
+      { senderId: secondUser, receiverPhone: firstUser },
+      { senderPhone: secondUser, receiverId: firstUser },
+    ];
 
-    const messages = await Message.find({ $or: conditions }).sort({ createdAt: 1 });
+    const messageFilter = { $or: conditions };
+    if (postId) messageFilter.postId = postId;
+    const messages = await Message.find(messageFilter).sort({ createdAt: 1 });
 
     const updatedMessages = await Promise.all(messages.map(async (msg) => {
       const msgObj = refreshMessageMediaUrls(msg, req);
@@ -319,15 +360,14 @@ exports.getMessages = async (req, res) => {
 // GET /conversations
 exports.getConversations = async (req, res) => {
   try {
-    const mongoose = require('mongoose');
     const userId = req.user.id;
-    const isUserObjectId = mongoose.Types.ObjectId.isValid(userId);
-
-    const orClauses = [];
-    if (isUserObjectId) {
-      orClauses.push({ senderId: userId }, { receiverId: userId });
-    }
-    orClauses.push({ senderPhone: userId }, { receiverPhone: userId });
+    const userIdentifiers = [userId, req.user.phone].filter(Boolean).map(String);
+    const orClauses = userIdentifiers.flatMap(identifier => [
+      { senderId: identifier },
+      { receiverId: identifier },
+      { senderPhone: identifier },
+      { receiverPhone: identifier },
+    ]);
 
     const messages = await Message.find({ $or: orClauses }).sort({ createdAt: -1 });
 
@@ -335,7 +375,9 @@ exports.getConversations = async (req, res) => {
     messages.forEach(msg => {
       const senderKey = String(msg.senderId || msg.senderPhone || '');
       const receiverKey = String(msg.receiverId || msg.receiverPhone || '');
-      const otherId = senderKey === String(userId) ? receiverKey : senderKey;
+      const isCurrentUserSender = userIdentifiers.includes(String(msg.senderId || ''))
+        || userIdentifiers.includes(String(msg.senderPhone || ''));
+      const otherId = isCurrentUserSender ? receiverKey : senderKey;
       const key = `${msg.postId}_${otherId}`;
       if (!conversationsMap.has(key)) {
         conversationsMap.set(key, {
@@ -343,9 +385,9 @@ exports.getConversations = async (req, res) => {
           postTitle: msg.postTitle,
           replyPost: msg.replyPost || null,
           otherUserId: otherId,
-          otherUserName: senderKey === String(userId) ? msg.receiverName : msg.senderName,
-          otherUserAvatar: senderKey === String(userId) ? msg.receiverAvatar : msg.senderAvatar,
-          otherUserPhone: senderKey === String(userId) ? msg.receiverPhone : msg.senderPhone,
+          otherUserName: isCurrentUserSender ? msg.receiverName : msg.senderName,
+          otherUserAvatar: isCurrentUserSender ? msg.receiverAvatar : msg.senderAvatar,
+          otherUserPhone: isCurrentUserSender ? msg.receiverPhone : msg.senderPhone,
           lastMessage: msg,
           unreadCount: 0,
         });
@@ -357,8 +399,9 @@ exports.getConversations = async (req, res) => {
       if (!conv.lastMessage || new Date(msg.createdAt) > new Date(conv.lastMessage.createdAt)) {
         conv.lastMessage = msg;
       }
-      const msgReceiverKey = String(msg.receiverId || msg.receiverPhone || '');
-      if (msgReceiverKey === String(userId) && !msg.read) {
+      const receiverMatchesCurrentUser = userIdentifiers.includes(String(msg.receiverId || ''))
+        || userIdentifiers.includes(String(msg.receiverPhone || ''));
+      if (receiverMatchesCurrentUser && !msg.read) {
         conv.unreadCount++;
       }
     });
@@ -392,12 +435,32 @@ exports.getConversations = async (req, res) => {
 // Mark as read
 exports.markAsRead = async (req, res) => {
   try {
-    const message = await Message.findByIdAndUpdate(
-      req.params.messageId,
-      { read: true },
-      { new: true }
-    );
+    const userId = String(req.user?._id || req.user?.id || '');
+    if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+    const message = await Message.findById(req.params.messageId);
     if (!message) return res.status(404).json({ success: false, message: 'Message not found' });
+    const userIdentifiers = [userId, req.user?.phone].filter(Boolean).map(String);
+    if (
+      !userIdentifiers.includes(String(message.receiverId || ''))
+      && !userIdentifiers.includes(String(message.receiverPhone || ''))
+    ) {
+      return res.status(403).json({ success: false, message: 'You can only mark messages sent to you as read' });
+    }
+    if (!message.read) {
+      message.read = true;
+      await message.save();
+      const senderId = String(message.senderId || message.senderPhone || '');
+      const receiverId = String(message.receiverId || message.receiverPhone || '');
+      const room = `chat_${[senderId, receiverId].sort().join('_')}`;
+      const io = socketHelper.getIO();
+      if (io && senderId && receiverId) {
+        io.to(room).emit('message-read', {
+          messageId: String(message._id),
+          senderId,
+          receiverId,
+        });
+      }
+    }
     res.json({ success: true, message });
   } catch (error) {
     console.error('Mark as read error:', error);
@@ -437,7 +500,7 @@ exports.editMessage = async (req, res) => {
 exports.deleteMessage = async (req, res) => {
   try {
     const messageId = req.params.messageId;
-    if (!messageId || !mongoose.Types.ObjectId.isValid(messageId)) {
+    if (!messageId || !isValidObjectId(messageId)) {
       return res.status(400).json({ success: false, message: 'Invalid message ID' });
     }
 
@@ -455,17 +518,9 @@ exports.deleteMessage = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You can only delete messages that you sent' });
     }
 
-    const mediaKeys = [...new Set([
-      message.imageStorageKey || storageService.getStorageKeyFromUrl(message.imageUrl),
-      ...(message.imageStorageKeys || []),
-      ...storageService.collectStorageKeys(message.imageUrls || []),
-      message.videoStorageKey || storageService.getStorageKeyFromUrl(message.videoUrl),
-      message.audioStorageKey || storageService.getStorageKeyFromUrl(message.audioUrl),
-    ].filter(storageService.isStorageKey))];
+    const mediaKeys = getMessageStorageKeys(message);
+    await Promise.all(mediaKeys.map(key => storageService.deleteMedia(key)));
     await Message.findByIdAndDelete(messageId);
-    await Promise.all(mediaKeys.map(key => storageService.deleteMedia(key).catch(error => {
-      console.error('[Storage] Message media deletion failed:', error.code || 'B2_OPERATION_FAILED');
-    })));
 
     const io = socketHelper.getIO();
     if (io) {

@@ -27,6 +27,7 @@ const shouldLogPerformance = () => (
 const seedAdmin = async () => {
   try {
     const phone = process.env.ADMIN_PHONE;
+    const username = process.env.ADMIN_USERNAME || 'shaaka';
     const password = process.env.ADMIN_PASSWORD;
     if (!phone || !password) {
       throw new Error('ADMIN_PHONE and ADMIN_PASSWORD must be configured');
@@ -37,7 +38,7 @@ const seedAdmin = async () => {
     if (!existing) {
       const admin = await User.create({
         phone,
-        username: 'Admin',
+        username,
         idNumber: '1234567890123456',
         password,
         role: 'admin',
@@ -55,6 +56,11 @@ const seedAdmin = async () => {
       existing.role = 'admin';
       await existing.save();
       console.log('✅ Existing user promoted to admin');
+    }
+
+    if (existing.username !== username) {
+      existing.username = username;
+      await existing.save();
     }
 
     const isMatch = await bcrypt.compare(password, existing.password);
@@ -93,7 +99,7 @@ const startServer = async () => {
       initCronJobs({ initialDelayMs: 30000 });
     });
   } catch (error) {
-    console.error('Failed to start server:', error.message);
+    console.error('Failed to start server:', error.code || 'STARTUP_FAILED');
     process.exit(1);
   }
 };
@@ -122,7 +128,6 @@ app.use('/api/sync', require('./routes/sync'));
 app.use('/api/user', require('./routes/user'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/business-ideas', require('./routes/businessIdeas'));
-app.use('/api/messages', require('./routes/messages'));
 app.use('/api/posts', require('./routes/posts'));
 app.use('/api/places', placeRoutes);
 app.use('/api/reports', require('./routes/reportRoutes'));
@@ -173,6 +178,7 @@ app.get('/api/admin/debug', async (req, res) => {
 app.post('/api/admin/setup', async (req, res) => {
   try {
     const phone = process.env.ADMIN_PHONE;
+    const username = process.env.ADMIN_USERNAME || 'shaaka';
     const password = process.env.ADMIN_PASSWORD;
     if (!phone || !password) {
       return res.status(500).json({ success: false, message: 'Admin credentials are not configured' });
@@ -181,7 +187,7 @@ app.post('/api/admin/setup', async (req, res) => {
     if (!user) {
       user = await User.create({
         phone,
-        username: 'Admin',
+        username,
         idNumber: '1234567890123456',
         password,
         role: 'admin',
@@ -194,6 +200,7 @@ app.post('/api/admin/setup', async (req, res) => {
       return res.json({ success: true, message: 'Admin created', user: { id: user._id, phone: user.phone, role: user.role } });
     }
     user.role = 'admin';
+    user.username = username;
     user.password = password;
     await user.save();
     res.json({ success: true, message: 'Admin updated (password reset, role set)', user: { id: user._id, phone: user.phone, role: user.role } });
@@ -210,13 +217,26 @@ const onlineStore = require('./utils/onlineStore');
 io.on('connection', (socket) => {
   const token = socket.handshake.auth?.token;
   let currentUserId = null;
+  const pendingChatUsers = new Set();
 
   if (token) {
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      currentUserId = decoded.id;
-      User.findById(decoded.id).then((user) => {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET, { ignoreExpiration: true });
+      const decodedUserId = decoded.id || decoded.userId || decoded._id;
+      if (!decodedUserId) {
+        socket.disconnect(true);
+        return;
+      }
+      User.findById(decodedUserId).then((user) => {
         if (!user) return;
+        if (
+          (decoded.sessionId && decoded.sessionId !== user.currentSession?.sessionId)
+          || Number(decoded.tokenVersion ?? 0) !== Number(user.tokenVersion ?? 0)
+        ) {
+          socket.disconnect(true);
+          return;
+        }
+        currentUserId = String(user._id);
         user.currentSession = user.currentSession || {};
         user.currentSession.socketId = socket.id;
         user.currentSession.lastSeen = new Date();
@@ -226,6 +246,10 @@ io.on('connection', (socket) => {
 
         onlineStore.setOnline(user._id, true);
         io.emit('user-online', { userId: String(user._id), lastSeen: null });
+        for (const sellerId of pendingChatUsers) {
+          socket.join(`chat_${[currentUserId, sellerId].sort().join('_')}`);
+        }
+        pendingChatUsers.clear();
 
         if (shouldLogDebug()) {
           console.log(`✅ User ${user.username || user._id} connected (socket ${socket.id})`);
@@ -237,13 +261,21 @@ io.on('connection', (socket) => {
   }
 
   // ---------- Chat events ----------
-  socket.on('join-chat', ({ sellerId }) => {
-    if (!currentUserId) return;
+  socket.on('join-chat', (payload = {}) => {
+    const sellerId = String(payload.sellerId || '').trim();
+    if (!sellerId) return;
+    if (!currentUserId) {
+      pendingChatUsers.add(sellerId);
+      return;
+    }
     const room = `chat_${[currentUserId, sellerId].sort().join('_')}`;
     socket.join(room);
   });
 
-  socket.on('leave-chat', ({ sellerId }) => {
+  socket.on('leave-chat', (payload = {}) => {
+    const sellerId = String(payload.sellerId || '').trim();
+    if (!sellerId) return;
+    pendingChatUsers.delete(sellerId);
     if (!currentUserId) return;
     const room = `chat_${[currentUserId, sellerId].sort().join('_')}`;
     socket.leave(room);
