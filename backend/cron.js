@@ -5,6 +5,9 @@ const User = require('./models/User');
 const { cleanupExpiredMessageImages, cleanupOldMessages } = require('./utils/messageRetention');
 const { processPendingNotifications } = require('./services/pushNotificationService');
 
+let activeSchedule;
+const runningJobs = new Set();
+
 /**
  * 1. Daily Reset Cron Job
  * Resets dailyMessagesUsed = 0 for users whose messagesLastReset is before today.
@@ -124,34 +127,80 @@ const runPlanExpiry = async () => {
  * Initialize all cron jobs.
  * Runs immediately on startup and then every hour.
  */
-const initCronJobs = ({ initialDelayMs = 0 } = {}) => {
+const initCronJobs = ({
+  initialDelayMs = 0,
+  enabled = process.env.CRON_ENABLED !== 'false',
+} = {}) => {
+  if (!enabled) {
+    console.log('[Cron] Scheduled jobs disabled by configuration.');
+    return () => {};
+  }
+  if (activeSchedule) return activeSchedule.stop;
+
   console.log('[Cron] Initializing cron jobs...');
 
-  const startJobs = () => {
-    runDailyReset();
-    runAutoDelete();
-    runExpiredImageCleanup();
-    runPlanExpiry();
-    processPendingNotifications().catch(error => {
-      console.error('[Cron] Push notification queue error:', error);
-    });
-
-    const HOUR_IN_MS = 60 * 60 * 1000;
-    setInterval(runDailyReset, HOUR_IN_MS);
-    setInterval(runAutoDelete, HOUR_IN_MS);
-    setInterval(runExpiredImageCleanup, HOUR_IN_MS);
-    setInterval(runPlanExpiry, HOUR_IN_MS);
-    setInterval(() => {
-      processPendingNotifications().catch(error => {
-        console.error('[Cron] Push notification queue error:', error);
-      });
-    }, 60 * 1000);
+  const timers = [];
+  let stopped = false;
+  const runJob = (name, job) => async () => {
+    if (stopped || runningJobs.has(name)) return;
+    runningJobs.add(name);
+    try {
+      await job();
+    } catch (error) {
+      console.error(`[Cron] ${name} failed:`, error);
+    } finally {
+      runningJobs.delete(name);
+    }
   };
 
-  if (initialDelayMs > 0) setTimeout(startJobs, initialDelayMs);
-  else startJobs();
+  const dailyReset = runJob('Daily reset', runDailyReset);
+  const autoDelete = runJob('Auto-delete', runAutoDelete);
+  const expiredImageCleanup = runJob('Expired image cleanup', runExpiredImageCleanup);
+  const planExpiry = runJob('Plan expiry', runPlanExpiry);
+  const pendingNotifications = runJob('Push notification queue', processPendingNotifications);
+  const schedule = (callback, interval) => {
+    const timer = setInterval(callback, interval);
+    timer.unref?.();
+    timers.push(timer);
+  };
+
+  const startJobs = () => {
+    if (stopped) return;
+    void dailyReset();
+    void autoDelete();
+    void expiredImageCleanup();
+    void planExpiry();
+    void pendingNotifications();
+
+    const HOUR_IN_MS = 60 * 60 * 1000;
+    schedule(dailyReset, HOUR_IN_MS);
+    schedule(autoDelete, HOUR_IN_MS);
+    schedule(expiredImageCleanup, HOUR_IN_MS);
+    schedule(planExpiry, HOUR_IN_MS);
+    schedule(pendingNotifications, 60 * 1000);
+  };
+
+  if (initialDelayMs > 0) {
+    const timer = setTimeout(startJobs, initialDelayMs);
+    timer.unref?.();
+    timers.push(timer);
+  } else {
+    startJobs();
+  }
+
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    timers.forEach(timer => {
+      clearInterval(timer);
+      clearTimeout(timer);
+    });
+    if (activeSchedule?.stop === stop) activeSchedule = undefined;
+  };
+  activeSchedule = { stop };
 
   console.log('[Cron] Cron jobs scheduled (every hour).');
+  return stop;
 };
 
 module.exports = {

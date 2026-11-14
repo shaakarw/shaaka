@@ -18,10 +18,48 @@ const { initCronJobs } = require('./cron');
 
 const app = express();
 const server = http.createServer(app);
+const READY_CHECK_TIMEOUT_MS = 2000;
 const shouldLogDebug = () => process.env.DEBUG_LOGS === 'true';
 const shouldLogPerformance = () => (
   process.env.PERF_LOGS === 'true'
 );
+
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    success: true,
+    status: 'healthy',
+    service: 'shaaka-backend',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/ready', async (req, res) => {
+  let timeout;
+  try {
+    const database = connectDB.getClient();
+    await Promise.race([
+      database.execute('SELECT 1'),
+      new Promise((resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error('Readiness check timed out')), READY_CHECK_TIMEOUT_MS);
+      }),
+    ]);
+    res.status(200).json({
+      success: true,
+      status: 'ready',
+      service: 'shaaka-backend',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(503).json({
+      success: false,
+      status: 'not_ready',
+      service: 'shaaka-backend',
+      timestamp: new Date().toISOString(),
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+});
 
 // ---------- Seed admin user ----------
 const seedAdmin = async () => {
@@ -75,36 +113,6 @@ const seedAdmin = async () => {
     console.error('❌ seedAdmin error:', err);
   }
 };
-
-// ---------- Start server after seeding ----------
-const startServer = async () => {
-  const startupStartedAt = process.hrtime.bigint();
-  try {
-    const databaseStartedAt = process.hrtime.bigint();
-    await connectDB();
-    if (shouldLogPerformance()) {
-      console.info(`[Perf][Startup] database-connected ${(Number(process.hrtime.bigint() - databaseStartedAt) / 1e6).toFixed(1)}ms`);
-    }
-    const adminSeedStartedAt = process.hrtime.bigint();
-    await seedAdmin();
-    if (shouldLogPerformance()) {
-      console.info(`[Perf][Startup] admin-seeded ${(Number(process.hrtime.bigint() - adminSeedStartedAt) / 1e6).toFixed(1)}ms`);
-    }
-    const PORT = process.env.PORT || 5000;
-    server.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 Server running on port ${PORT}`);
-      if (shouldLogPerformance()) {
-        console.info(`[Perf][Startup] server-ready ${(Number(process.hrtime.bigint() - startupStartedAt) / 1e6).toFixed(1)}ms`);
-      }
-      initCronJobs({ initialDelayMs: 30000 });
-    });
-  } catch (error) {
-    console.error('Failed to start server:', error.code || 'STARTUP_FAILED');
-    process.exit(1);
-  }
-};
-
-startServer();
 
 // ---------- Middleware ----------
 app.use(cors());
@@ -255,7 +263,9 @@ io.on('connection', (socket) => {
         if (shouldLogDebug()) {
           console.log(`✅ User ${user.username || user._id} connected (socket ${socket.id})`);
         }
-      }).catch(() => {});
+      }).catch((err) => {
+        console.error('Socket user lookup error:', err.code || 'SOCKET_USER_LOOKUP_FAILED');
+      });
     } catch (err) {
       console.warn('Invalid auth token on socket connection');
     }
@@ -323,3 +333,163 @@ socket.on('disconnect', () => {
     }).catch((err) => console.error('Find user on disconnect error:', err));
   });
 });
+
+let startPromise;
+let runtimeInitialization;
+let runtimeInitialized = false;
+let retryTimer;
+let cronStop;
+let shutdownPromise;
+let isShuttingDown = false;
+
+const initializeRuntime = async ({ initializeCron = true, retryDelayMs = 30000 } = {}) => {
+  if (runtimeInitialized || isShuttingDown) return;
+  if (runtimeInitialization) return runtimeInitialization;
+
+  runtimeInitialization = (async () => {
+    const databaseStartedAt = process.hrtime.bigint();
+    try {
+      await connectDB();
+      if (shouldLogPerformance()) {
+        console.info(`[Perf][Startup] database-connected ${(Number(process.hrtime.bigint() - databaseStartedAt) / 1e6).toFixed(1)}ms`);
+      }
+    } catch (error) {
+      console.error('[Startup] Database initialization failed; health remains available:', error.code || 'DATABASE_INITIALIZATION_FAILED');
+      if (!isShuttingDown) {
+        retryTimer = setTimeout(() => {
+          retryTimer = undefined;
+          initializeRuntime({ initializeCron, retryDelayMs }).catch((retryError) => {
+            console.error('[Startup] Database retry failed:', retryError.code || 'DATABASE_RETRY_FAILED');
+          });
+        }, retryDelayMs);
+        retryTimer.unref?.();
+      }
+      return;
+    }
+
+    await seedAdmin();
+    if (initializeCron && !cronStop) {
+      cronStop = initCronJobs({ initialDelayMs: 30000 });
+    }
+    runtimeInitialized = true;
+  })();
+
+  try {
+    await runtimeInitialization;
+  } finally {
+    runtimeInitialization = undefined;
+  }
+};
+
+const startServer = async ({
+  port = process.env.PORT || 5000,
+  host = '0.0.0.0',
+  initializeDatabase = true,
+  initializeCron = true,
+  retryDelayMs = 30000,
+} = {}) => {
+  if (server.listening) return { app, server, io };
+  if (startPromise) return startPromise;
+  isShuttingDown = false;
+
+  const startupStartedAt = process.hrtime.bigint();
+  startPromise = new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.removeListener('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.removeListener('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, host);
+  });
+
+  try {
+    await startPromise;
+  } catch (error) {
+    startPromise = undefined;
+    throw error;
+  }
+
+  server.on('error', (error) => {
+    console.error('[Server] HTTP server error:', error.message);
+  });
+  const address = server.address();
+  console.log(`[Server] Listening on ${address.address}:${address.port}`);
+  if (shouldLogPerformance()) {
+    console.info(`[Perf][Startup] server-ready ${(Number(process.hrtime.bigint() - startupStartedAt) / 1e6).toFixed(1)}ms`);
+  }
+
+  if (initializeDatabase) {
+    initializeRuntime({ initializeCron, retryDelayMs }).catch((error) => {
+      console.error('[Startup] Runtime initialization failed:', error.code || 'RUNTIME_INITIALIZATION_FAILED');
+    });
+  }
+  return { app, server, io };
+};
+
+const shutdown = () => {
+  if (shutdownPromise) return shutdownPromise;
+  isShuttingDown = true;
+  clearTimeout(retryTimer);
+  retryTimer = undefined;
+  if (cronStop) {
+    cronStop();
+    cronStop = undefined;
+  }
+
+  shutdownPromise = (async () => {
+    if (runtimeInitialization) await runtimeInitialization;
+    if (io) {
+      await new Promise((resolve, reject) => {
+        io.close((error) => error ? reject(error) : resolve());
+      });
+    } else if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+    await connectDB.closeDB();
+    runtimeInitialized = false;
+    startPromise = undefined;
+  })().finally(() => {
+    shutdownPromise = undefined;
+  });
+
+  return shutdownPromise;
+};
+
+if (require.main === module) {
+  const shutdownForSignal = (signal) => {
+    console.info(`[Shutdown] Received ${signal}; closing server resources.`);
+    shutdown().then(() => {
+      process.exitCode = signal === 'SIGINT' ? 130 : 0;
+    }).catch((error) => {
+      console.error('[Shutdown] Graceful shutdown failed:', error.code || error.message || 'SHUTDOWN_FAILED');
+      process.exitCode = 1;
+    });
+  };
+  const handleFatalError = (error, type) => {
+    console.error(`[Process] ${type}:`, error);
+    shutdown().catch((shutdownError) => {
+      console.error('[Shutdown] Failed after process error:', shutdownError.code || 'SHUTDOWN_FAILED');
+    }).finally(() => {
+      process.exitCode = 1;
+    });
+  };
+
+  process.on('SIGTERM', () => shutdownForSignal('SIGTERM'));
+  process.on('SIGINT', () => shutdownForSignal('SIGINT'));
+  process.on('unhandledRejection', (error) => handleFatalError(error, 'Unhandled promise rejection'));
+  process.on('uncaughtException', (error) => handleFatalError(error, 'Uncaught exception'));
+
+  startServer().catch((error) => {
+    console.error('[Startup] HTTP server failed to start:', error.code || error.message || 'SERVER_START_FAILED');
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { app, server, startServer, shutdown, seedAdmin };
