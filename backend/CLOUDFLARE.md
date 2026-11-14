@@ -21,7 +21,7 @@ container. Do not use `npx expo export -p web` for this Worker.
 
 ## Configure secrets
 
-In the `shaaka-api` Worker settings, add the following under **Variables and
+In the `shaaka` Worker settings, add the following under **Variables and
 Secrets**. Mark credentials and tokens as secrets.
 
 Required for startup:
