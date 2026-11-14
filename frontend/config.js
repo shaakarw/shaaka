@@ -61,6 +61,16 @@ const getDetectedHostUrl = () => {
 };
 
 export const getApiUrl = () => {
+  if (Platform.OS === 'web') {
+    // Set EXPO_PUBLIC_API_URL in Cloudflare Pages to the deployed backend origin.
+    const publicApiUrl = process.env.EXPO_PUBLIC_API_URL;
+    if (publicApiUrl) return publicApiUrl.replace(/\/$/, '');
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('EXPO_PUBLIC_API_URL must be configured for production web builds.');
+    }
+    return LOCALHOST_API_URL;
+  }
+
   const configuredApiUrl = getConfiguredApiUrl();
   if (configuredApiUrl) return configuredApiUrl;
 
@@ -80,10 +90,14 @@ export const getApiUrl = () => {
   return LOCAL_LAN_API_URLS[0] || EMULATOR_API_URL || LOCALHOST_API_URL;
 };
 
-export const getApiUrls = () => [
-  getConfiguredApiUrl(),
-  isAndroidEmulator() ? EMULATOR_API_URL : getDetectedHostUrl(),
-  ...LOCAL_LAN_API_URLS,
-  EMULATOR_API_URL,
-  LOCALHOST_API_URL,
-].filter(Boolean);
+export const getApiUrls = () => {
+  if (Platform.OS === 'web') return [getApiUrl()];
+
+  return [
+    getConfiguredApiUrl(),
+    isAndroidEmulator() ? EMULATOR_API_URL : getDetectedHostUrl(),
+    ...LOCAL_LAN_API_URLS,
+    EMULATOR_API_URL,
+    LOCALHOST_API_URL,
+  ].filter(Boolean);
+};

@@ -1657,7 +1657,7 @@ const HouseCard = React.memo(({
             <TouchableOpacity style={[styles.rightActionBtn, { paddingVertical: 3 * actionScale }]} onPress={handleToggleSave} activeOpacity={0.8}>
               <Ionicons
                 name={isSaved ? 'bookmark' : 'bookmark-outline'}
-                size={Math.round(26 * actionScale)}
+                size={Math.round(30 * actionScale)}
                 color={isSaved ? '#d87428' : '#ffffff'}
                 style={styles.rightActionIcon}
               />
@@ -1668,7 +1668,7 @@ const HouseCard = React.memo(({
             <TouchableOpacity style={[styles.rightActionBtn, { paddingVertical: 3 * actionScale }]} onPress={handleMessage} activeOpacity={0.8}>
               <Ionicons
                 name="chatbubble-ellipses"
-                size={Math.round(24 * actionScale)}
+                size={Math.round(28 * actionScale)}
                 color="#ffffff"
                 style={styles.rightActionIcon}
               />
@@ -1678,7 +1678,7 @@ const HouseCard = React.memo(({
           <TouchableOpacity style={[styles.rightActionBtn, { paddingVertical: 3 * actionScale }]} onPress={handleShare} activeOpacity={0.8}>
             <Ionicons
               name="arrow-redo"
-              size={Math.round(24 * actionScale)}
+              size={Math.round(28 * actionScale)}
               color="#ffffff"
               style={styles.rightActionIcon}
             />
@@ -1691,8 +1691,8 @@ const HouseCard = React.memo(({
               activeOpacity={0.8}
             >
               <View style={[styles.reportIconWrap, {
-                width: 26 * actionScale,
-                height: 22 * actionScale,
+                width: 29 * actionScale,
+                height: 24 * actionScale,
                 paddingHorizontal: 4 * actionScale,
                 paddingVertical: 5 * actionScale,
               }]}>
