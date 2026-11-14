@@ -7,6 +7,16 @@ const { normalizeRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
 const storageService = require('../services/storage/storageService');
 const { resolveStoredImageUrl } = require('../utils/storedImageUrl');
+const { DEFAULT_USER_PERMISSIONS } = require('../config/userPermissions');
+const {
+  getDailyUsage,
+  getLifetimeUsage,
+  getNextDailyReset,
+  reserveDailyUsage,
+  releaseDailyUsage,
+  reserveLifetimeUsage,
+  releaseLifetimeUsage,
+} = require('../utils/permissionUsage');
 
 const normalizeMallShopImageUrls = shop => {
   const result = typeof shop.toObject === 'function' ? shop.toObject() : { ...shop };
@@ -34,8 +44,37 @@ const normalizeMallShopImageUrls = shop => {
   return result;
 };
 
+const getProductSignature = product => JSON.stringify({
+  name: product?.name ?? '',
+  price: product?.price ?? null,
+  images: Array.isArray(product?.imageStorageKeys) && product.imageStorageKeys.length
+    ? product.imageStorageKeys
+    : (Array.isArray(product?.images) ? product.images : [])
+      .map(image => storageService.getStorageKeyFromUrl(image) || image),
+});
+
+const countAddedProducts = (existingProducts, updatedProducts) => {
+  const remainingProducts = new Map();
+  for (const product of existingProducts) {
+    const signature = getProductSignature(product);
+    remainingProducts.set(signature, (remainingProducts.get(signature) || 0) + 1);
+  }
+
+  let addedProducts = 0;
+  for (const product of updatedProducts) {
+    const signature = getProductSignature(product);
+    const count = remainingProducts.get(signature) || 0;
+    if (count) remainingProducts.set(signature, count - 1);
+    else addedProducts += 1;
+  }
+  return addedProducts;
+};
+
 // Create a new shop inside a mall
 exports.createMallShop = async (req, res) => {
+  const quotaRequestTime = new Date();
+  let reservedMallShopLifetime = false;
+  let reservedMallProducts = 0;
   try {
     const {
       mallId,
@@ -59,7 +98,11 @@ exports.createMallShop = async (req, res) => {
       lon,
     } = req.body;
 
-    const normalizedProducts = (products || []).map(product => ({
+    if (products !== undefined && !Array.isArray(products)) {
+      return res.status(400).json({ success: false, message: 'Products must be provided as a list.' });
+    }
+    const productList = Array.isArray(products) ? products : [];
+    const normalizedProducts = productList.map(product => ({
       ...product,
       imageVariants: Array.isArray(product.imageVariants) ? product.imageVariants : [],
       imageStorageKeys: storageService.collectStorageKeys
@@ -86,36 +129,68 @@ exports.createMallShop = async (req, res) => {
 
     // One-type-only rule: user cannot have both a normal place/shop and a shopping mall shop
     const userId = req.user.id;
-    const existingPlace = await Place.findOne({ userId });
-    if (existingPlace) {
+    const existingPlaceCount = await getLifetimeUsage(userId, 'shops_places');
+    if (existingPlaceCount > 0) {
       return res.status(403).json({ success: false, message: 'You already have a Shop/Place. You cannot add a Shopping Mall Shop.' });
     }
 
     // Enforce lifetime mall shop limit per user (default 1, admin override supported)
     const user = await User.findById(userId).select('mallShopUploadLimitLifetime mallProductUploadLimitPerDay');
-    const maxMallShopsLifetime = (user && typeof user.mallShopUploadLimitLifetime === 'number') ? user.mallShopUploadLimitLifetime : 1;
-    const maxProductsPerDay = (user && typeof user.mallProductUploadLimitPerDay === 'number') ? user.mallProductUploadLimitPerDay : 1;
+    const maxMallShopsLifetime = Number.isSafeInteger(user?.mallShopUploadLimitLifetime)
+      ? user.mallShopUploadLimitLifetime
+      : DEFAULT_USER_PERMISSIONS.mallShopUploadLimitLifetime;
+    const maxProductsPerDay = Number.isSafeInteger(user?.mallProductUploadLimitPerDay)
+      ? user.mallProductUploadLimitPerDay
+      : DEFAULT_USER_PERMISSIONS.mallProductUploadLimitPerDay;
 
-    const existingMallShopsCount = await MallShop.countDocuments({ ownerId: userId });
+    const existingMallShopsCount = await getLifetimeUsage(userId, 'mall_shops');
     if (existingMallShopsCount >= maxMallShopsLifetime) {
       return res.status(403).json({ success: false, message: `You have reached your lifetime shopping mall shop limit. Maximum ${maxMallShopsLifetime} shop.` });
     }
 
     // Ensure each product has at most one image and enforce daily product limit
-    const today = new Date(); today.setHours(0,0,0,0);
-    const end = new Date(today); end.setHours(23,59,59,999);
-    if (products && Array.isArray(products)) {
-      const existingShops = await MallShop.find({ ownerId: userId, createdDate: { $gte: today, $lte: end } });
-      const existingProductsCount = existingShops.reduce((count, shop) => count + ((shop.products && shop.products.length) || 0), 0);
-      const newProductsCount = products.length;
-      if (existingProductsCount + newProductsCount > maxProductsPerDay) {
-        return res.status(403).json({ success: false, message: `Daily product limit reached. Maximum ${maxProductsPerDay} products per day.` });
+    for (const prod of productList) {
+      if (prod.images && prod.images.length > 1) {
+        return res.status(400).json({ success: false, message: 'Each product can contain only one image.' });
       }
-      for (const prod of products) {
-        if (prod.images && prod.images.length > 1) {
-          return res.status(400).json({ success: false, message: 'Each product can contain only one image.' });
-        }
+    }
+    if (productList.length) {
+      const productsToday = await getDailyUsage(userId, 'mall_products', quotaRequestTime);
+      if (productsToday + productList.length > maxProductsPerDay) {
+        return res.status(403).json({
+          success: false,
+          message: `Daily product limit reached. Maximum ${maxProductsPerDay} products per day.`,
+          resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
+        });
       }
+    }
+    reservedMallShopLifetime = await reserveLifetimeUsage(
+      userId,
+      'mall_shops',
+      1,
+      maxMallShopsLifetime
+    );
+    if (!reservedMallShopLifetime) {
+      return res.status(403).json({ success: false, message: `You have reached your lifetime shopping mall shop limit. Maximum ${maxMallShopsLifetime} shop.` });
+    }
+    if (productList.length) {
+      const productsReserved = await reserveDailyUsage(
+        userId,
+        'mall_products',
+        productList.length,
+        maxProductsPerDay,
+        quotaRequestTime
+      );
+      if (!productsReserved) {
+        await releaseLifetimeUsage(userId, 'mall_shops', 1);
+        reservedMallShopLifetime = false;
+        return res.status(403).json({
+          success: false,
+          message: `Daily product limit reached. Maximum ${maxProductsPerDay} products per day.`,
+          resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
+        });
+      }
+      reservedMallProducts = productList.length;
     }
 
     const ownerId = req.user.id;
@@ -147,6 +222,8 @@ exports.createMallShop = async (req, res) => {
     });
 
     await shop.save();
+    reservedMallShopLifetime = false;
+    reservedMallProducts = 0;
     try {
       await notifyUsers({
         type: 'NEW_MALL_SHOP',
@@ -163,6 +240,14 @@ exports.createMallShop = async (req, res) => {
 
     res.status(201).json({ success: true, shop });
   } catch (error) {
+    const releases = [];
+    if (reservedMallShopLifetime) releases.push(releaseLifetimeUsage(req.user.id, 'mall_shops', 1));
+    if (reservedMallProducts) {
+      releases.push(releaseDailyUsage(req.user.id, 'mall_products', reservedMallProducts, quotaRequestTime));
+    }
+    await Promise.all(releases.map(release => release.catch(releaseError => {
+      console.error('[Permissions] Could not release failed mall shop quota:', releaseError.code || releaseError.message);
+    })));
     console.error('Error creating mall shop:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -252,6 +337,9 @@ exports.searchMallShops = async (req, res) => {
 
 // Update a mall shop (owner or admin)
 exports.updateMallShop = async (req, res) => {
+  const quotaRequestTime = new Date();
+  let reservedProducts = 0;
+  let quotaUserId;
   try {
     const { id } = req.params;
     const shop = await MallShop.findById(id);
@@ -264,17 +352,75 @@ exports.updateMallShop = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Unauthorized' });
     }
 
-    const updates = req.body || {};
+    const updates = { ...(req.body || {}) };
+    delete updates.ownerId;
+    delete updates._id;
+    delete updates.id;
     // Prevent changing mallId ownership via update unless admin
     if (!isAdmin) delete updates.mallId;
+
+    if (updates.products !== undefined) {
+      if (!Array.isArray(updates.products)) {
+        return res.status(400).json({ success: false, message: 'Products must be provided as a list.' });
+      }
+      if (updates.products.some(product => !product || typeof product !== 'object' || Array.isArray(product))) {
+        return res.status(400).json({ success: false, message: 'Each product must be an object.' });
+      }
+
+      quotaUserId = String(shop.ownerId);
+      const addedProducts = countAddedProducts(shop.products || [], updates.products);
+      if (addedProducts > 0) {
+        const owner = await User.findById(quotaUserId).select('mallProductUploadLimitPerDay');
+        const productLimit = Number.isSafeInteger(owner?.mallProductUploadLimitPerDay)
+          ? owner.mallProductUploadLimitPerDay
+          : DEFAULT_USER_PERMISSIONS.mallProductUploadLimitPerDay;
+        const productsToday = await getDailyUsage(quotaUserId, 'mall_products', quotaRequestTime);
+        if (productsToday + addedProducts > productLimit) {
+          return res.status(403).json({
+            success: false,
+            message: `Daily product limit reached. Maximum ${productLimit} products per day.`,
+            resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
+          });
+        }
+
+        const reserved = await reserveDailyUsage(
+          quotaUserId,
+          'mall_products',
+          addedProducts,
+          productLimit,
+          quotaRequestTime
+        );
+        if (!reserved) {
+          return res.status(403).json({
+            success: false,
+            message: `Daily product limit reached. Maximum ${productLimit} products per day.`,
+            resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
+          });
+        }
+        reservedProducts = addedProducts;
+      }
+
+      updates.products = updates.products.map(product => ({
+        ...product,
+        imageVariants: Array.isArray(product.imageVariants) ? product.imageVariants : [],
+        imageStorageKeys: storageService.collectStorageKeys
+          ? storageService.collectStorageKeys(product.images || [])
+          : (product.images || []).map(storageService.getStorageKeyFromUrl).filter(Boolean),
+      }));
+    }
 
     Object.keys(updates).forEach(key => {
       shop[key] = updates[key];
     });
 
     await shop.save();
+    reservedProducts = 0;
     res.json({ success: true, shop });
   } catch (error) {
+    if (reservedProducts) {
+      await releaseDailyUsage(quotaUserId, 'mall_products', reservedProducts, quotaRequestTime)
+        .catch(releaseError => console.error('[Permissions] Could not release failed mall product quota:', releaseError.code || releaseError.message));
+    }
     console.error('Error updating mall shop:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }

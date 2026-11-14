@@ -47,9 +47,9 @@ import { getAuthToken } from '../utils/authStorage';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const CHAT_POLICY = {
-  imagesPerMessage: 10,
-  imagesRetentionDays: 5,
-  messagesRetentionDays: 15,
+  imagesPerMessage: 18,
+  imagesRetentionDays: 15,
+  messagesRetentionDays: 30,
 };
 const MESSAGES_KEY = '@user_messages';
 const PENDING_KEY = '@pending_messages';
@@ -57,7 +57,6 @@ const INPUT_LINE_HEIGHT = 20;
 const INPUT_MIN_HEIGHT = 40;
 const INPUT_MAX_VISIBLE_HEIGHT = 76;
 const MAX_MESSAGE_CHARACTERS = 100;
-const MAX_IMAGES_PER_MESSAGE = 3;
 const DEFAULT_AVATAR = require('../assets/profile1.png');
 const chatBackground = require('../assets/chartbackground.png');
 const loadingLogo = require('../assets/logos.png');
@@ -68,10 +67,18 @@ const getChatAuthToken = async (adminMode = false) => {
   const fallbackKey = adminMode ? 'userToken' : 'adminToken';
   return (await getAuthToken(preferredKey)) || getAuthToken(fallbackKey);
 };
-const getChatThreadCacheKey = (user, sellerId, postId, adminMode) => {
+const getChatThreadCacheKey = (user, sellerId, postId, adminMode, conversationId) => {
   const userId = user?._id || user?.id || user?.phone;
   if (!userId || !sellerId) return null;
+  if (conversationId) return `${adminMode ? 'admin' : 'user'}:${userId}:${conversationId}`;
   return `${adminMode ? 'admin' : 'user'}:${userId}:${sellerId}:${postId || 'direct'}`;
+};
+const getChatConversationId = (user, sellerId, contextType, contextId, existingId) => {
+  if (existingId) return String(existingId);
+  const userId = user?._id || user?.id || user?.phone;
+  if (!userId || !sellerId) return null;
+  const participants = [String(userId), String(sellerId)].sort();
+  return `conversation:${participants.join(':')}:${contextType}:${contextId || 'direct'}`;
 };
 
 // ---------- Chat image deck sizing constants (ProductHeroDeck style) ----------
@@ -163,7 +170,7 @@ const translations = {
     cancel: 'Reka',
     updated: 'Byahinduwe',
     copied: 'Byakozwecopi',
-    sending: 'Birimo koherezwa…',
+    sending: 'Burimou koherezwa…',
     retry: 'Ongera ugerageze',
     videoRetry: 'Video ntiyohererejwe. Reba interineti wongere ugerageze.',
     messageEdited: 'Ubutumwa bwahinduwe neza',
@@ -772,9 +779,14 @@ const mergeMessages = (currentMessages, incomingMessages) => {
     merged.set(String(id), message);
   });
 
-  const nextMessages = enhanceReplies(Array.from(merged.values()).sort(
-    (a, b) => new Date(a.createdAt || a.timestamp) - new Date(b.createdAt || b.timestamp)
-  ));
+  const nextMessages = enhanceReplies(Array.from(merged.values()).sort((a, b) => {
+    const firstTimestamp = Date.parse(a.createdAt || a.timestamp || '') || 0;
+    const secondTimestamp = Date.parse(b.createdAt || b.timestamp || '') || 0;
+    return firstTimestamp - secondTimestamp
+      || String(a._id || a.id || a.clientMessageId || '').localeCompare(
+        String(b._id || b.id || b.clientMessageId || '')
+      );
+  }));
   const previousSignature = JSON.stringify(currentMessages || []);
   return previousSignature === JSON.stringify(nextMessages) ? currentMessages : nextMessages;
 };
@@ -799,10 +811,11 @@ const removeCachedMessage = async messageId => {
 // ReplyPostCard — pending reply bar (composer)
 // Shows ONLY the media-type icon — no image thumbnail.
 // ============================================================
-const ReplyPostCard = ({ post, color, theme, imageRadiusStyle, onPress }) => {
+const ReplyPostCard = ({ post, color, theme, imageRadiusStyle, onPress, unavailableText }) => {
   if (!post) return null;
 
   const title =
+    (post.available === false ? unavailableText : '') ||
     post.title ||
     post.productName ||
     post.postTitle ||
@@ -1291,17 +1304,33 @@ const SoundWaves = ({ isActive }) => {
 const ChatScreen = ({ route, navigation, language }) => {
   const {
     sellerId, sellerName, sellerPhone, postId: routePostId, postTitle, isDemoChat, sellerAvatar,
-    replyPost: initialReplyPost, adminMode = false,
+    replyPost: initialReplyPost, conversationId: routeConversationId, forceReplyPost = false, adminMode = false,
   } = route.params || {};
   const adminModeRef = useRef(adminMode);
 
   const effectivePostId = String(routePostId ?? route.params?.post ?? route.params?.listingId ?? '').trim();
   const postId = effectivePostId;
+  const routeContextType = initialReplyPost?.contextType
+    || route.params?.contextType
+    || (postId ? 'post' : 'direct');
   const { theme } = useTheme();
   const { user: authUser } = useAuth();
   const { showBottomSheet } = useBottomSheet();
   const t = translations[language] || translations.English;
-  const initialThreadCacheKey = getChatThreadCacheKey(authUser, sellerId, postId, adminMode);
+  const initialConversationId = getChatConversationId(
+    authUser,
+    sellerId,
+    routeContextType,
+    initialReplyPost?.contextId || postId,
+    routeConversationId
+  );
+  const initialThreadCacheKey = getChatThreadCacheKey(
+    authUser,
+    sellerId,
+    postId,
+    adminMode,
+    initialConversationId
+  );
   const initialCachedMessages = initialThreadCacheKey
     ? chatThreadMemoryCache.get(initialThreadCacheKey)
     : null;
@@ -1317,6 +1346,13 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   // ---------- State ----------
   const [messages, setMessages] = useState(() => initialCachedMessages || []);
+  const threadContext = useMemo(
+    () => messages.find(message => message.replyPost || message.replyPostContext)?.replyPost
+      || messages.find(message => message.replyPostContext)?.replyPostContext
+      || initialReplyPost
+      || null,
+    [messages, initialReplyPost]
+  );
   const [inputText, setInputText] = useState('');
   const [inputHeight, setInputHeight] = useState(INPUT_MIN_HEIGHT);
   const [inputScrollable, setInputScrollable] = useState(false);
@@ -1325,8 +1361,17 @@ const ChatScreen = ({ route, navigation, language }) => {
   const [imageUploadProgress, setImageUploadProgress] = useState(0);
   const [imageUploadStatus, setImageUploadStatus] = useState('idle');
   const [currentUser, setCurrentUser] = useState(authUser || null);
+  const chatConversationId = getChatConversationId(
+    currentUser || authUser,
+    sellerId,
+    routeContextType,
+    initialReplyPost?.contextId || postId,
+    routeConversationId
+  );
   const [loading, setLoading] = useState(!Array.isArray(initialCachedMessages));
   const [refreshing, setRefreshing] = useState(false);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [playingAudioId, setPlayingAudioId] = useState(null);
   const soundRef = useRef(null);
   const [replyTo, setReplyTo] = useState(null);
@@ -1334,7 +1379,13 @@ const ChatScreen = ({ route, navigation, language }) => {
   const [isOnline, setIsOnline] = useState(false);
   const [sellerAvatarUrl, setSellerAvatarUrl] = useState(sellerAvatar || null);
   const [replyPost, setReplyPost] = useState(null);
-  const threadCacheKey = getChatThreadCacheKey(currentUser, sellerId, postId, adminMode);
+  const threadCacheKey = getChatThreadCacheKey(
+    currentUser,
+    sellerId,
+    postId,
+    adminMode,
+    chatConversationId
+  );
   const [readyThreadCacheKey, setReadyThreadCacheKey] = useState(
     initialCachedMessages ? initialThreadCacheKey : null
   );
@@ -1346,9 +1397,20 @@ const ChatScreen = ({ route, navigation, language }) => {
   }, [navigation, route.params?.replyPost]);
 
   const socketRef = useRef(null);
+  const activeThreadRef = useRef({ conversationId: chatConversationId, postId });
+  useEffect(() => {
+    activeThreadRef.current = { conversationId: chatConversationId, postId };
+  }, [chatConversationId, postId]);
   const reloadThreadRef = useRef(null);
   const messagesFetchRef = useRef(false);
+  const olderFetchRef = useRef(false);
+  const oldestMessageCursorRef = useRef(null);
   const flatListRef = useRef(null);
+  const contentHeightRef = useRef(0);
+  const scrollOffsetRef = useRef(0);
+  const userScrollEnabledRef = useRef(false);
+  const restoreOlderScrollRef = useRef(false);
+  const previousContentHeightRef = useRef(0);
   const inputRef = useRef(null);
   const [editingMessageId, setEditingMessageId] = useState(null);
   const [actionModalVisible, setActionModalVisible] = useState(false);
@@ -1360,7 +1422,7 @@ const ChatScreen = ({ route, navigation, language }) => {
   const [isNearBottom, setIsNearBottom] = useState(true);
   const isNearBottomRef = useRef(true);
 
-  const [remainingImages, setRemainingImages] = useState(1);
+  const [remainingImages, setRemainingImages] = useState(CHAT_POLICY.imagesPerMessage);
   const [userImagesPerMessage, setUserImagesPerMessage] = useState(CHAT_POLICY.imagesPerMessage);
   const [upgradeModalVisible, setUpgradeModalVisible] = useState(false);
 
@@ -1409,7 +1471,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     const rpId = rp._id || rp.postId || rp.contextId || rp.shopId || rp.mallShopId;
     const me = currentUser?._id || currentUser?.phone;
 
-    if (rpId && me) {
+    if (!forceReplyPost && rpId && me) {
       const alreadySent = messages.some((m) => {
         if (!m.replyPost) return false;
         if (String(m.senderId) !== String(me)) return false;
@@ -1432,7 +1494,7 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
 
     setReplyPost(rp);
-  }, [initialReplyPost, loading, messages, currentUser, navigation, route.params?.replyPost]);
+  }, [initialReplyPost, forceReplyPost, loading, messages, currentUser, navigation, route.params?.replyPost]);
 
   // ---------- Animations ----------
   useEffect(() => {
@@ -1510,8 +1572,10 @@ const ChatScreen = ({ route, navigation, language }) => {
       });
       if (res.data.success) {
         const user = res.data.user;
-        setRemainingImages(user.remainingImages ?? 1);
-        setUserImagesPerMessage(typeof user.imagesPerMessage === 'number' ? Math.max(1, user.imagesPerMessage) : CHAT_POLICY.imagesPerMessage);
+        setRemainingImages(user.remainingImages ?? user.imagesPerMessage ?? CHAT_POLICY.imagesPerMessage);
+        setUserImagesPerMessage(Number.isSafeInteger(user.imagesPerMessage)
+          ? Math.max(0, user.imagesPerMessage)
+          : CHAT_POLICY.imagesPerMessage);
       }
     } catch (error) {
       console.warn('Failed to fetch user limits/usage:', error.message);
@@ -1644,7 +1708,12 @@ const ChatScreen = ({ route, navigation, language }) => {
           String(updatedMessage.senderId) === String(sellerId) &&
           String(updatedMessage.receiverId) === String(currentUserIdRef.current || '')
         );
-        if (!sameChat) return;
+        const { conversationId: activeConversationId, postId: activePostId } = activeThreadRef.current;
+        const eventConversationId = String(updatedMessage.conversationId || '');
+        const sameThread = eventConversationId
+          ? eventConversationId === String(activeConversationId || '')
+          : String(updatedMessage.postId || '') === String(activePostId || '');
+        if (!sameChat || !sameThread) return;
         setMessages(previous => mergeMessages(previous, [updatedMessage]));
         offlineDatabase.putRecord('messages', updatedMessage._id, updatedMessage, { priority: 'high', protected: true })
           .catch(error => console.warn('Could not update cached chat message:', error.message));
@@ -1684,7 +1753,14 @@ const ChatScreen = ({ route, navigation, language }) => {
           String(incoming.senderId) === String(currentUserIdRef.current || '') &&
           String(incoming.receiverId) === String(sellerId)
         );
-        if (!sameChat) return;
+        const { conversationId: activeConversationId, postId: activePostId } = activeThreadRef.current;
+        const incomingConversationId = String(
+          incoming.conversationId || payload?.chatId || ''
+        );
+        const sameThread = incomingConversationId
+          ? incomingConversationId === String(activeConversationId || '')
+          : String(incoming.postId || '') === String(activePostId || '');
+        if (!sameChat || !sameThread) return;
         setMessages(previous => mergeMessages(previous, [incoming]));
         if (String(incoming.senderId) === String(sellerId)) {
           const messageId = String(incoming._id);
@@ -1781,7 +1857,13 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   useEffect(() => {
     if (!currentUser) return;
-    const cacheKey = getChatThreadCacheKey(currentUser, sellerId, postId, adminMode);
+    const cacheKey = getChatThreadCacheKey(
+      currentUser,
+      sellerId,
+      postId,
+      adminMode,
+      route.params?.conversationId
+    );
     const cachedMessages = cacheKey ? chatThreadMemoryCache.get(cacheKey) : null;
     if (Array.isArray(cachedMessages)) {
       setMessages(cachedMessages);
@@ -1865,7 +1947,9 @@ const ChatScreen = ({ route, navigation, language }) => {
     if (messagesFetchRef.current) return;
     messagesFetchRef.current = true;
     if (showLoading) setRefreshing(true);
-    const cacheKey = getChatThreadCacheKey(currentUser, sellerId, postId, adminMode);
+    setHasOlderMessages(false);
+    oldestMessageCursorRef.current = null;
+    const cacheKey = getChatThreadCacheKey(currentUser, sellerId, postId, adminMode, chatConversationId);
     let cachedThreadMessages = cacheKey ? chatThreadMemoryCache.get(cacheKey) : null;
     try {
       if (!Array.isArray(cachedThreadMessages) && cacheKey) {
@@ -1900,7 +1984,8 @@ const ChatScreen = ({ route, navigation, language }) => {
       const token = await getChatAuthToken(adminModeRef.current);
       const currentUserId = currentUser._id || currentUser.phone || '';
       const effectivePostId = postId || '';
-      const query = effectivePostId ? `?postId=${encodeURIComponent(effectivePostId)}` : '';
+      const query = `?postId=${encodeURIComponent(effectivePostId)}`
+        + `&contextType=${encodeURIComponent(routeContextType)}&limit=50`;
       const url = `${BASE_URL}/api/messages/thread/${encodeURIComponent(currentUserId)}/${encodeURIComponent(sellerId)}${query}`;
       const response = await axios.get(url, {
         headers: { Authorization: `Bearer ${token}` },
@@ -1913,6 +1998,10 @@ const ChatScreen = ({ route, navigation, language }) => {
         senderId: m.senderId || m.senderPhone || m.senderId,
         replyPost: m.replyPost || m.replyPostContext || null,
       }));
+      setHasOlderMessages(Boolean(response.data.hasMore));
+      oldestMessageCursorRef.current = response.data.nextCursor
+        || messagesFromApi[0]?._id
+        || null;
       Promise.all(messagesFromApi.map(message => (
         offlineDatabase.putRecord('messages', message._id, message, { priority: 'high', protected: true })
       ))).catch(cacheError => {
@@ -1981,7 +2070,7 @@ const ChatScreen = ({ route, navigation, language }) => {
           (senderId === me && receiverId === seller) ||
           (senderId === seller && receiverId === me);
 
-        return belongsToThread && (!postId || String(msg.postId || '') === String(postId));
+        return belongsToThread && String(msg.postId || '') === String(postId || '');
       })
       .map(toChatMessage)
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
@@ -2015,26 +2104,32 @@ const ChatScreen = ({ route, navigation, language }) => {
           (msg) =>
             String(msg.postId) === String(postId) &&
             msg.postUser === sellerName &&
-            (msg.senderId === sellerId || msg.senderId === currentUserId)
+            [sellerId, sellerPhone, currentUserId, currentUser.phone]
+              .filter(Boolean)
+              .some(participantId => String(msg.senderId || msg.senderPhone || '') === String(participantId))
         )
-        .map((msg) => ({
-          _id: msg.id,
-          senderId: msg.senderId,
-          senderName:
-            msg.senderId === currentUserId
-              ? currentUser.username
-              : msg.senderName,
-          senderAvatar: msg.senderAvatar,
-          text: msg.text,
-          imageUrl: msg.imageUrl,
-          imageUrls: msg.imageUrls,
-          audioUrl: msg.audioUrl,
-          audioDuration: msg.audioDuration,
-          repliedTo: msg.repliedTo,
-          replyPost: msg.replyPost,
-          createdAt: msg.timestamp,
-          read: msg.read,
-        }))
+        .map((msg) => {
+          const senderId = msg.senderId || msg.senderPhone;
+          const isCurrentUserSender = [currentUser._id, currentUser.id, currentUser.phone]
+            .filter(Boolean)
+            .some(userId => String(senderId || '') === String(userId));
+          return {
+            _id: msg.id,
+            senderId,
+            senderPhone: msg.senderPhone,
+            senderName: isCurrentUserSender ? currentUser.username : msg.senderName,
+            senderAvatar: msg.senderAvatar,
+            text: msg.text,
+            imageUrl: msg.imageUrl,
+            imageUrls: msg.imageUrls,
+            audioUrl: msg.audioUrl,
+            audioDuration: msg.audioDuration,
+            repliedTo: msg.repliedTo,
+            replyPost: msg.replyPost,
+            createdAt: msg.timestamp,
+            read: msg.read,
+          };
+        })
         .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
       const enhanced = enhanceReplies(demoMessages);
@@ -2057,6 +2152,70 @@ const ChatScreen = ({ route, navigation, language }) => {
     }
   };
 
+  const loadOlderMessages = useCallback(async () => {
+    if (
+      !hasOlderMessages
+      || olderFetchRef.current
+      || messagesFetchRef.current
+      || !currentUser?._id
+      || !sellerId
+      || !oldestMessageCursorRef.current
+    ) return;
+
+    olderFetchRef.current = true;
+    messagesFetchRef.current = true;
+    setLoadingOlderMessages(true);
+    try {
+      if (!(await networkStatus.start()).isOnline) return;
+      const token = await getChatAuthToken(adminModeRef.current);
+      if (!token) return;
+      const currentUserId = currentUser._id || currentUser.phone || '';
+      const query = `?postId=${encodeURIComponent(postId || '')}`
+        + `&contextType=${encodeURIComponent(routeContextType)}&limit=50`
+        + `&beforeId=${encodeURIComponent(oldestMessageCursorRef.current)}`;
+      const response = await axios.get(
+        `${BASE_URL}/api/messages/thread/${encodeURIComponent(currentUserId)}/${encodeURIComponent(sellerId)}${query}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const olderMessages = (response.data.messages || []).map(message => ({
+        ...message,
+        _id: message._id || message.id,
+        createdAt: message.createdAt || message.timestamp,
+        senderId: message.senderId || message.senderPhone,
+        replyPost: message.replyPost || message.replyPostContext || null,
+      }));
+
+      if (olderMessages.length) {
+        previousContentHeightRef.current = contentHeightRef.current;
+        restoreOlderScrollRef.current = true;
+        oldestMessageCursorRef.current = response.data.nextCursor || String(olderMessages[0]._id);
+        setHasOlderMessages(Boolean(response.data.hasMore));
+        setMessages(previous => mergeMessages(previous, olderMessages));
+        Promise.all(olderMessages.map(message => (
+          offlineDatabase.putRecord('messages', message._id, message, { priority: 'high', protected: true })
+        ))).catch(cacheError => {
+          console.warn('Could not cache older chat messages:', cacheError.message);
+        });
+      } else {
+        setHasOlderMessages(false);
+      }
+    } catch (error) {
+      restoreOlderScrollRef.current = false;
+      console.warn('Could not load older chat messages:', error.message);
+    } finally {
+      olderFetchRef.current = false;
+      messagesFetchRef.current = false;
+      setLoadingOlderMessages(false);
+    }
+  }, [
+    hasOlderMessages,
+    currentUser?._id,
+    currentUser?.phone,
+    sellerId,
+    postId,
+    routeContextType,
+  ]);
+
   const pollNewMessages = useCallback(async () => {
     if (isDemoChat) return;
     if (!currentUser?._id || !sellerId) return;
@@ -2071,9 +2230,8 @@ const ChatScreen = ({ route, navigation, language }) => {
 
       const currentUserId = currentUser._id || currentUser.phone || '';
       const effectivePostId = postId || '';
-      const query = effectivePostId
-        ? `?postId=${encodeURIComponent(effectivePostId)}`
-        : '';
+      const query = `?postId=${encodeURIComponent(effectivePostId)}`
+        + `&contextType=${encodeURIComponent(routeContextType)}&limit=50`;
       const url = `${BASE_URL}/api/messages/thread/${encodeURIComponent(
         currentUserId
       )}/${encodeURIComponent(sellerId)}${query}`;
@@ -2199,8 +2357,8 @@ const ChatScreen = ({ route, navigation, language }) => {
       if (hasUploadedImages) {
         const caption = inputText.trim();
         const uploadedImages = selectedImages.filter((img) => img.status === 'done' && img.uploadedUrl);
-        if (uploadedImages.length > MAX_IMAGES_PER_MESSAGE) {
-          showChatNotice('error', t.imageLimit, t.imageLimitMessage.replace('{count}', String(MAX_IMAGES_PER_MESSAGE)));
+        if (uploadedImages.length > userImagesPerMessage) {
+          showChatNotice('error', t.imageLimit, t.imageLimitMessage.replace('{count}', String(userImagesPerMessage)));
           return;
         }
 
@@ -2300,6 +2458,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       });
       return alreadyExists ? prev : [...prev, tempMessage];
     });
+    setInputText('');
 
     if (flatListRef.current) {
       flatListRef.current.scrollToEnd({ animated: true });
@@ -2308,13 +2467,13 @@ const ChatScreen = ({ route, navigation, language }) => {
     try {
       if (videoAsset && !networkStatus.get().isOnline) {
         setMessages(prev => prev.filter(msg => String(msg._id || msg.id) !== tempId));
+        setInputText(previousText => previousText || cleanText);
         showChatNotice('info', t.networkError, t.videoRetry);
         return;
       }
       if (!networkStatus.get().isOnline) {
         await offlineDatabase.putRecord('messages', tempId, { ...tempMessage, id: tempId }, { priority: 'high', protected: true });
         await syncManager.enqueue({ actionType: 'SEND_MESSAGE', entityType: 'message', entityId: tempId, payload: { ...messageData, clientMessageId: tempId } });
-        setInputText('');
         setSelectedImages([]);
         setReplyTo(null);
         clearReplyPost();
@@ -2354,7 +2513,6 @@ const ChatScreen = ({ route, navigation, language }) => {
         prev.filter(msg => String(msg._id || msg.id) !== tempId),
         [serverMessage]
       ));
-      setInputText('');
       setSelectedImages([]);
       setReplyTo(null);
       setEditingMessageId(null);
@@ -2366,6 +2524,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       console.error('Error sending message:', error);
       if (error.response && error.response.status < 500) {
         setMessages(prev => prev.filter(msg => String(msg._id || msg.id) !== tempId));
+        setInputText(previousText => previousText || cleanText);
         showChatNotice(
           'error',
           t.sendFailed,
@@ -2379,12 +2538,12 @@ const ChatScreen = ({ route, navigation, language }) => {
         setMessages(prev => prev.map(msg => (
           String(msg._id || msg.id) === tempId ? failedMessage : msg
         )));
+        setInputText(previousText => previousText || cleanText);
         showChatNotice('error', t.sendFailed, t.videoRetry);
         return;
       }
       await offlineDatabase.putRecord('messages', tempId, { ...tempMessage, id: tempId }, { priority: 'high', protected: true });
       await syncManager.enqueue({ actionType: 'SEND_MESSAGE', entityType: 'message', entityId: tempId, payload: { ...messageData, clientMessageId: tempId } });
-      setInputText('');
       setSelectedImages([]);
       setReplyTo(null);
       clearReplyPost();
@@ -2477,9 +2636,9 @@ const ChatScreen = ({ route, navigation, language }) => {
         timestamp: new Date().toISOString(),
         read: true,
       };
+      setInputText('');
       await saveLocalMessage(message);
       setMessages(prev => [...prev, toChatMessage(message)]);
-      setInputText('');
       setSelectedImages([]);
       setReplyTo(null);
       setEditingMessageId(null);
@@ -2489,6 +2648,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       }
     } catch (error) {
       console.error('Error sending demo message:', error);
+      setInputText(previousText => previousText || text);
       showChatNotice('error', t.error, t.couldNotSend);
     }
   };
@@ -2586,6 +2746,10 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   const uploadImages = async (assets) => {
     if (!assets || assets.length === 0) return;
+    if (userImagesPerMessage <= 0) {
+      showChatNotice('error', t.imageLimit, t.imageLimitMessage.replace('{count}', '0'));
+      return;
+    }
     console.log('SELECTED IMAGE:', assets);
 
     try {
@@ -2614,8 +2778,8 @@ const ChatScreen = ({ route, navigation, language }) => {
       console.warn('Cooldown check failed:', e);
     }
 
-    if (assets.length > MAX_IMAGES_PER_MESSAGE) {
-      showChatNotice('error', t.imageLimit, t.imageLimitMessage.replace('{count}', String(MAX_IMAGES_PER_MESSAGE)));
+    if (assets.length > userImagesPerMessage) {
+      showChatNotice('error', t.imageLimit, t.imageLimitMessage.replace('{count}', String(userImagesPerMessage)));
       return;
     }
 
@@ -2639,8 +2803,8 @@ const ChatScreen = ({ route, navigation, language }) => {
         };
       });
 
-      if (files.length > MAX_IMAGES_PER_MESSAGE) {
-        throw new Error(`You can upload up to ${MAX_IMAGES_PER_MESSAGE} images per message.`);
+      if (files.length > userImagesPerMessage) {
+        throw new Error(`You can upload up to ${userImagesPerMessage} images per message.`);
       }
 
       setSelectedImages(files.map(file => ({ ...file, status: 'uploading' })));
@@ -2728,6 +2892,10 @@ const ChatScreen = ({ route, navigation, language }) => {
   };
 
   const pickImage = async () => {
+    if (userImagesPerMessage <= 0) {
+      showChatNotice('error', t.imageLimit, t.imageLimitMessage.replace('{count}', '0'));
+      return;
+    }
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
@@ -2737,7 +2905,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsMultipleSelection: true,
-        selectionLimit: MAX_IMAGES_PER_MESSAGE,
+        selectionLimit: userImagesPerMessage,
         allowsEditing: false,
         quality: 0.8,
       });
@@ -2751,6 +2919,10 @@ const ChatScreen = ({ route, navigation, language }) => {
   };
 
   const takePhoto = async () => {
+    if (userImagesPerMessage <= 0) {
+      showChatNotice('error', t.imageLimit, t.imageLimitMessage.replace('{count}', '0'));
+      return;
+    }
     try {
       const { status } = await ImagePicker.requestCameraPermissionsAsync();
       if (status !== 'granted') {
@@ -2800,8 +2972,14 @@ const ChatScreen = ({ route, navigation, language }) => {
   }, [playingAudioId]);
 
   const isOwnMessage = useCallback((message) => {
-    const userId = currentUser?._id || currentUser?.phone;
-    return String(message.senderId || '') === String(userId || '');
+    const senderId = message.senderId?._id
+      || message.senderId?.id
+      || message.senderId
+      || message.senderPhone;
+    if (!senderId) return false;
+    return [currentUser?._id, currentUser?.id, currentUser?.phone]
+      .filter(Boolean)
+      .some(userId => String(senderId) === String(userId));
   }, [currentUser]);
 
   const formatDuration = useCallback((seconds) => {
@@ -2965,6 +3143,10 @@ const ChatScreen = ({ route, navigation, language }) => {
 
   const navigateToPostDetail = useCallback((postContext) => {
     if (!postContext) return;
+    if (postContext.available === false) {
+      showChatNotice('info', t.error, t.postNotAvailable);
+      return;
+    }
     if (postContext.contextType === 'shop') {
       const shopId = postContext.shopId || postContext.contextId || postContext.postId || postContext._id;
       if (!shopId) return;
@@ -2994,7 +3176,7 @@ const ChatScreen = ({ route, navigation, language }) => {
       const postData = postContext.productName || postContext.houseImages ? postContext : undefined;
       navigation.navigate('PostDetail', { postId: String(postIdToOpen), house: postData });
     }
-  }, [navigation]);
+  }, [navigation, showChatNotice, t.error, t.postNotAvailable]);
 
   const renderItem = useCallback(({ item, index }) => {
     const prevMsg = index > 0 ? messages[index - 1] : null;
@@ -3060,17 +3242,36 @@ const ChatScreen = ({ route, navigation, language }) => {
     };
   }, [loading]);
 
-  const handleContentSizeChange = () => {
+  const handleContentSizeChange = (width, height) => {
+    contentHeightRef.current = height;
+    if (restoreOlderScrollRef.current) {
+      restoreOlderScrollRef.current = false;
+      const addedHeight = Math.max(0, height - previousContentHeightRef.current);
+      flatListRef.current?.scrollToOffset({
+        offset: Math.max(0, scrollOffsetRef.current + addedHeight),
+        animated: false,
+      });
+      return;
+    }
     scrollToBottom(true);
   };
 
   const handleScroll = (event) => {
     const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
+    scrollOffsetRef.current = contentOffset.y;
     const bottomOffset = contentSize.height - layoutMeasurement.height;
     const threshold = 50;
     const isNear = bottomOffset - contentOffset.y < threshold;
     isNearBottomRef.current = isNear;
     setIsNearBottom(isNear);
+    if (
+      userScrollEnabledRef.current
+      && contentOffset.y <= 60
+      && hasOlderMessages
+      && !loadingOlderMessages
+    ) {
+      loadOlderMessages();
+    }
   };
 
   const scrollToBottom = (animated = true) => {
@@ -3126,6 +3327,18 @@ const ChatScreen = ({ route, navigation, language }) => {
           </View>
         </View>
 
+        {threadContext && (
+          <View style={[styles.threadContextBar, { backgroundColor: theme.cardBackground, borderBottomColor: theme.border }]}>
+            <ReplyPostCard
+              post={threadContext}
+              color={theme.text}
+              theme={theme}
+              unavailableText={t.postNotAvailable}
+              onPress={() => navigateToPostDetail(threadContext)}
+            />
+          </View>
+        )}
+
         <ImageBackground
           source={normalizeImageSource(chatBackground)}
           style={styles.chatBackground}
@@ -3135,7 +3348,7 @@ const ChatScreen = ({ route, navigation, language }) => {
           <FlatList
             ref={flatListRef}
             data={messages}
-            keyExtractor={(item) => item._id}
+            keyExtractor={(item) => String(item._id || item.id || item.clientMessageId)}
             renderItem={renderItem}
             style={styles.chatList}
             contentContainerStyle={styles.chatListContent}
@@ -3144,6 +3357,7 @@ const ChatScreen = ({ route, navigation, language }) => {
             refreshing={refreshing}
             onRefresh={() => loadMessages(true)}
             onScroll={handleScroll}
+            onScrollBeginDrag={() => { userScrollEnabledRef.current = true; }}
             scrollEventThrottle={200}
             removeClippedSubviews={false}
             initialNumToRender={20}
@@ -3152,6 +3366,13 @@ const ChatScreen = ({ route, navigation, language }) => {
             updateCellsBatchingPeriod={50}
             onEndReachedThreshold={0.5}
           />
+          {loadingOlderMessages && (
+            <ActivityIndicator
+              style={styles.loadingOlderIndicator}
+              size="small"
+              color={theme.textSecondary}
+            />
+          )}
         </ImageBackground>
 
         {otherTyping && <TypingIndicator theme={theme} avatar={sellerAvatarSource} />}
@@ -3191,6 +3412,7 @@ const ChatScreen = ({ route, navigation, language }) => {
               post={replyPost}
               color={theme.text}
               theme={theme}
+              unavailableText={t.postNotAvailable}
               onPress={() => navigateToPostDetail(replyPost)}
             />
             <TouchableOpacity onPress={clearReplyPost} style={styles.replyBarCloseButton}>
@@ -3227,6 +3449,7 @@ const ChatScreen = ({ route, navigation, language }) => {
             <View style={[styles.attachmentActions, attachmentsStacked && styles.attachmentActionsStack]}>
               <TouchableOpacity
                 onPress={pickImage}
+                disabled={remainingImages <= 0}
                 style={[styles.attachButton, attachmentsStacked && styles.attachButtonStack, remainingImages <= 0 && { opacity: 0.4 }]}
               >
                 <Ionicons name="image-outline" size={24} color={theme.textSecondary} />
@@ -3234,6 +3457,7 @@ const ChatScreen = ({ route, navigation, language }) => {
 
               <TouchableOpacity
                 onPress={takePhoto}
+                disabled={remainingImages <= 0}
                 style={[styles.attachButton, attachmentsStacked && styles.attachButtonStack, remainingImages <= 0 && { opacity: 0.4 }]}
               >
                 <Ionicons name="camera-outline" size={24} color={theme.textSecondary} />
@@ -3342,6 +3566,16 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 16, fontWeight: '600' },
   headerSubtitle: { fontSize: 12, marginTop: 2 },
   refreshButton: { padding: 8 },
+  threadContextBar: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 10,
+  },
+  loadingOlderIndicator: {
+    position: 'absolute',
+    top: 10,
+    alignSelf: 'center',
+    zIndex: 2,
+  },
   chatBackground: { flex: 1 },
   overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   chatList: { flex: 1, backgroundColor: 'transparent' },

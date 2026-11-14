@@ -11,6 +11,11 @@ const { uploadImageWithVariants } = require('../services/imageUpload');
 const { setOnline, isOnline } = require('../utils/onlineStore');
 const { computeAggregatedLimits, getActiveSubscriptions } = require('../utils/subscriptionHelpers_clean');
 const { notifyUser } = require('../services/notificationService');
+const {
+  getDailyUsage,
+  getLifetimeUsage,
+  getNextDailyReset,
+} = require('../utils/permissionUsage');
 
 // Helper to clean expired stories (older than 2 days)
 const cleanExpiredStories = async (userId = null) => {
@@ -47,45 +52,42 @@ exports.getMe = async (req, res) => {
     // Compute aggregated limits and active subscriptions
     const totalLimits = computeAggregatedLimits(user);
     const activeSubscriptions = getActiveSubscriptions(user);
-    const videoLimit = typeof user.videoUploadLimitPerDay === 'number' ? Math.max(0, user.videoUploadLimitPerDay) : 0;
+    const videoLimit = Number.isSafeInteger(user.videoUploadLimitPerDay)
+      ? user.videoUploadLimitPerDay
+      : totalLimits.videoUploadsPerDay;
+    const usageDate = new Date();
+    const [
+      postsToday,
+      videosToday,
+      placeProductsToday,
+      mallProductsToday,
+      shopsPlacesUsed,
+      mallShopsUsed,
+    ] = await Promise.all([
+      getDailyUsage(user._id, 'posts', usageDate),
+      getDailyUsage(user._id, 'videos', usageDate),
+      getDailyUsage(user._id, 'place_products', usageDate),
+      getDailyUsage(user._id, 'mall_products', usageDate),
+      getLifetimeUsage(user._id, 'shops_places'),
+      getLifetimeUsage(user._id, 'mall_shops'),
+    ]);
 
-    // Today's date range
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-
-    // ----- Today's posts -----
-    const postsToday = await Post.countDocuments({
-      user: user._id,
-      createdAt: { $gte: today, $lt: tomorrow }
-    });
-    const remainingPosts = Math.max((totalLimits.postsPerDay || 1) - postsToday, 0);
-
-    const videosToday = await Post.countDocuments({
-      user: user._id,
-      videoUrl: { $exists: true, $ne: '' },
-      createdAt: { $gte: today, $lt: tomorrow }
-    });
-    const remainingVideos = Math.max(videoLimit - videosToday, 0);
-
-    // ----- Today's places -----
+    const dailyResetAt = getNextDailyReset(usageDate);
     const placesToday = await Place.countDocuments({
       userId: user._id,
-      createdAt: { $gte: today, $lt: tomorrow }
+      createdAt: {
+        $gte: new Date(dailyResetAt.getTime() - 24 * 60 * 60 * 1000),
+        $lt: dailyResetAt,
+      },
     });
-    const remainingPlaces = Math.max((totalLimits.placesPerDay || 1) - placesToday, 0);
-
-// ----- 🔥 Today's message images (images sent in chat) -----
+    const remainingPosts = Math.max(user.postUploadLimitPerDay - postsToday, 0);
+    const remainingVideos = Math.max(videoLimit - videosToday, 0);
+    const remainingPlaces = Math.max(user.shopUploadLimitLifetime - shopsPlacesUsed, 0);
     const messageImagesToday = await Message.countDocuments({
       senderId: user._id,
       imageUrl: { $exists: true, $ne: '' },
-      createdAt: { $gte: today, $lt: tomorrow }
     });
-    const remainingImages = Math.max(totalLimits.imagesPerMessage - messageImagesToday, 0);
-
-    // Use the user's dailyMessagesUsed counter if available, else fallback to DB count
-    const dailyMessagesUsed = user.dailyMessagesUsed !== undefined ? user.dailyMessagesUsed : messageImagesToday;
+    const remainingImages = user.imagesPerMessage;
 
     // Payment summary
     const paymentHistory = user.paymentHistory || [];
@@ -110,12 +112,19 @@ exports.getMe = async (req, res) => {
     userObj.remainingPosts = remainingPosts;
     userObj.placesToday = placesToday;
     userObj.remainingPlaces = remainingPlaces;
-    userObj.messageImagesToday = messageImagesToday; // 🔥 added
-    userObj.remainingImages = remainingImages;       // 🔥 added
-    userObj.allowVideoUpload = user.allowVideoUpload === true;
+    userObj.placeProductsToday = placeProductsToday;
+    userObj.remainingPlaceProducts = Math.max(user.placeProductUploadLimitPerDay - placeProductsToday, 0);
+    userObj.mallProductsToday = mallProductsToday;
+    userObj.remainingMallProducts = Math.max(user.mallProductUploadLimitPerDay - mallProductsToday, 0);
+    userObj.shopsPlacesUsed = shopsPlacesUsed;
+    userObj.mallShopsUsed = mallShopsUsed;
+    userObj.messageImagesToday = messageImagesToday;
+    userObj.remainingImages = remainingImages;
+    userObj.allowVideoUpload = user.allowVideoUpload !== false;
     userObj.videoUploadLimitPerDay = videoLimit;
     userObj.videosToday = videosToday;
     userObj.remainingVideos = remainingVideos;
+    userObj.dailyResetAt = dailyResetAt.toISOString();
     userObj.totalPaid = totalPaid;
     userObj.paymentCount = paymentCount;
     userObj.firstPaymentDate = firstPayment ? firstPayment.paymentDate : null;

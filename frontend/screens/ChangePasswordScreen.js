@@ -1,8 +1,7 @@
-import { getAuthToken } from '../utils/authStorage';
+import { getAuthToken as getStoredAuthToken } from '../utils/authStorage';
 import React, { useRef, useState } from 'react';
 import { ActivityIndicator, Alert, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import axios from 'axios';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '../constants';
 import { useTheme } from '../context/ThemeContext';
 import { showAdminFeedback } from '../utils/adminFeedback';
@@ -32,11 +31,11 @@ export default function ChangePasswordScreen({ navigation, route, language = 'En
     }
   };
 
-  const getAuthToken = async () => {
+  const getScreenAuthToken = async () => {
     if (adminMode) {
-      return getAuthToken('adminToken');
+      return getStoredAuthToken('adminToken');
     }
-    return getAuthToken('userToken');
+    return getStoredAuthToken('userToken');
   };
 
   const verifyCurrentPassword = async () => {
@@ -46,7 +45,7 @@ export default function ChangePasswordScreen({ navigation, route, language = 'En
     }
     setLoading(true);
     try {
-      const token = await getAuthToken();
+      const token = await getScreenAuthToken();
       if (!token) {
         reportError(rw ? 'Injira ubundi mbere.' : 'Please log in first.');
         return;
@@ -79,7 +78,7 @@ export default function ChangePasswordScreen({ navigation, route, language = 'En
     }
     setLoading(true);
     try {
-      const token = await getAuthToken();
+      const token = await getScreenAuthToken();
       if (!token) {
         reportError(rw ? 'Injira ubundi mbere.' : 'Please log in first.');
         return;
@@ -106,7 +105,7 @@ export default function ChangePasswordScreen({ navigation, route, language = 'En
   const labels = rw ? ['Ijambo banga risanzwe', 'Ijambo banga rishya', 'Emeza ijambo banga rishya'] : ['Current password', 'New password', 'Confirm new password'];
   const renderInput = (value, setter, placeholder, visible, setVisible, ref, onSubmitEditing) => (
     <View style={[styles.inputContainer, { borderColor: error ? '#d87428' : theme.border, backgroundColor: theme.cardBackground }]}>
-      <TextInput ref={ref} secureTextEntry={!visible} value={value} onChangeText={text => { setter(text.replace(/\s/g, '')); setError(''); }} placeholder={placeholder} placeholderTextColor={theme.textSecondary} style={[styles.input, { color: theme.text }]} returnKeyType="next" onSubmitEditing={onSubmitEditing} />
+      <TextInput ref={ref} secureTextEntry={!visible} value={value} onChangeText={text => { setter(text); setError(''); }} placeholder={placeholder} placeholderTextColor={theme.textSecondary} style={[styles.input, { color: theme.text }]} returnKeyType="next" onSubmitEditing={onSubmitEditing} />
       <TouchableOpacity onPress={() => setVisible(current => !current)}><Text style={{ color: theme.accent }}>{visible ? 'Hide' : 'Show'}</Text></TouchableOpacity>
     </View>
   );

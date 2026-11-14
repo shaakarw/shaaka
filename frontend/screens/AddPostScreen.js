@@ -47,8 +47,7 @@ const { width } = Dimensions.get('window');
 const MAX_COMPRESSED_BYTES = 150 * 1024;
 const MIN_IMAGE_HEIGHT = 300;
 const MAX_UPLOAD_MEDIA_HEIGHT = 600;
-const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
-const MAX_VIDEO_DURATION_S = 90;
+const MAX_VIDEO_BYTES = 80 * 1024 * 1024;
 
 const ADDPOST_TUTORIAL_ID = 'addpost';
 const ADDPOST_TUTORIAL_DELAY_MS = 700;
@@ -133,7 +132,7 @@ const translations = {
     totalImageLimitReached: 'Image Limit Reached',
     totalImageLimitReachedMessage: 'You have reached your total image upload limit for this app. Please try again later.',
     limitReached: 'Daily Post Limit Reached',
-    limitReachedMessage: 'You have reached your daily post limit. Please try again later.',
+    limitReachedMessage: 'You have reached your daily post limit. It resets at {reset} Kigali time.',
     imageDailyLimitReachedTitle: 'Daily Image Limit Reached',
     imageDailyLimitReachedMessage: 'You have reached your daily image upload limit. Please try again later.',
     imageLimitExceeded: 'Image Limit Exceeded',
@@ -238,7 +237,7 @@ const translations = {
     totalImageLimitReached: 'Ibyo wemerewe byarangiye',
     totalImageLimitReachedMessage: 'Ibyo wemerewe byarangiye.',
     limitReached: 'Ibyo wemerewe byarangiye',
-    limitReachedMessage: 'Ibyo wemerewe byarangiye.',
+    limitReachedMessage: 'Wageze ku mupaka w\'uyu munsi. Uzongera kuboneka saa {reset} ku isaha y\'i Kigali.',
     imageDailyLimitReachedTitle: 'Ibyo wemerewe byarangiye',
     imageDailyLimitReachedMessage: 'Ibyo wemerewe byarangiye.',
     imageLimitExceeded: 'Ibyo wemerewe byarengezwe',
@@ -388,7 +387,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
   const [remainingPostImages, setRemainingPostImages] = useState(1);
   const [maxPostsPerDay, setMaxPostsPerDay] = useState(1);
   const [maxPostImagesPerDay, setMaxPostImagesPerDay] = useState(2);
-  const [maxImagesPerPost] = useState(1);
+  const [maxImagesPerPost] = useState(2);
   const [totalPostsUsed, setTotalPostsUsed] = useState(0);
   const [maxTotalPosts, setMaxTotalPosts] = useState(Infinity);
   const [totalPostImagesUsed, setTotalPostImagesUsed] = useState(0);
@@ -397,6 +396,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
   const [allowVideoUpload, setAllowVideoUpload] = useState(false);
   const [videoUploadLimitPerDay, setVideoUploadLimitPerDay] = useState(0);
   const [videosToday, setVideosToday] = useState(0);
+  const [dailyResetAt, setDailyResetAt] = useState(null);
 
   const [limitsLoading, setLimitsLoading] = useState(true);
   const [hintIndex, setHintIndex] = useState(0);
@@ -425,6 +425,20 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
     !allowVideoUpload ||
     videoUploadLimitPerDay <= 0 ||
     videosToday >= videoUploadLimitPerDay;
+
+  const formatDailyReset = resetAt => {
+    const resetDate = resetAt ? new Date(resetAt) : null;
+    if (!resetDate || !Number.isFinite(resetDate.getTime())) return 'midnight';
+    return new Intl.DateTimeFormat(language === 'Kinyarwanda' ? 'rw-RW' : 'en-GB', {
+      timeZone: 'Africa/Kigali',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(resetDate);
+  };
+  const dailyLimitReachedMessage = t.limitReachedMessage.replace(
+    '{reset}',
+    formatDailyReset(dailyResetAt)
+  );
 
   const limitReached =
     !limitsLoading &&
@@ -540,9 +554,10 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
         setAllowVideoUpload(user.allowVideoUpload === true);
         setVideoUploadLimitPerDay(typeof user.videoUploadLimitPerDay === 'number' ? Math.max(0, user.videoUploadLimitPerDay) : 0);
         setVideosToday(typeof user.videosToday === 'number' ? user.videosToday : 0);
+        setDailyResetAt(user.dailyResetAt || null);
 
         setRemainingPosts(user.remainingPosts ?? limits.postsPerDay);
-        setRemainingPostImages(user.remainingPostImages ?? user.remainingImages ?? limits.totalPostImagesPerDay);
+        setRemainingPostImages(user.remainingPostImages ?? limits.totalPostImagesPerDay);
         setTotalPostsUsed(user.totalPostsCount ?? 0);
         setTotalPostImagesUsed(user.totalPostImagesCount ?? 0);
         setPostCooldownHours(user.postCooldownHours ?? 0);
@@ -672,14 +687,11 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
       }
 
       video = { ...video, duration: videoDuration };
-      if (videoDuration > MAX_VIDEO_DURATION_S) {
-        throw new Error('Video must be 1 minute 30 seconds or shorter. Please select a shorter video.');
-      }
 
       const fileInfo = video.size ? null : await FileSystem.getInfoAsync(video.uri);
       const videoSize = Number(video.size) || Number(fileInfo?.size) || 0;
       if (videoSize > MAX_VIDEO_BYTES) {
-        throw new Error('Video exceeds the 50 MB size limit. Please choose a smaller video.');
+        throw new Error('Video exceeds the 80 MB size limit. Please choose a smaller video.');
       }
       setFormData(prev => ({ ...prev, video, images: [] }));
       setError('');
@@ -771,7 +783,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
       showBottomSheet({
         type: 'error',
         title: t.limitReached,
-        message: t.limitReachedMessage,
+        message: dailyLimitReachedMessage,
         buttonText: 'OK',
       });
       return;
@@ -821,7 +833,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
       showBottomSheet({
         type: 'error',
         title: t.limitReached,
-        message: t.limitReachedMessage,
+        message: dailyLimitReachedMessage,
         buttonText: 'OK',
       });
       return;
@@ -943,7 +955,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
       showBottomSheet({
         type: 'error',
         title: t.limitReached,
-        message: t.limitReachedMessage,
+        message: dailyLimitReachedMessage,
         buttonText: 'OK',
       });
       return;
@@ -997,7 +1009,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
       showBottomSheet({
         type: 'error',
         title: t.limitReached,
-        message: t.limitReachedMessage,
+        message: dailyLimitReachedMessage,
         buttonText: 'OK',
       });
       return;
@@ -1049,16 +1061,13 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
         }
         const duration = Number(metadata.duration);
         videoForUpload = { ...videoForUpload, ...metadata, duration };
-        if (duration > MAX_VIDEO_DURATION_S) {
-          throw new Error('Video must be 1 minute 30 seconds or shorter. Please select a shorter video.');
-        }
 
         const fileInfo = videoForUpload.size
           ? null
           : await FileSystem.getInfoAsync(videoForUpload.uri);
         const videoSize = Number(videoForUpload.size) || Number(fileInfo?.size) || 0;
         if (videoSize > MAX_VIDEO_BYTES) {
-          throw new Error('Video exceeds the 50 MB size limit. Please choose a smaller video.');
+          throw new Error('Video exceeds the 80 MB size limit. Please choose a smaller video.');
         }
       }
 
@@ -1135,6 +1144,10 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
       let errorMsg = t.postFailed;
       if (error.response) {
         errorMsg = error.response.data?.message || t.serverError;
+        if (error.response.data?.resetsAt) {
+          setDailyResetAt(error.response.data.resetsAt);
+          errorMsg += ` It resets at ${formatDailyReset(error.response.data.resetsAt)} Kigali time.`;
+        }
       } else if (error.request) {
         errorMsg = 'Network error – cannot reach backend. Please check your connection.';
       } else {

@@ -665,7 +665,7 @@ const VideoPreviewThumbnail = ({ videoUrl, videoId, videoThumbnail, onPress, t }
         <Image
           source={normalizeImageSource({ uri: thumbnailUri })}
           style={styles.videoThumbnail}
-          resizeMode="contain"
+          resizeMode="cover"
         />
       ) : (
         <View style={[styles.videoThumbnailPlaceholder, { backgroundColor: '#000000' }]}>
@@ -852,9 +852,22 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
   useEffect(() => {
     const loadShareLink = async () => {
       try {
+        const cachedShareLink = await AsyncStorage.getItem('appShareLink');
+        if (cachedShareLink) setAppShareLink(cachedShareLink);
+      } catch (error) {
+        console.error('Load cached share link error:', error.message);
+      }
+
+      try {
         const response = await axios.get(`${BASE_URL}/api/settings/share-link`);
         if (response.data.success) {
-          setAppShareLink(response.data.shareLink || '');
+          const shareLink = response.data.shareLink || '';
+          setAppShareLink(shareLink);
+          try {
+            await AsyncStorage.setItem('appShareLink', shareLink);
+          } catch (error) {
+            console.error('Cache share link error:', error.message);
+          }
         }
       } catch (error) {
         console.error('Load share link error:', error.message);
@@ -932,7 +945,10 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
   const priceNegotiable = house.priceNegotiable;
   const callNumber = house.contactNumber1;
   const whatsappNumber = house.contactNumber2;
-  const sellerId = house.user?._id || house.user?.id || house.userId || house.user;
+  const sellerRef = house.user || house.userId;
+  const sellerId = typeof sellerRef === 'object'
+    ? sellerRef?._id || sellerRef?.id
+    : sellerRef;
   const viewerId = currentUser?._id || authUser?._id || authUser?.id;
   const isOwnPost = Boolean(viewerId && sellerId && String(viewerId) === String(sellerId));
   return (
@@ -1051,12 +1067,12 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
 
         {/* Sticky Bottom Bar – Message + Save + Share */}
         <View style={[styles.stickyBottomContainer, { backgroundColor: theme.background, borderTopColor: theme.border }]}>
-          {!isOwnPost && (
+          {!isOwnPost && sellerId && (house._id || house.id) && (
             <TouchableOpacity
               style={[styles.messageBtn, { backgroundColor: theme.accent }]}
               onPress={() => {
               // Build replyPost object just like in BuyPostScreen
-              const sellerId = house.user?._id || house.user;
+              if (!sellerId || !(house._id || house.id)) return;
               const replyPost = {
                 postId: String(house._id || house.id || ''),
                 contextType: 'post',
@@ -1091,6 +1107,7 @@ const PostDetailScreen = ({ route, navigation, language: appLanguage }) => {
                 sellerAvatar: sellerAvatar,
                 language: language,
                 replyPost: replyPost,
+                forceReplyPost: true,
               });
               }}
             >

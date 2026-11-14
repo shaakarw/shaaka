@@ -7,6 +7,7 @@ const Report = require('../models/Report');
 const MallShop = require('../models/MallShop');
 const storageService = require('../services/storage/storageService');
 const { isValidObjectId } = require('./objectId');
+const { removeUploadedMessageImages } = require('./chatImageRetention');
 
 function collectStorageKeys(urls) {
   const keys = [];
@@ -81,6 +82,7 @@ async function deleteMessagesForPost(postId) {
   if (!messages.length) return;
   const keys = messages.flatMap(getMessageStorageKeys);
   await Message.deleteMany({ postId: String(postId) });
+  await removeUploadedMessageImages(keys);
   await deleteStorageKeys(keys);
 }
 
@@ -176,6 +178,7 @@ async function deleteMallShopWithCleanup(shopId) {
 
   for (const postId of relatedPostIds) await deleteMessagesForPost(postId);
   await Message.deleteMany({ $or: [{ postId: String(shopId) }, { 'replyPost.postId': shopId }] });
+  await removeUploadedMessageImages(keys);
   await Post.deleteMany({ _id: { $in: relatedPostIds } });
   await Favorite.deleteMany({ shopId });
   await MallShop.findByIdAndDelete(shopId);

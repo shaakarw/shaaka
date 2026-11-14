@@ -4,7 +4,7 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "test": "node --test services/videoProcessing.test.js services/imageProcessing.test.js utils/storedImageUrl.test.js utils/smartSearch.test.js models/sqlModel.test.js controllers/postSearch.test.js",
+    "test": "node --test services/videoProcessing.test.js services/imageProcessing.test.js utils/storedImageUrl.test.js utils/smartSearch.test.js models/sqlModel.test.js controllers/postSearch.test.js controllers/messageController.test.js",
     "start": "node server.js",
     "dev": "nodemon server.js"
   },

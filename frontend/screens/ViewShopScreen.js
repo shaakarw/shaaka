@@ -150,23 +150,25 @@ export default function ViewShopScreen({ route, navigation }) {
   const [addProductSheetVisible, setAddProductSheetVisible] = useState(false);
 
   const getProductLimit = useCallback(() => {
-    const rawLimit = Number(currentUser?.mallProductUploadLimitPerDay ?? currentUser?.productUploadLimitPerDay ?? 1);
-    if (!Number.isFinite(rawLimit) || rawLimit <= 0) return 1;
-    return rawLimit;
+    const rawLimit = currentUser?.mallProductUploadLimitPerDay;
+    return Number.isSafeInteger(rawLimit) && rawLimit >= 0 ? rawLimit : 4;
   }, [currentUser]);
 
+  const getRemainingProducts = useCallback(() => {
+    const remaining = currentUser?.remainingMallProducts;
+    return Number.isSafeInteger(remaining) && remaining >= 0 ? remaining : getProductLimit();
+  }, [currentUser, getProductLimit]);
+
   const canAddMoreProducts = useCallback(() => {
-    const limit = getProductLimit();
-    const currentProducts = Array.isArray(shop?.products) ? shop.products.length : 0;
-    return currentProducts < limit;
-  }, [getProductLimit, shop]);
+    return getRemainingProducts() > 0;
+  }, [getRemainingProducts]);
 
   const openAddProductSheet = () => {
     if (!canAddMoreProducts()) {
       const limit = getProductLimit();
       showStatusModal({
         title: 'Product limit reached',
-        message: `You have reached your daily product limit for shops. You can add up to ${limit} product${limit === 1 ? '' : 's'} today.`,
+        message: `You have reached your daily product limit for shops. The daily limit is ${limit} product${limit === 1 ? '' : 's'}.`,
         type: 'info',
       });
       return;
@@ -294,7 +296,7 @@ export default function ViewShopScreen({ route, navigation }) {
         setCurrentUser(cachedUser);
         return;
       }
-      const response = await axios.get(`${BASE_URL}/api/auth/me`, {
+      const response = await axios.get(`${BASE_URL}/api/users/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (response.data.success) {
@@ -465,7 +467,7 @@ export default function ViewShopScreen({ route, navigation }) {
       : ownerRef;
     const sellerName = owner?.name || owner?.username || shop.ownerName || 'Shop owner';
     const sellerPhone = owner?.phone || shop.phone || '';
-    const contextId = shop?._id || shopId || `shop_${shop?.name || 'shop'}`;
+    const contextId = shop?._id || shop?.id || shopId;
     const frontImage = shop?.images?.frontImage || shop?.images?.front || '';
     const shopImage = typeof frontImage === 'string'
       ? frontImage
@@ -490,8 +492,12 @@ export default function ViewShopScreen({ route, navigation }) {
       timestamp: shop?.createdDate || new Date().toISOString(),
     };
 
-    if (!sellerId) {
+    if (!sellerId || !contextId) {
       showStatusModal({ title: 'Error', message: 'Owner information is not available yet.', type: 'error' });
+      return;
+    }
+    if (String(sellerId) === String(currentUser?._id || currentUser?.id || '')) {
+      showStatusModal({ title: 'Error', message: 'You cannot message yourself.', type: 'error' });
       return;
     }
 
@@ -503,6 +509,7 @@ export default function ViewShopScreen({ route, navigation }) {
       postTitle: shop.name || 'Shop',
       sellerAvatar: owner?.avatar || '',
       replyPost,
+      forceReplyPost: true,
     });
   };
 
@@ -614,11 +621,11 @@ export default function ViewShopScreen({ route, navigation }) {
       return;
     }
 
-    const limit = getProductLimit();
-    if ((Array.isArray(shop?.products) ? shop.products.length : 0) >= limit) {
+    if (getRemainingProducts() <= 0) {
+      const limit = getProductLimit();
       showStatusModal({
         title: 'Product limit reached',
-        message: `You have reached your daily product limit for shops. You can add up to ${limit} product${limit === 1 ? '' : 's'} today.`,
+        message: `You have reached your daily product limit for shops. The daily limit is ${limit} product${limit === 1 ? '' : 's'}.`,
         type: 'info',
       });
       return;
@@ -677,6 +684,7 @@ export default function ViewShopScreen({ route, navigation }) {
         closeAddProductSheet();
         showStatusModal({ title: 'Success', message: 'Product added successfully!', type: 'success' });
         setNewProduct({ name: '', price: '', images: [] });
+        await fetchCurrentUser();
       } else {
         throw new Error(response.data.message || 'Failed to add product');
       }

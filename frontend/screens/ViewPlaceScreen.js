@@ -416,23 +416,25 @@ export default function ViewPlaceScreen({ route, navigation }) {
 
   // ---- Sheet open/close helpers ----
   const getProductLimit = useCallback(() => {
-    const rawLimit = Number(currentUser?.placeProductUploadLimitPerDay ?? currentUser?.productUploadLimitPerDay ?? 1);
-    if (!Number.isFinite(rawLimit) || rawLimit <= 0) return 1;
-    return rawLimit;
+    const rawLimit = currentUser?.placeProductUploadLimitPerDay;
+    return Number.isSafeInteger(rawLimit) && rawLimit >= 0 ? rawLimit : 4;
   }, [currentUser]);
 
+  const getRemainingProducts = useCallback(() => {
+    const remaining = currentUser?.remainingPlaceProducts;
+    return Number.isSafeInteger(remaining) && remaining >= 0 ? remaining : getProductLimit();
+  }, [currentUser, getProductLimit]);
+
   const canAddMoreProducts = useCallback(() => {
-    const limit = getProductLimit();
-    const currentProducts = Array.isArray(place?.products) ? place.products.length : 0;
-    return currentProducts < limit;
-  }, [getProductLimit, place]);
+    return getRemainingProducts() > 0;
+  }, [getRemainingProducts]);
 
   const openAddProductSheet = () => {
     if (!canAddMoreProducts()) {
       const limit = getProductLimit();
       showMapMessage(
         'Product limit reached',
-        `You have reached your daily product limit for places. You can add up to ${limit} product${limit === 1 ? '' : 's'} today.`,
+        `You have reached your daily product limit for places. The daily limit is ${limit} product${limit === 1 ? '' : 's'}.`,
         'info'
       );
       return;
@@ -808,7 +810,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
       : ownerRef;
     const ownerName = ownerData?.username || ownerData?.name || place?.ownerName || 'Place owner';
     const ownerPhone = ownerData?.phone || place?.phone || '';
-    const contextId = place?.id || place?._id || place?.placeId || `place_${place?.name || 'place'}`;
+    const contextId = place?.id || place?._id || place?.placeId;
     const placeMedia = placeHeaderMediaUrl;
     const videoThumbnail = typeof place?.videoThumbnail === 'string'
       ? place.videoThumbnail
@@ -836,8 +838,12 @@ export default function ViewPlaceScreen({ route, navigation }) {
       timestamp: place?.createdAt || new Date().toISOString(),
     };
 
-    if (!ownerId) {
+    if (!ownerId || !contextId) {
       showMapMessage('Error', 'Owner information is not available yet.', 'error');
+      return;
+    }
+    if (String(ownerId) === String(currentUser?._id || currentUser?.id || '')) {
+      showMapMessage('Error', 'You cannot message yourself.', 'error');
       return;
     }
 
@@ -849,6 +855,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
       postTitle: place?.name || 'Place',
       sellerAvatar: ownerData?.avatar || ownerData?.userAvatar || '',
       replyPost,
+      forceReplyPost: true,
     });
   };
 
@@ -956,11 +963,11 @@ export default function ViewPlaceScreen({ route, navigation }) {
       return;
     }
 
-    const limit = getProductLimit();
-    if ((Array.isArray(place?.products) ? place.products.length : 0) >= limit) {
+    if (getRemainingProducts() <= 0) {
+      const limit = getProductLimit();
       showMapMessage(
         'Product limit reached',
-        `You have reached your daily product limit for places. You can add up to ${limit} product${limit === 1 ? '' : 's'} today.`,
+        `You have reached your daily product limit for places. The daily limit is ${limit} product${limit === 1 ? '' : 's'}.`,
         'info'
       );
       return;
@@ -1013,6 +1020,7 @@ export default function ViewPlaceScreen({ route, navigation }) {
         if (response.data.place) {
           navigation.setParams({ place: response.data.place });
         }
+        await fetchCurrentUser();
         setProductImages([]);
         setNewProduct({ name: '', price: '' });
         showMapMessage('Success', 'Product added to the place.', 'success');

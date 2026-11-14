@@ -355,26 +355,30 @@ const LoginScreen = ({ navigation, language = 'English' }) => {
               )}
             </TouchableOpacity>
 
-            <View style={styles.registerContainer}>
+            <View style={styles.registerContainer}
+           
+            >
               <Text style={[styles.registerText, { color: theme.textSecondary }]}>
                 {t.noAccount}
               </Text>
               <TouchableOpacity
-                ref={signUpLinkRef}
+                 ref={signUpLinkRef}
                 onPress={() => navigation.navigate('Register')}
               >
                 <Text style={[styles.registerLink, { color: theme.text }]}> {t.signUp}</Text>
               </TouchableOpacity>
             </View>
 
-            <View style={styles.resetContainer}>
+            <View style={styles.resetContainer}
+           >
               <Text style={[styles.resetText, { color: theme.textSecondary }]}>
                 {t.resetText}
               </Text>
               <TouchableOpacity
-                ref={forgotLinkRef}
+                 ref={forgotLinkRef}
                 onPress={() => navigation.navigate('ForgotPassword')}
               >
+              
                 <Text style={[styles.forgotPassword, { color: theme.text }]}>
                   {t.forgot}
                 </Text>

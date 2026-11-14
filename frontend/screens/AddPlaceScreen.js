@@ -22,7 +22,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../context/ThemeContext';
-import { useAuth, useUserLimits } from '../context/AuthContext';
+import { useAuth } from '../context/AuthContext';
 import { useBottomSheet } from '../context/BottomSheetContext';
 import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
 import { WebView } from 'react-native-webview';
@@ -112,7 +112,7 @@ const translations = {
     loginRequired: 'You must be logged in to publish.',
     publishFailed: 'Failed to publish. Please try again.',
     limitReached: 'Limit Reached',
-    limitMessage: 'You already have a place registered. You can only add one place per account.\n\nIf you want to change your place, please delete the existing one first.',
+    limitMessage: 'You have reached the lifetime limit for shops and places on this account. Contact an administrator if you need a different limit.',
     existingBusinessTitle: 'Shop Already Added',
     existingBusinessMessage: 'You already have a shop or place on the map. Delete your existing shop first, or contact the Shaaka owner for help.',
     permissionDenied: 'Permission Denied',
@@ -218,7 +218,7 @@ const translations = {
     loginRequired: 'Ugomba kwinjira kugira ngo utangaze.',
     publishFailed: 'Kutanga byanze. Ongera ugerageze.',
     limitReached: 'Imipaka yagezweho',
-    limitMessage: 'Ufite ahantu hamaze kwandikwa. Ushobora kongeramo ahantu hamwe gusa kuri konti imwe.\n\nNiba ushaka guhindura, siba aha hantu mbere.',
+    limitMessage: 'Wageze ku mupaka w\'ahantu n\'amaduka yemerewe kuri konti yawe. Vugana n\'umuyobozi niba ukeneye guhindurirwa umubare.',
     existingBusinessTitle: 'Wamaze kongeraho iduka',
     existingBusinessMessage: 'Usanzwe ufite iduka cyangwa ahantu ku ikarita. Banza usibe iduka risanzweho cyangwa ubaze nyiri Shaaka agufashe.',
     permissionDenied: 'Uruhushya rwabaye impamvu',
@@ -352,7 +352,6 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
   const isFocused = useIsFocused();
   const { showBottomSheet } = useBottomSheet();
   const { refreshUser } = useAuth();
-  const adminLimits = useUserLimits();
   const t = translations[language] || translations.English;
 
   const showMapMessage = (title, message, type = 'info', buttonAction) => {
@@ -543,24 +542,19 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
         const token = await getAuthToken('userToken');
         if (!token) return;
         const headers = { Authorization: `Bearer ${token}` };
-        const [placesResponse, shopsResponse] = await Promise.all([
-          axios.get(`${BASE_URL}/api/places`, { headers }),
-          axios.get(`${BASE_URL}/api/mall-shops/mine`, { headers }),
-        ]);
+        const permissionsResponse = await axios.get(`${BASE_URL}/api/user/me`, { headers });
         if (!isActive) return;
-
-        const hasPlace = (placesResponse.data.places || []).some(place => {
-          const owner = place.userId || place.owner || place.ownerId;
-          const ownerId = typeof owner === 'object' ? owner?._id || owner?.id : owner;
-          return String(ownerId) === String(currentUser._id);
-        });
-        const hasMallShop = (shopsResponse.data.shops || []).length > 0;
-        if (!hasPlace && !hasMallShop) return;
+        if (!permissionsResponse.data?.success) return;
+        const user = permissionsResponse.data.user;
+        setCurrentUser(user);
+        const hasPlaceLimitReached = user.remainingPlaces <= 0;
+        const hasMallShop = user.mallShopsUsed > 0;
+        if (!hasPlaceLimitReached && !hasMallShop) return;
 
         showBottomSheet({
           type: 'info',
           title: t.existingBusinessTitle,
-          message: t.existingBusinessMessage,
+          message: hasMallShop ? t.existingBusinessMessage : t.limitMessage,
           icon: 'storefront-outline',
           buttonText: 'OK',
         });
@@ -574,7 +568,7 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
     return () => {
       isActive = false;
     };
-  }, [currentUser?._id, loadingUser, navigation, showBottomSheet, t.existingBusinessMessage, t.existingBusinessTitle]));
+  }, [currentUser?._id, loadingUser, navigation, showBottomSheet, t.existingBusinessMessage, t.existingBusinessTitle, t.limitMessage]));
 
   // ----- Send existing markers to map -----
   useEffect(() => {
@@ -916,24 +910,32 @@ export default function AddPlaceScreen({ navigation, route, language = 'English'
       const token = await getAuthToken('userToken');
       if (!token) { showMapMessage(t.error, t.loginRequired, 'error'); setPublishing(false); return; }
       
-      const mallShopsRes = await axios.get(`${BASE_URL}/api/mall-shops/mine`, {
+      const permissionsRes = await axios.get(`${BASE_URL}/api/user/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const allMallShops = mallShopsRes.data.shops || [];
-      const userMallShops = allMallShops.filter(s => {
-        const ownerId = s.ownerId?._id || s.ownerId;
-        return ownerId === currentUser?._id;
-      });
-      if (userMallShops.length > 0) {
+      const permissionUser = permissionsRes.data?.user;
+      if (!permissionUser) throw new Error('Could not load your current permissions.');
+      setCurrentUser(permissionUser);
+      if (permissionUser.mallShopsUsed > 0) {
         showMapMessage(t.limitReached, 'You already have a Shopping Mall Shop. You cannot add a Shop/Place.', 'info');
         setPublishing(false);
         return;
       }
 
-      const userPlacesResponse = await axios.get(`${BASE_URL}/api/places`, { headers: { Authorization: `Bearer ${token}` } });
-      const allPlaces = userPlacesResponse.data.places || [];
-      const userPlaces = allPlaces.filter(p => p.userId === currentUser?._id);
-      if (userPlaces.length > 0) { showMapMessage(t.limitReached, t.limitMessage, 'info'); setPublishing(false); return; }
+      if (!isShoppingMall && permissionUser.remainingPlaces <= 0) {
+        showMapMessage(t.limitReached, t.limitMessage, 'info');
+        setPublishing(false);
+        return;
+      }
+      if (!isShoppingMall && products.length > permissionUser.remainingPlaceProducts) {
+        showMapMessage(
+          t.limitReached,
+          `You can add up to ${permissionUser.remainingPlaceProducts} more place product(s) today.`,
+          'info'
+        );
+        setPublishing(false);
+        return;
+      }
 
       let streetImageUrl = null;
       let streetImageVariant = null;

@@ -9,6 +9,7 @@ const { deletePostWithCleanup } = require('../utils/deletionCleanup');
 const { normalizeRwandaPhone, isValidRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
 const { getClient } = require('../config/db');
+const { DEFAULT_USER_PERMISSIONS } = require('../config/userPermissions');
 const {
   normalizeSearchText,
   expandSearchTerms,
@@ -20,9 +21,14 @@ const {
 // ----- Import subscription helpers -----
 const {
   computeAggregatedLimits,
-  getTodayUsageFromDB,
   MAX_IMAGES_PER_POST,
 } = require('../utils/subscriptionHelpers_clean');
+const {
+  getDailyUsage,
+  getNextDailyReset,
+  reserveDailyUsage,
+  releaseDailyUsage,
+} = require('../utils/permissionUsage');
 
 const encodePostCursor = post => {
   const createdAt = new Date(post.createdAt);
@@ -51,6 +57,8 @@ const decodePostCursor = value => {
 // @desc    Create a new post (enforces total, cooldown, daily, and lifetime limits)
 exports.createPost = async (req, res) => {
   const uploadedStorageKeys = [];
+  const usageReservations = [];
+  const quotaRequestTime = new Date();
   try {
     const userId = req.user.id;
     const user = await User.findById(userId).select('phone username avatar avatarVariants paymentHistory postUploadLimitPerDay allowVideoUpload videoUploadLimitPerDay');
@@ -64,15 +72,15 @@ exports.createPost = async (req, res) => {
     console.log('User limits:', limits);
 
     // ----- 2. Get today's usage (posts & images) from DB -----
-    const todayUsage = await getTodayUsageFromDB(Post, userId);
-    console.log('Today usage:', todayUsage);
+    const postsToday = await getDailyUsage(userId, 'posts', quotaRequestTime);
 
     // ----- 3. Check daily post limit (admin override respected via computeAggregatedLimits) -----
-    const remainingPosts = limits.postsPerDay - todayUsage.postsUsed;
+    const remainingPosts = limits.postsPerDay - postsToday;
     if (remainingPosts <= 0) {
       return res.status(403).json({
         success: false,
         message: 'Daily post limit reached.',
+        resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
       });
     }
 
@@ -80,30 +88,23 @@ exports.createPost = async (req, res) => {
     const videoFile = req.files?.video?.[0];
 
     if (videoFile) {
-      if (user.allowVideoUpload !== true) {
+      if (user.allowVideoUpload === false) {
         return res.status(403).json({
           success: false,
           message: 'Video uploads are not enabled for this account.',
         });
       }
 
-      const videoLimit = typeof user.videoUploadLimitPerDay === 'number'
+      const videoLimit = Number.isSafeInteger(user.videoUploadLimitPerDay)
         ? Math.max(0, user.videoUploadLimitPerDay)
-        : 0;
-      const startOfDay = new Date();
-      startOfDay.setHours(0, 0, 0, 0);
-      const startOfTomorrow = new Date(startOfDay);
-      startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
-      const videosToday = await Post.countDocuments({
-        user: userId,
-        videoUrl: { $exists: true, $ne: '' },
-        createdAt: { $gte: startOfDay, $lt: startOfTomorrow },
-      });
+        : DEFAULT_USER_PERMISSIONS.videoUploadLimitPerDay;
+      const videosToday = await getDailyUsage(userId, 'videos', quotaRequestTime);
 
       if (videoLimit <= 0 || videosToday >= videoLimit) {
         return res.status(403).json({
           success: false,
           message: 'Daily video upload limit reached.',
+          resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
         });
       }
     }
@@ -162,12 +163,12 @@ exports.createPost = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please attach at least one image or video to create a post.' });
     }
     const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
-    const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
+    const MAX_VIDEO_BYTES = 80 * 1024 * 1024;
     if (imageFiles.some(file => !file.buffer || file.buffer.length > MAX_IMAGE_BYTES)) {
       return res.status(400).json({ success: false, message: 'One or more images exceed the 3 MB size limit.' });
     }
     if (videoFile && (!videoFile.buffer || videoFile.buffer.length > MAX_VIDEO_BYTES)) {
-      return res.status(400).json({ success: false, message: 'Video exceeds the 50 MB size limit.' });
+      return res.status(400).json({ success: false, message: 'Video exceeds the 80 MB size limit.' });
     }
 
     if (imageFiles.length > MAX_IMAGES_PER_POST) {
@@ -175,6 +176,42 @@ exports.createPost = async (req, res) => {
         success: false,
         message: `You can only upload up to ${MAX_IMAGES_PER_POST} images per post.`,
       });
+    }
+
+    const postReserved = await reserveDailyUsage(
+      userId,
+      'posts',
+      1,
+      limits.postsPerDay,
+      quotaRequestTime
+    );
+    if (!postReserved) {
+      return res.status(403).json({
+        success: false,
+        message: 'Daily post limit reached.',
+        resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
+      });
+    }
+    usageReservations.push({ key: 'posts', amount: 1 });
+
+    if (videoFile) {
+      const videoReserved = await reserveDailyUsage(
+        userId,
+        'videos',
+        1,
+        user.videoUploadLimitPerDay,
+        quotaRequestTime
+      );
+      if (!videoReserved) {
+        await releaseDailyUsage(userId, 'posts', 1, quotaRequestTime);
+        usageReservations.pop();
+        return res.status(403).json({
+          success: false,
+          message: 'Daily video upload limit reached.',
+          resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
+        });
+      }
+      usageReservations.push({ key: 'videos', amount: 1 });
     }
 
     if (videoFile) {
@@ -194,6 +231,9 @@ exports.createPost = async (req, res) => {
       const error = new Error('Video duration could not be determined. Please select a valid video.');
       error.statusCode = 422;
       throw error;
+    }
+    if (videoProcessingResult?.wasTrimmed) {
+      console.info('[Post] Video was automatically trimmed to 2 minutes.');
     }
 
     // ---------- 7. Handle image uploads ----------
@@ -227,8 +267,8 @@ exports.createPost = async (req, res) => {
     const uploadedVideoDuration = videoProcessingResult?.duration ?? 0;
     if (videoFile) {
       const videoResult = await storageService.uploadMedia({
-        buffer: videoFile.buffer,
-        mimeType: videoFile.mimetype,
+        buffer: videoProcessingResult.videoBuffer,
+        mimeType: videoProcessingResult.mimeType || videoFile.mimetype,
         folder: `posts/${postId}/videos`,
         maxBytes: MAX_VIDEO_BYTES,
       });
@@ -300,6 +340,7 @@ exports.createPost = async (req, res) => {
       console.error('[Post] Database insertion failed:', error.message);
       throw error;
     }
+    usageReservations.length = 0;
     uploadedStorageKeys.length = 0;
     console.info('[Post] Database insertion completed.', {
       postId: String(post._id),
@@ -320,6 +361,11 @@ exports.createPost = async (req, res) => {
 
     res.status(201).json({ success: true, post });
   } catch (error) {
+    await Promise.all(usageReservations.map(({ key, amount }) => (
+      releaseDailyUsage(req.user.id, key, amount, quotaRequestTime).catch(releaseError => {
+        console.error('[Permissions] Could not release failed post quota:', releaseError.code || releaseError.message);
+      })
+    )));
     await Promise.all(uploadedStorageKeys.map(key => storageService.deleteMedia(key).catch(deleteError => {
       console.error('[Storage] Failed to clean up an unsaved post upload:', deleteError.code || 'B2_OPERATION_FAILED');
     })));

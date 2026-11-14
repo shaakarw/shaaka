@@ -2,12 +2,22 @@
 const Message = require('../models/Message');
 const User = require('../models/User');
 const Post = require('../models/Post');
+const Shop = require('../models/Shop');
+const Place = require('../models/Place');
+const MallShop = require('../models/MallShop');
+const { Conversation } = require('../models/registry');
 const storageService = require('../services/storage/storageService');
 const { computeAggregatedLimits } = require('../utils/subscriptionHelpers_clean');
 const socketHelper = require('../socket');
 const { notifyUser } = require('../services/notificationService');
 const { isValidObjectId } = require('../utils/objectId');
 const { getMessageStorageKeys } = require('../utils/deletionCleanup');
+const { DEFAULT_USER_PERMISSIONS } = require('../config/userPermissions');
+const {
+  attachMessageImages,
+  recordUploadedMessageImages,
+  removeUploadedMessageImages,
+} = require('../utils/chatImageRetention');
 
 const privateMediaUrl = (key, req) => key
   ? storageService.getMediaUrl(key, { origin: storageService.getRequestOrigin(req), isPrivate: true })
@@ -55,16 +65,45 @@ const getTodayRange = () => {
   return { start, end };
 };
 
+const getReferenceId = value => String(value?._id || value?.id || value || '').trim();
+
+const findUserByIdentifier = async identifier => {
+  const id = getReferenceId(identifier);
+  if (!id) return null;
+  return (isValidObjectId(id) ? await User.findById(id) : null)
+    || await User.findOne({ phone: id })
+    || await User.findOne({ username: id.toLowerCase() });
+};
+
+const getConversationId = (userA, userB, contextType, contextId) => {
+  const participants = [String(userA), String(userB)].sort();
+  return `conversation:${participants.join(':')}:${contextType}:${contextId || 'direct'}`;
+};
+
+const getContextOwnerId = context => getReferenceId(
+  context?.user
+  || context?.userId
+  || context?.ownerId
+  || context?.owner
+);
+
 // Send message
 exports.sendMessage = async (req, res) => {
   const uploadedStorageKeys = [];
+  let canonicalReceiverId = '';
   try {
     const senderId = String(req.user?._id || req.user?.id || '');
     if (!senderId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-    const receiverId = String(req.body.receiverId || '').trim();
-    if (!receiverId) return res.status(400).json({ success: false, message: 'Receiver is required' });
-    if (receiverId === senderId) return res.status(400).json({ success: false, message: 'You cannot message yourself' });
+    const requestedReceiverId = String(req.body.receiverId || '').trim();
+    if (!requestedReceiverId) return res.status(400).json({ success: false, message: 'Receiver is required' });
+    const receiverUser = await findUserByIdentifier(requestedReceiverId);
+    if (!receiverUser) return res.status(404).json({ success: false, message: 'Receiver not found' });
+    const receiverId = String(receiverUser._id || receiverUser.id || '');
+    canonicalReceiverId = receiverId;
+    if (!receiverId || receiverId === senderId) {
+      return res.status(400).json({ success: false, message: 'You cannot message yourself' });
+    }
 
     const clientMessageId = String(req.body.clientMessageId || '').trim();
     if (clientMessageId) {
@@ -77,6 +116,66 @@ exports.sendMessage = async (req, res) => {
           return res.status(409).json({ success: false, message: 'Message ID is already in use' });
         }
         return res.status(200).json({ success: true, message: refreshMessageMediaUrls(existingMessage, req), idempotent: true });
+      }
+    }
+
+    let replyPost = req.body.replyPost;
+    if (replyPost && typeof replyPost === 'string') {
+      try {
+        replyPost = JSON.parse(replyPost);
+      } catch {
+        return res.status(400).json({ success: false, message: 'Post context must be valid JSON' });
+      }
+    }
+    if (replyPost && (typeof replyPost !== 'object' || Array.isArray(replyPost))) {
+      return res.status(400).json({ success: false, message: 'Post context is invalid' });
+    }
+
+    const contextId = String(
+      replyPost?.contextId || replyPost?.postId || req.body.postId || ''
+    ).trim();
+    if (replyPost && !contextId) {
+      return res.status(400).json({ success: false, message: 'Post context ID is required' });
+    }
+    let contextType = replyPost?.contextType || '';
+    let existingContextMessage = null;
+    let contextRecord = null;
+
+    if (contextId) {
+      existingContextMessage = await Message.findOne({
+        postId: contextId,
+        $or: [
+          { senderId, receiverId },
+          { senderId: receiverId, receiverId: senderId },
+        ],
+      }).sort({ createdAt: -1, _id: -1 });
+      contextType = contextType || existingContextMessage?.replyPost?.contextType || 'post';
+      if (!['post', 'shop', 'place'].includes(contextType)) {
+        return res.status(400).json({ success: false, message: 'Unsupported conversation context' });
+      }
+      if (!isValidObjectId(contextId)) {
+        return res.status(400).json({ success: false, message: 'Invalid conversation context ID' });
+      }
+
+      if (contextType === 'post') {
+        contextRecord = await Post.findById(contextId);
+      } else if (contextType === 'place') {
+        contextRecord = await Place.findById(contextId);
+      } else {
+        contextRecord = await MallShop.findById(contextId) || await Shop.findById(contextId);
+      }
+
+      if (!contextRecord && !existingContextMessage) {
+        return res.status(404).json({ success: false, message: 'Conversation context not found' });
+      }
+      if (contextRecord) {
+        const ownerId = getContextOwnerId(contextRecord);
+        if (!ownerId) {
+          return res.status(409).json({ success: false, message: 'Conversation context owner is unavailable' });
+        }
+        if (ownerId !== senderId && ownerId !== receiverId) {
+          return res.status(403).json({ success: false, message: 'The context owner must be a conversation participant' });
+        }
       }
     }
 
@@ -112,67 +211,69 @@ exports.sendMessage = async (req, res) => {
       try { repliedTo = JSON.parse(repliedTo); } catch { repliedTo = null; }
     }
 
-    let replyPost = req.body.replyPost;
-    if (replyPost && typeof replyPost === 'string') {
-      try { replyPost = JSON.parse(replyPost); } catch { replyPost = null; }
-    }
-
     const requestedImageUrls = Array.isArray(req.body.imageUrls) ? req.body.imageUrls : [];
     const submittedImageUrls = [...new Set([req.body.imageUrl, ...requestedImageUrls]
       .filter(url => typeof url === 'string' && url.trim())
       .map(url => url.trim()))];
 
     let replyPostData = null;
-    if (replyPost && replyPost.postId) {
-      const contextType = replyPost.contextType || 'post';
-      const postExists = contextType === 'post' && isValidObjectId(String(replyPost.postId))
-        ? await Post.findById(replyPost.postId)
-        : null;
+    if (replyPost && contextId) {
+      const contextSnapshot = contextRecord || existingContextMessage?.replyPost || {};
+      const postExists = contextType === 'post' ? contextRecord : null;
+      const contextImages = contextSnapshot.houseImages
+        || contextSnapshot.images
+        || (Array.isArray(contextSnapshot.image) ? contextSnapshot.image : []);
+      const contextImage = contextSnapshot.image
+        || contextSnapshot.houseImages?.[0]
+        || contextSnapshot.images?.frontImage
+        || contextSnapshot.images?.front
+        || contextSnapshot.images?.streetImage
+        || contextSnapshot.images?.street
+        || '';
       replyPostData = {
-        postId: replyPost.postId,
-        contextId: replyPost.contextId || '',
+        ...replyPost,
+        postId: contextId,
+        contextId,
         contextType,
-        shopId: replyPost.shopId || (contextType === 'shop' ? replyPost.contextId || replyPost.postId : ''),
+        shopId: contextType === 'shop' ? contextId : (replyPost.shopId || ''),
         mallId: replyPost.mallId || '',
         lat: replyPost.lat ?? null,
         lon: replyPost.lon ?? null,
-        title: replyPost.title || postExists?.productName || 'Product',
-        description: replyPost.description || postExists?.description || '',
-        image: replyPost.image || postExists?.houseImages?.[0] || '',
-        price: replyPost.price ?? postExists?.price ?? null,
-        amount: replyPost.amount || postExists?.amount || '',
-        location: replyPost.location || postExists?.location || '',
-        category: replyPost.category || postExists?.category || '',
-        bedrooms: replyPost.bedrooms ?? postExists?.bedrooms ?? null,
-        bathrooms: replyPost.bathrooms ?? postExists?.bathrooms ?? null,
-        size: replyPost.size ?? postExists?.size ?? null,
-        priceNegotiable: replyPost.priceNegotiable ?? postExists?.priceNegotiable ?? false,
-        contactNumbers: replyPost.contactNumbers || postExists?.contactNumbers || [],
-        houseImages: replyPost.houseImages || postExists?.houseImages || [],
-        videoUrl: replyPost.videoUrl || postExists?.videoUrl || '',
-        videoThumbnail: replyPost.videoThumbnail || postExists?.videoThumbnail || '',
-        username: replyPost.username || postExists?.username || '',
-        userAvatar: replyPost.userAvatar || postExists?.userAvatar || '',
-        ownerId: replyPost.ownerId || postExists?.user || null,
-        timestamp: replyPost.timestamp || postExists?.createdAt || new Date(),
-        available: contextType !== 'post' || !!postExists,
+        title: postExists?.productName || contextSnapshot.name || replyPost.title || 'Product',
+        description: contextSnapshot.description || replyPost.description || '',
+        image: postExists?.houseImages?.[0] || contextImage || replyPost.image || '',
+        price: postExists?.price ?? contextSnapshot.price ?? replyPost.price ?? null,
+        amount: contextSnapshot.amount || replyPost.amount || '',
+        location: contextSnapshot.location || replyPost.location || '',
+        category: contextSnapshot.category || replyPost.category || '',
+        bedrooms: postExists?.bedrooms ?? contextSnapshot.bedrooms ?? replyPost.bedrooms ?? null,
+        bathrooms: postExists?.bathrooms ?? contextSnapshot.bathrooms ?? replyPost.bathrooms ?? null,
+        size: postExists?.size ?? contextSnapshot.size ?? replyPost.size ?? null,
+        priceNegotiable: postExists?.priceNegotiable ?? contextSnapshot.priceNegotiable ?? replyPost.priceNegotiable ?? false,
+        contactNumbers: postExists?.contactNumbers || contextSnapshot.contactNumbers || replyPost.contactNumbers || [],
+        houseImages: postExists?.houseImages || contextImages,
+        videoUrl: postExists?.videoUrl || contextSnapshot.videoUrl || replyPost.videoUrl || '',
+        videoThumbnail: postExists?.videoThumbnail || contextSnapshot.videoThumbnail || replyPost.videoThumbnail || '',
+        username: receiverUser.username || receiverUser.name || contextSnapshot.username || replyPost.username || '',
+        userAvatar: receiverUser.avatar || contextSnapshot.userAvatar || replyPost.userAvatar || '',
+        ownerId: contextRecord ? getContextOwnerId(contextRecord) : (contextSnapshot.ownerId || null),
+        timestamp: contextSnapshot.createdAt || contextSnapshot.timestamp || replyPost.timestamp || new Date(),
+        available: !!contextRecord,
       };
     }
 
-    // ---- Enforce image active limit for messages with imageUrl (user-specific limit and retention) ----
+    // Image limits apply to one direct-message submission, not the user's total active images.
     if (submittedImageUrls.length) {
       const senderUser = await User.findById(senderId);
       if (!senderUser) return res.status(404).json({ success: false, message: 'Sender user not found' });
-
-      const MessageModel = require('../models/Message');
-      const retentionDays = typeof senderUser.imagesRetentionDays === 'number' ? senderUser.imagesRetentionDays : 5;
-      const cutoff = new Date();
-      cutoff.setDate(cutoff.getDate() - retentionDays);
-
-      const activeImageCount = await MessageModel.countDocuments({ senderId: senderId, imageUrl: { $exists: true, $ne: '' }, createdAt: { $gte: cutoff } });
-      const maxImagesPerMessage = typeof senderUser.imagesPerMessage === 'number' ? senderUser.imagesPerMessage : 10;
-      if (activeImageCount >= maxImagesPerMessage) {
-        return res.status(403).json({ success: false, message: `You have reached the maximum number of active images (${maxImagesPerMessage}). Please wait for some to expire.` });
+      const maxImagesPerMessage = Number.isSafeInteger(senderUser.imagesPerMessage)
+        ? senderUser.imagesPerMessage
+        : DEFAULT_USER_PERMISSIONS.imagesPerMessage;
+      if (submittedImageUrls.length > maxImagesPerMessage) {
+        return res.status(403).json({
+          success: false,
+          message: `You can attach up to ${maxImagesPerMessage} images per message.`,
+        });
       }
     }
 
@@ -197,17 +298,25 @@ exports.sendMessage = async (req, res) => {
     uploadedStorageKeys.push(...imageStorageKeys.filter(Boolean));
     const videoUrl = videoUrlFromFile || req.body.videoUrl || '';
 
-    const messageData = {
-      postId: req.body.postId || '',
-      postTitle: req.body.postTitle,
-      postUser: req.body.postUser,
+    const conversationId = getConversationId(
       senderId,
-      senderName: req.body.senderName,
-      senderPhone: req.body.senderPhone,
-      senderAvatar: req.body.senderAvatar,
-      receiverId: req.body.receiverId,
-      receiverName: req.body.receiverName,
-      receiverPhone: req.body.receiverPhone,
+      receiverId,
+      contextId ? contextType : 'direct',
+      contextId
+    );
+    const messageData = {
+      conversationId,
+      contextType: contextId ? contextType : 'direct',
+      postId: contextId,
+      postTitle: req.body.postTitle,
+      postUser: receiverUser.username || receiverUser.name || '',
+      senderId,
+      senderName: req.user.username || req.user.name || '',
+      senderPhone: req.user.phone || '',
+      senderAvatar: req.user.avatar || '',
+      receiverId,
+      receiverName: receiverUser.username || receiverUser.name || '',
+      receiverPhone: receiverUser.phone || '',
       clientMessageId: clientMessageId || undefined,
       text: req.body.text || '',
       imageUrl,
@@ -225,7 +334,37 @@ exports.sendMessage = async (req, res) => {
     };
 
     const message = new Message(messageData);
+    const participants = [senderId, receiverId].sort();
+    const existingConversation = await Conversation.findById(conversationId);
+    if (existingConversation) {
+      const savedParticipants = [
+        String(existingConversation.userAId || ''),
+        String(existingConversation.userBId || ''),
+      ].sort();
+      if (savedParticipants[0] !== participants[0] || savedParticipants[1] !== participants[1]) {
+        const error = new Error('Conversation ID does not match its participants');
+        error.statusCode = 409;
+        throw error;
+      }
+      existingConversation.updatedAt = new Date().toISOString();
+      await existingConversation.save();
+    } else {
+      await Conversation.create({
+        _id: conversationId,
+        userAId: participants[0],
+        userBId: participants[1],
+        contextType: contextId ? contextType : 'direct',
+        contextId,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
     await message.save();
+    try {
+      await attachMessageImages(senderId, message._id, imageStorageKeys);
+    } catch (trackingError) {
+      console.error('[Retention] Could not associate uploaded chat images with the message:', trackingError.code || trackingError.message);
+    }
     uploadedStorageKeys.length = 0;
 
     const messageReceiverId = String(message.receiverId || '');
@@ -234,7 +373,7 @@ exports.sendMessage = async (req, res) => {
       : null;
     const io = socketHelper.getIO();
     if (io && room) {
-      const chatId = message.postId || `direct_${[String(message.senderId), messageReceiverId].sort().join('_')}`;
+      const chatId = message.conversationId;
       io.to(room).emit('new-message', {
         chatId: String(chatId),
         senderId: String(message.senderId),
@@ -244,6 +383,12 @@ exports.sendMessage = async (req, res) => {
     }
 
     try {
+      const replyPostId = message.replyPost?.contextType === 'post'
+        ? (message.replyPost.postId || message.postId)
+        : '';
+      const replyPost = replyPostId && isValidObjectId(String(replyPostId))
+        ? await Post.findById(replyPostId)
+        : null;
       await notifyUser({
         userId: message.receiverId,
         actorId: message.senderId,
@@ -255,7 +400,8 @@ exports.sendMessage = async (req, res) => {
         image: req.user?.avatar || '',
         eventKey: `message:${message._id}`,
         messageId: message._id,
-        conversationId: room || '',
+        ...(replyPost ? { postId: String(replyPost._id) } : {}),
+        conversationId: message.conversationId,
         destination: 'Chat',
         destinationParams: {
           sellerId: String(message.senderId),
@@ -263,7 +409,10 @@ exports.sendMessage = async (req, res) => {
           sellerPhone: req.user?.phone || '',
           sellerAvatar: req.user?.avatar || '',
           postId: message.postId || '',
-          postTitle: message.postTitle || '',
+          postTitle: message.postTitle || replyPost?.productName || message.replyPost?.title || '',
+          conversationId: message.conversationId,
+          contextType: message.contextType,
+          replyPost: message.replyPost || null,
         },
       });
     } catch (notificationError) {
@@ -280,6 +429,23 @@ exports.sendMessage = async (req, res) => {
     await Promise.all(uploadedStorageKeys.map(key => storageService.deleteMedia(key).catch(deleteError => {
       console.error('[Storage] Failed to clean up an unsaved message upload:', deleteError.code || 'B2_OPERATION_FAILED');
     })));
+    await removeUploadedMessageImages(uploadedStorageKeys).catch(trackingError => {
+      console.error('[Retention] Could not remove failed chat image tracking records:', trackingError.code || trackingError.message);
+    });
+    if ((error.code === 11000 || /UNIQUE constraint|SQLITE_CONSTRAINT/i.test(error.message || '')) && req.body.clientMessageId) {
+      const existingMessage = await Message.findOne({ clientMessageId: String(req.body.clientMessageId).trim() });
+      if (
+        existingMessage
+        && String(existingMessage.senderId) === String(req.user?._id || req.user?.id || '')
+        && String(existingMessage.receiverId || '') === canonicalReceiverId
+      ) {
+        return res.status(200).json({
+          success: true,
+          message: refreshMessageMediaUrls(existingMessage, req),
+          idempotent: true,
+        });
+      }
+    }
     console.error('Send message error:', error.code || error.message || 'Unknown error');
     res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Server error' });
   }
@@ -292,6 +458,21 @@ exports.getMessages = async (req, res) => {
     const firstUser = String(userId1 || '').trim();
     const secondUser = String(userId2 || '').trim();
     const postId = String(req.query.postId || req.params.postId || '').trim();
+    const hasPostFilter = typeof req.query.postId === 'string' || Boolean(req.params.postId);
+    const requestedContextType = String(req.query.contextType || '').trim();
+    const limitValue = req.query.limit == null ? null : Number.parseInt(req.query.limit, 10);
+    const pageLimit = limitValue == null ? null : Math.min(Math.max(limitValue, 1), 100);
+    const beforeId = String(req.query.beforeId || '').trim();
+
+    if (limitValue != null && (!Number.isInteger(limitValue) || limitValue < 1)) {
+      return res.status(400).json({ success: false, message: 'Invalid message page size' });
+    }
+    if (beforeId && !isValidObjectId(beforeId)) {
+      return res.status(400).json({ success: false, message: 'Invalid message cursor' });
+    }
+    if (requestedContextType && !['post', 'shop', 'place', 'direct'].includes(requestedContextType)) {
+      return res.status(400).json({ success: false, message: 'Unsupported conversation context' });
+    }
 
     const authenticatedUserIds = [req.user?._id, req.user?.id, req.user?.phone]
       .filter(Boolean)
@@ -312,11 +493,59 @@ exports.getMessages = async (req, res) => {
     ];
 
     const messageFilter = { $or: conditions };
-    if (postId) messageFilter.postId = postId;
-    const messages = await Message.find(messageFilter).sort({ createdAt: 1 });
+    if (hasPostFilter && postId) {
+      messageFilter.postId = postId;
+    } else if (hasPostFilter) {
+      messageFilter.$and = [{
+        $or: [
+          { postId: '' },
+          { postId: null },
+          { postId: { $exists: false } },
+        ],
+      }];
+    }
+    let cursorMessage = null;
+    if (beforeId) {
+      cursorMessage = await Message.findOne({
+        $and: [messageFilter, { _id: beforeId }],
+      });
+      if (!cursorMessage) {
+        return res.status(400).json({ success: false, message: 'Message cursor is not in this conversation' });
+      }
+      messageFilter.$and = [
+        ...(messageFilter.$and || []),
+        {
+          $or: [
+            { createdAt: { $lt: cursorMessage.createdAt } },
+            {
+              createdAt: cursorMessage.createdAt,
+              _id: { $lt: cursorMessage._id },
+            },
+          ],
+        },
+      ];
+    }
+    let messages = pageLimit
+      ? await Message.find(messageFilter).sort({ createdAt: -1, _id: -1 }).limit(pageLimit + 1)
+      : await Message.find(messageFilter).sort({ createdAt: 1, _id: 1 });
+    const hasMore = pageLimit != null && messages.length > pageLimit;
+    if (pageLimit != null) {
+      messages = messages.slice(0, pageLimit).reverse();
+    }
+    const contextType = requestedContextType
+      || messages.find(message => message.replyPost?.contextType)?.replyPost?.contextType
+      || (postId ? 'post' : 'direct');
 
     const updatedMessages = await Promise.all(messages.map(async (msg) => {
       const msgObj = refreshMessageMediaUrls(msg, req);
+      if (!msgObj.conversationId) {
+        msgObj.conversationId = getConversationId(
+          msgObj.senderId || msgObj.senderPhone,
+          msgObj.receiverId || msgObj.receiverPhone,
+          msgObj.replyPost?.contextType || msgObj.contextType || contextType,
+          msgObj.postId || msgObj.replyPost?.contextId || ''
+        );
+      }
       if (msgObj.replyPost && msgObj.replyPost.postId && (msgObj.replyPost.contextType || 'post') === 'post') {
         try {
           const postExists = await Post.findById(msgObj.replyPost.postId);
@@ -350,7 +579,12 @@ exports.getMessages = async (req, res) => {
       return msgObj;
     }));
 
-    res.json({ success: true, messages: updatedMessages });
+    res.json({
+      success: true,
+      messages: updatedMessages,
+      hasMore,
+      nextCursor: hasMore && updatedMessages.length ? String(updatedMessages[0]._id) : null,
+    });
   } catch (error) {
     console.error('Get messages error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -372,15 +606,37 @@ exports.getConversations = async (req, res) => {
     const messages = await Message.find({ $or: orClauses }).sort({ createdAt: -1 });
 
     const conversationsMap = new Map();
+    const contextTypes = new Map();
+    messages.forEach(msg => {
+      if (!msg.replyPost?.contextType || !msg.postId) return;
+      const participants = [
+        String(msg.senderId || msg.senderPhone || ''),
+        String(msg.receiverId || msg.receiverPhone || ''),
+      ].sort();
+      contextTypes.set(`${participants.join(':')}:${msg.postId}`, msg.replyPost.contextType);
+    });
     messages.forEach(msg => {
       const senderKey = String(msg.senderId || msg.senderPhone || '');
       const receiverKey = String(msg.receiverId || msg.receiverPhone || '');
       const isCurrentUserSender = userIdentifiers.includes(String(msg.senderId || ''))
         || userIdentifiers.includes(String(msg.senderPhone || ''));
       const otherId = isCurrentUserSender ? receiverKey : senderKey;
-      const key = `${msg.postId}_${otherId}`;
+      const participantKey = [senderKey, receiverKey].sort().join(':');
+      const contextType = msg.replyPost?.contextType
+        || msg.contextType
+        || contextTypes.get(`${participantKey}:${msg.postId || ''}`)
+        || (msg.postId ? 'post' : 'direct');
+      const conversationId = msg.conversationId || getConversationId(
+        senderKey,
+        receiverKey,
+        contextType,
+        msg.postId || msg.replyPost?.contextId || ''
+      );
+      const key = conversationId;
       if (!conversationsMap.has(key)) {
         conversationsMap.set(key, {
+          conversationId,
+          contextType,
           postId: msg.postId,
           postTitle: msg.postTitle,
           replyPost: msg.replyPost || null,
@@ -396,7 +652,14 @@ exports.getConversations = async (req, res) => {
       if (!conv.replyPost && msg.replyPost) {
         conv.replyPost = msg.replyPost;
       }
-      if (!conv.lastMessage || new Date(msg.createdAt) > new Date(conv.lastMessage.createdAt)) {
+      if (
+        !conv.lastMessage
+        || new Date(msg.createdAt) > new Date(conv.lastMessage.createdAt)
+        || (
+          new Date(msg.createdAt).getTime() === new Date(conv.lastMessage.createdAt).getTime()
+          && String(msg._id).localeCompare(String(conv.lastMessage._id)) > 0
+        )
+      ) {
         conv.lastMessage = msg;
       }
       const receiverMatchesCurrentUser = userIdentifiers.includes(String(msg.receiverId || ''))
@@ -407,7 +670,10 @@ exports.getConversations = async (req, res) => {
     });
 
     const conversations = Array.from(conversationsMap.values())
-      .sort((a, b) => new Date(b.lastMessage.createdAt) - new Date(a.lastMessage.createdAt));
+      .sort((a, b) => (
+        new Date(b.lastMessage.createdAt) - new Date(a.lastMessage.createdAt)
+        || String(a.conversationId).localeCompare(String(b.conversationId))
+      ));
 
     for (const conv of conversations) {
       conv.lastMessage = refreshMessageMediaUrls(conv.lastMessage, req);
@@ -488,7 +754,9 @@ exports.editMessage = async (req, res) => {
     message.isEdited = true;
     await message.save();
     const io = socketHelper.getIO();
-    if (io) io.emit('message-updated', { message });
+    const receiverId = String(message.receiverId || message.receiverPhone || '');
+    const room = `chat_${[String(message.senderId), receiverId].sort().join('_')}`;
+    if (io && receiverId) io.to(room).emit('message-updated', { message });
     res.json({ success: true, message });
   } catch (error) {
     console.error('Edit message error:', error);
@@ -521,13 +789,16 @@ exports.deleteMessage = async (req, res) => {
     const mediaKeys = getMessageStorageKeys(message);
     await Promise.all(mediaKeys.map(key => storageService.deleteMedia(key)));
     await Message.findByIdAndDelete(messageId);
+    await removeUploadedMessageImages(mediaKeys);
 
     const io = socketHelper.getIO();
-    if (io) {
-      io.emit('message-deleted', {
+    const receiverId = String(message.receiverId || message.receiverPhone || '');
+    const room = `chat_${[String(message.senderId), receiverId].sort().join('_')}`;
+    if (io && receiverId) {
+      io.to(room).emit('message-deleted', {
         messageId: String(messageId),
         senderId: String(message.senderId),
-        receiverId: String(message.receiverId),
+        receiverId,
         postId: message.postId || '',
       });
     }
@@ -550,7 +821,7 @@ exports.uploadImage = async (req, res) => {
     }
 
     const userId = req.user.id;
-    const user = await User.findById(userId).select('postUploadLimitPerDay');
+    const user = await User.findById(userId).select('imagesPerMessage');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -563,22 +834,14 @@ exports.uploadImage = async (req, res) => {
       }
     }
 
-    // Enforce maximum number of active message images per user (user-specific limit and retention)
-    const Message = require('../models/Message');
-    const senderUser = await User.findById(userId);
-    const retentionDays = senderUser && typeof senderUser.imagesRetentionDays === 'number' ? senderUser.imagesRetentionDays : 5;
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - retentionDays);
-
-    const activeImageCount = await Message.countDocuments({ senderId: userId, imageUrl: { $exists: true, $ne: '' }, createdAt: { $gte: cutoff } });
-    const maxImagesPerMessage = senderUser && typeof senderUser.imagesPerMessage === 'number' ? senderUser.imagesPerMessage : 10;
-    const remaining = Math.max(maxImagesPerMessage - activeImageCount, 0);
-
-    if (remaining <= 0) {
-      return res.status(403).json({ success: false, message: `You have reached the maximum number of active images (${maxImagesPerMessage}). Please wait for some to expire.` });
-    }
-    if (req.files.length > remaining) {
-      return res.status(403).json({ success: false, message: `You can only upload ${remaining} more image(s) at the moment.` });
+    const maxImagesPerMessage = Number.isSafeInteger(user.imagesPerMessage)
+      ? user.imagesPerMessage
+      : DEFAULT_USER_PERMISSIONS.imagesPerMessage;
+    if (req.files.length > maxImagesPerMessage) {
+      return res.status(403).json({
+        success: false,
+        message: `You can attach up to ${maxImagesPerMessage} images per message.`,
+      });
     }
 
     const urls = [];
@@ -597,10 +860,15 @@ exports.uploadImage = async (req, res) => {
       urls.push(imageUrl);
     }
 
+    await recordUploadedMessageImages(userId, uploadedStorageKeys);
+
     // Return uploaded URLs to client. Messages themselves are created via /send which should reference these URLs.
     res.json({ success: true, url: urls[0], urls });
   } catch (error) {
     await Promise.all(uploadedStorageKeys.map(key => storageService.deleteMedia(key).catch(() => {})));
+    await removeUploadedMessageImages(uploadedStorageKeys).catch(trackingError => {
+      console.error('[Retention] Could not remove failed chat image tracking records:', trackingError.code || trackingError.message);
+    });
     console.error('Upload image error:', error.code || error.message || 'Unknown error');
     res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Image upload failed' });
   }

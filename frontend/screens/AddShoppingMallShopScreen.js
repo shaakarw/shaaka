@@ -24,9 +24,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
 import ArrowUploadLoader from '../components/ArrowUploadLoader';
-import { useAuth, useUserLimits } from '../context/AuthContext';
+import { useAuth } from '../context/AuthContext';
 import { useBottomSheet } from '../context/BottomSheetContext';
-import { computeAggregatedLimits } from '../utils/subscriptionHelpers';
 import { normalizeRwandaPhone, formatPhoneInput } from '../utils/phoneNormalizer';
 import { getAddressText } from '../utils/address';
 import ShaakaLoadingScreen from '../components/ShaakaLoadingScreen';
@@ -255,7 +254,6 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
   const isFocused = useIsFocused();
   const { showBottomSheet } = useBottomSheet();
   const { refreshUser } = useAuth();
-  const adminLimits = useUserLimits();
   const t = translations[language] || translations.English;
   const { mall } = route.params;
 
@@ -378,7 +376,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
 
         await refreshUser();
 
-        const userRes = await axios.get(`${BASE_URL}/api/auth/me`, {
+        const userRes = await axios.get(`${BASE_URL}/api/user/me`, {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -406,7 +404,10 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
             }
             return s.userId === user._id;
           });
-          if (userShops.length > 0) {
+          if (
+            user.shopsPlacesUsed > 0
+            || user.mallShopsUsed >= user.mallShopUploadLimitLifetime
+          ) {
             setHasExistingShop(true);
             showThemedAlert(t.alreadyHasShop, t.alreadyHasShopMessage);
           }
@@ -583,32 +584,40 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
     }
   };
 
-  // ----- Check subscription limit before publishing -----
-  const [remainingPostImages, setRemainingPostImages] = useState(0);
-
-  const checkSubscriptionLimit = async () => {
+  // ----- Check current per-user permissions before publishing -----
+  const checkPermissionLimits = async () => {
     try {
       const token = await getAuthToken('userToken');
-      if (!token) return true;
+      if (!token) return null;
       const res = await axios.get(`${BASE_URL}/api/user/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.data.success) {
-        const limits = computeAggregatedLimits(res.data.user);
-        setRemainingPostImages(limits.postsMapRemainingImages);
-        if (limits.postsMapRemainingImages <= 0) {
-          showThemedAlert(
-            'Image Limit Reached',
-            'You have used all your post and map image credits. Please try again later.',
-            [{ text: 'OK' }]
-          );
-          return false;
-        }
+      if (!res.data.success || !res.data.user) {
+        showThemedAlert(t.error, 'Could not load your current permissions. Please try again.');
+        return null;
       }
-      return true;
+      const user = res.data.user;
+      setCurrentUser(user);
+      if (user.shopsPlacesUsed > 0) {
+        showThemedAlert(t.alreadyHasShop, 'You already have a Shop/Place. You cannot add a Shopping Mall Shop.');
+        return null;
+      }
+      if (user.mallShopsUsed >= user.mallShopUploadLimitLifetime) {
+        showThemedAlert(t.alreadyHasShop, 'You have reached your lifetime shopping mall shop limit.');
+        return null;
+      }
+      if (products.length > user.remainingMallProducts) {
+        showThemedAlert(
+          t.error,
+          `You can add up to ${user.remainingMallProducts} more shopping mall product(s) today.`
+        );
+        return null;
+      }
+      return user;
     } catch (error) {
-      console.warn('Failed to check subscription limit:', error.message);
-      return true;
+      console.warn('Failed to check user permissions:', error.message);
+      showThemedAlert(t.error, error.response?.data?.message || 'Could not verify your current permissions.');
+      return null;
     }
   };
 
@@ -616,8 +625,8 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
   const publishShop = async () => {
     if (!validateStep()) return;
 
-    const canProceed = await checkSubscriptionLimit();
-    if (!canProceed) return;
+    const permissionUser = await checkPermissionLimits();
+    if (!permissionUser) return;
 
     setPublishing(true);
     setProgress(0);
@@ -635,7 +644,7 @@ export default function AddShoppingMallShopScreen({ route, navigation, language 
       });
       const allPlaces = placesRes.data.places || [];
       const userPlaces = allPlaces.filter(p => p.userId === currentUser?._id);
-      if (userPlaces.length > 0) {
+      if (permissionUser.shopsPlacesUsed > 0 && userPlaces.length > 0) {
         showThemedAlert('Limit Reached', 'You already have a Shop/Place. You cannot add a Shopping Mall Shop.');
         setPublishing(false);
         return;

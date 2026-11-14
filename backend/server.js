@@ -237,6 +237,7 @@ io.on('connection', (socket) => {
           return;
         }
         currentUserId = String(user._id);
+        socket.join(currentUserId);
         user.currentSession = user.currentSession || {};
         user.currentSession.socketId = socket.id;
         user.currentSession.lastSeen = new Date();

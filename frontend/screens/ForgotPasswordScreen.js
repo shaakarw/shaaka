@@ -1,6 +1,6 @@
 
 // screens/ForgotPasswordScreen.js
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -20,10 +20,9 @@ import {
 import { useIsFocused } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext';
 import { Ionicons } from '@expo/vector-icons';
-import { isValidRwandaPhone, normalizeRwandaPhone } from '../utils/phoneNormalizer';
+import { isValidRwandaPhone } from '../utils/phoneNormalizer';
 import axios from 'axios';
 import { BASE_URL } from '../constants';
-import SharedBottomNav from '../components/SharedBottomNav';
 import Logo from '../assets/logos.png';
 import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
 import useScreenTutorial from '../hooks/useScreenTutorial';
@@ -41,28 +40,23 @@ const FORGOT_TUTORIAL_DELAY_MS = 700;
 const translations = {
   English: {
     title: 'Reset Password',
-    subtitle: 'Enter your phone and username to begin',
-    step1: 'Phone & Username',
-    step2: 'Recovery Number',
-    step3: 'New Password',
+    subtitle: 'Enter your phone and recovery number to continue',
+    step1: 'Verify identity',
+    step2: 'New Password',
     phoneLabel: 'Phone number:',
-    usernameLabel: 'Username:',
     recoveryLabel: 'Recovery number (the one you set during registration):',
     newPasswordLabel: 'New password:',
     confirmPasswordLabel: 'Confirm new password:',
     next: 'Next',
     back: 'Back',
     reset: 'Reset Password',
-    fillPhoneUsername: 'Please enter a valid phone number and username',
+    fillPhoneRecovery: 'Please enter a valid phone number and recovery number',
     phoneLengthError: 'Phone number must be 10 digits starting with 07',
-    usernameMinLength: 'Username must be at least 4 characters',
     recoveryLengthError: 'Recovery number must be at least 4 digits',
-    fillRecovery: 'Please enter your recovery number',
     fillPasswords: 'Please enter new password and confirmation',
     passwordMinLength: 'Password must be at least 4 characters',
     passwordMismatch: 'Passwords do not match',
     userNotFound: 'No account found with the provided information',
-    usernameMismatch: 'Username does not match the account',
     resetSuccess: 'Password reset successful! Please login with your new password.',
     resetFailed: 'Failed to reset password. Please try again.',
     reusePasswordError: 'Please choose a password you have not used before.',
@@ -72,14 +66,8 @@ const translations = {
     login: 'Login',
     register: 'Register',
     checking: 'Verifying…',
-    step2HintTitle: 'Recovery number',
+    step2HintTitle: 'New password',
     step2HintMessages: [
-      'Enter the recovery number you set during registration.',
-      'This number helps us verify your identity.',
-      'You chose this number to protect your account.',
-    ],
-    step3HintTitle: 'New password',
-    step3HintMessages: [
       'Choose a fresh password.',
       'Make it strong and something you will remember.',
       'Almost done — reset your access!',
@@ -87,39 +75,32 @@ const translations = {
     // Tutorial
     tStep1PhoneTitle: 'Your phone number',
     tStep1PhoneBody: 'Enter the phone number you registered with (starts with 07).',
-    tStep1UserTitle: 'Your username',
-    tStep1UserBody: 'Enter the username tied to this phone. We use both to verify it is you.',
     tStep2RecoveryTitle: 'Recovery number',
     tStep2RecoveryBody: 'Enter the recovery number you set during registration. This proves the account is yours.',
-    tStep3PassTitle: 'New password',
-    tStep3PassBody: 'Choose a new password with at least 4 characters. Make it strong.',
-    tStep3ConfirmTitle: 'Confirm password',
-    tStep3ConfirmBody: 'Type the new password again so we can make sure it matches.',
+    tStep2PassTitle: 'New password',
+    tStep2PassBody: 'Choose a new password with at least 4 characters. Make it strong.',
+    tStep2ConfirmTitle: 'Confirm password',
+    tStep2ConfirmBody: 'Type the new password again so we can make sure it matches.',
   },
   Kinyarwanda: {
     title: 'Iyibutsa Ijambo banga',
-    subtitle: 'Andika numero ya telefone n\'izina ryawe kugira ngo utangire',
-    step1: 'Telefone & Izina',
-    step2: 'Numero yo kwibutsa',
-    step3: 'Ijambo banga rishya',
+    subtitle: 'Andika numero ya telefone na numero yo kwibutsa kugira ngo ukomeze',
+    step1: 'Emeza amakuru',
+    step2: 'Ijambo banga rishya',
     phoneLabel: 'Numero ya telefone:',
-    usernameLabel: 'Izina ry’ukoresha:',
     recoveryLabel: 'Numero yo kwibutsa (wasize uyandikisha):',
     newPasswordLabel: 'Ijambo banga rishya:',
     confirmPasswordLabel: 'Emeza ijambo banga rishya:',
     next: 'Ibikurikiye',
     back: 'Subira inyuma',
     reset: 'Hindura',
-    fillPhoneUsername: 'Nyamuneka andika numero ya telefone n\'izina byuzuye',
+    fillPhoneRecovery: 'Nyamuneka andika numero ya telefone na numero yo kwibutsa',
     phoneLengthError: 'Nimero igomba kuba imibare 10 itangirana na 07',
-    usernameMinLength: 'Izina rigomba kugira nibura inyuguti 4',
     recoveryLengthError: 'Numero yo kwibutsa igomba kugira nibura imibare 4',
-    fillRecovery: 'Nyamuneka andika numero yo kwibutsa',
     fillPasswords: 'Nyamuneka andika ijambo banga rishya kandi uryemeze',
     passwordMinLength: 'Ijambo banga rigomba kugira nibura inyuguti 4',
     passwordMismatch: 'Amagambo banga ntabwo ahuye',
     userNotFound: 'Nta konti iboneka hamwe n’amakuru watanze',
-    usernameMismatch: 'Izina ntirihuye na konti',
     resetSuccess: 'Ijambo banga ryahinduwe! Injira ukoreshe ijambo banga rishya.',
     resetFailed: 'Guhindura ijambo banga byanze. Ongera ugerageze.',
     reusePasswordError: 'Hitamo ijambo banga utarakoresha mbere.',
@@ -129,14 +110,8 @@ const translations = {
     login: 'Injira',
     register: 'Iyandikishe',
     checking: 'Igenzura…',
-    step2HintTitle: 'Numero yo kwibutsa',
+    step2HintTitle: 'Ijambo banga rishya',
     step2HintMessages: [
-      'Andika numero yo kwibutsa wasize wiyandikisha.',
-      'Iyi numero ifasha kugenzura ko ari wowe.',
-      'Wahisemo iyi numero kugira ngo urinde konti yawe.',
-    ],
-    step3HintTitle: 'Ijambo banga rishya',
-    step3HintMessages: [
       'Shyiramo ijambo banga rishya.',
       'Rigire rikomeye kandi wibuke.',
       'Birarangiye — tangira gukoresha!',
@@ -144,14 +119,12 @@ const translations = {
     // Tutorial
     tStep1PhoneTitle: 'Nimero ya telefone',
     tStep1PhoneBody: 'Andika nimero ya telefone wiyandikishije (itangira na 07).',
-    tStep1UserTitle: 'Izina ry’ukoresha',
-    tStep1UserBody: 'Andika izina rihuye niyi numero. Tukoresha byombi kugenzura ko ari wowe.',
     tStep2RecoveryTitle: 'Numero yo kwibutsa',
     tStep2RecoveryBody: 'Andika numero yo kwibutsa wasize wiyandikisha. Iri ni igihamya ko iyi konti ni iyawe.',
-    tStep3PassTitle: 'Ijambo banga rishya',
-    tStep3PassBody: 'Hitamo ijambo banga rishya rifite nibura inyuguti 4. Rigire rikomeye.',
-    tStep3ConfirmTitle: 'Emeza ijambo banga',
-    tStep3ConfirmBody: 'Ongera wandike ijambo banga rishya kugira ngo turebe ko bihuye.',
+    tStep2PassTitle: 'Ijambo banga rishya',
+    tStep2PassBody: 'Hitamo ijambo banga rishya rifite nibura inyuguti 4. Rigire rikomeye.',
+    tStep2ConfirmTitle: 'Emeza ijambo banga',
+    tStep2ConfirmBody: 'Ongera wandike ijambo banga rishya kugira ngo turebe ko bihuye.',
   },
 };
 
@@ -163,7 +136,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState({
     phone: '07',
-    username: '',
     recoveryNumber: '',
     newPassword: '',
     confirmPassword: '',
@@ -171,7 +143,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [phoneStatus, setPhoneStatus] = useState({ checking: false, valid: false, message: '' });
-  const [usernameStatus, setUsernameStatus] = useState({ checking: false, valid: false, message: '' });
   const [recoveryStatus, setRecoveryStatus] = useState({ checking: false, valid: false, message: '' });
   const [verifiedUserId, setVerifiedUserId] = useState(null);
   const [showNewPassword, setShowNewPassword] = useState(false);
@@ -183,14 +154,12 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
 
   // Input refs
   const phoneRef = useRef(null);
-  const usernameRef = useRef(null);
   const recoveryRef = useRef(null);
   const newPasswordRef = useRef(null);
   const confirmRef = useRef(null);
 
   // ---- Tutorial refs ----
   const phoneContainerRef = useRef(null);
-  const usernameContainerRef = useRef(null);
   const recoveryContainerRef = useRef(null);
   const newPasswordContainerRef = useRef(null);
   const confirmContainerRef = useRef(null);
@@ -210,12 +179,12 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
   }, [error]);
 
   useEffect(() => {
-    if (step < 2 || step > 3) {
+    if (step !== 2) {
       setShowHint(false);
       return;
     }
 
-    const messages = step === 2 ? t.step2HintMessages : t.step3HintMessages;
+    const messages = t.step2HintMessages;
     if (!messages || messages.length < 2) return;
 
     setHintIndex(0);
@@ -249,7 +218,7 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
       clearTimeout(showTimer);
       clearInterval(interval);
     };
-  }, [step, t.step2HintMessages, t.step3HintMessages, fadeAnim]);
+  }, [step, t.step2HintMessages, fadeAnim]);
 
   const validatePhone = () => {
     const valid = formData.phone && isValidRwandaPhone(formData.phone);
@@ -258,16 +227,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
       return false;
     }
     setPhoneStatus({ checking: false, valid: true, message: '' });
-    return true;
-  };
-
-  const validateUsername = () => {
-    const valid = formData.username && formData.username.length >= 4;
-    if (!valid) {
-      setUsernameStatus({ checking: false, valid: false, message: t.usernameMinLength });
-      return false;
-    }
-    setUsernameStatus({ checking: false, valid: true, message: '' });
     return true;
   };
 
@@ -290,12 +249,6 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
     setPhoneStatus({ checking: false, valid: false, message: '' });
   };
 
-  const handleUsernameChange = (text) => {
-    setFormData({ ...formData, username: text });
-    setError('');
-    setUsernameStatus({ checking: false, valid: false, message: '' });
-  };
-
   const handleRecoveryChange = (text) => {
     let digits = text.replace(/\D/g, '');
     if (digits.length > 16) digits = digits.slice(0, 16);
@@ -304,17 +257,11 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
     setRecoveryStatus({ checking: false, valid: false, message: '' });
   };
 
-  const step1Next = () => {
-    if (!validatePhone() || !validateUsername()) {
-      setError(t.fillPhoneUsername);
-      return false;
-    }
-    return true;
-  };
-
-  const step2Next = async () => {
-    if (!validateRecovery()) {
-      setError(t.fillRecovery);
+  const verifyIdentity = async () => {
+    const phoneValid = validatePhone();
+    const recoveryValid = validateRecovery();
+    if (!phoneValid || !recoveryValid) {
+      setError(t.fillPhoneRecovery);
       return false;
     }
     setLoading(true);
@@ -326,23 +273,10 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
       });
       const userId = verifyRes.data.userId;
       setVerifiedUserId(userId);
-
-      await axios.post(`${BASE_URL}/api/auth/verify-username`, {
-        userId,
-        username: formData.username,
-      });
-
       setLoading(false);
       return true;
     } catch (err) {
-      const msg = err.response?.data?.message || '';
-      if (msg.includes('phone') || msg.includes('ID') || msg.toLowerCase().includes('not found')) {
-        setError(t.userNotFound);
-      } else if (msg.includes('username')) {
-        setError(t.usernameMismatch);
-      } else {
-        setError(t.userNotFound);
-      }
+      setError(t.userNotFound);
       setLoading(false);
       return false;
     }
@@ -380,14 +314,15 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
 
   const nextStep = async () => {
     if (step === 1) {
-      if (step1Next()) setStep(2);
-    } else if (step === 2) {
-      const ok = await step2Next();
-      if (ok) setStep(3);
+      const verified = await verifyIdentity();
+      if (verified) setStep(2);
     }
   };
 
-  const prevStep = () => setStep(step - 1);
+  const prevStep = () => {
+    setStep(1);
+    setError('');
+  };
 
   const handleReset = async () => {
     await resetPassword();
@@ -408,7 +343,7 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
 
   const renderStepIndicator = () => (
     <View style={styles.stepIndicatorContainer}>
-      {[1, 2, 3].map(s => (
+      {[1, 2].map(s => (
         <View key={s} style={styles.stepWrapper}>
           <View
             style={[
@@ -423,7 +358,7 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
               {s}
             </Text>
           </View>
-          {s < 3 && (
+          {s < 2 && (
             <View
               style={[
                 styles.stepLine,
@@ -449,28 +384,22 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
           body: t.tStep1PhoneBody,
         },
         {
-          getTarget: () => usernameContainerRef.current,
-          title: t.tStep1UserTitle,
-          body: t.tStep1UserBody,
+          getTarget: () => recoveryContainerRef.current,
+          title: t.tStep2RecoveryTitle,
+          body: t.tStep2RecoveryBody,
         }
       );
     } else if (step === 2) {
-      steps.push({
-        getTarget: () => recoveryContainerRef.current,
-        title: t.tStep2RecoveryTitle,
-        body: t.tStep2RecoveryBody,
-      });
-    } else if (step === 3) {
       steps.push(
         {
           getTarget: () => newPasswordContainerRef.current,
-          title: t.tStep3PassTitle,
-          body: t.tStep3PassBody,
+          title: t.tStep2PassTitle,
+          body: t.tStep2PassBody,
         },
         {
           getTarget: () => confirmContainerRef.current,
-          title: t.tStep3ConfirmTitle,
-          body: t.tStep3ConfirmBody,
+          title: t.tStep2ConfirmTitle,
+          body: t.tStep2ConfirmBody,
         }
       );
     }
@@ -502,9 +431,7 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
                   maxLength={10}
                   returnKeyType="next"
                   blurOnSubmit={false}
-                  onSubmitEditing={() => {
-                    if (usernameRef.current) usernameRef.current.focus();
-                  }}
+                  onSubmitEditing={() => recoveryRef.current?.focus()}
                 />
                 {renderStatusIcon(phoneStatus)}
               </View>
@@ -514,66 +441,35 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
             </View>
 
             <View style={styles.inputGroup}>
-              <Text style={[styles.label, { color: theme.text }]}>{t.usernameLabel}</Text>
+              <Text style={[styles.label, { color: theme.text }]}>{t.recoveryLabel}</Text>
               <View
-                ref={usernameContainerRef}
-                style={[styles.inputContainer, { borderColor: usernameStatus.message && !usernameStatus.valid ? '#d87428' : theme.border }]}
+                ref={recoveryContainerRef}
+                style={[styles.inputContainer, { borderColor: recoveryStatus.message && !recoveryStatus.valid ? '#d87428' : theme.border }]}
               >
-                <Ionicons name="person-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
+                <Ionicons name="keypad-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
                 <TextInput
-                  ref={usernameRef}
+                  ref={recoveryRef}
                   style={[styles.input, { color: theme.text }]}
-                  placeholder="sego.remy"
+                  placeholder="1234"
                   placeholderTextColor={theme.textSecondary}
-                  value={formData.username}
-                  onChangeText={handleUsernameChange}
-                  onBlur={validateUsername}
-                  autoCapitalize="none"
+                  value={formData.recoveryNumber}
+                  onChangeText={handleRecoveryChange}
+                  onBlur={validateRecovery}
+                  keyboardType="numeric"
+                  maxLength={16}
                   returnKeyType="done"
-                  onSubmitEditing={() => {
-                    if (step1Next()) nextStep();
-                  }}
+                  onSubmitEditing={nextStep}
                 />
-                {renderStatusIcon(usernameStatus)}
+                {renderStatusIcon(recoveryStatus)}
               </View>
-              {usernameStatus.message && !usernameStatus.valid && (
-                <Text style={[styles.statusMessage, { color: '#d87428' }]}>{usernameStatus.message}</Text>
+              {recoveryStatus.message && !recoveryStatus.valid && (
+                <Text style={[styles.statusMessage, { color: '#d87428' }]}>{recoveryStatus.message}</Text>
               )}
             </View>
           </>
         );
 
       case 2:
-        return (
-          <View style={styles.inputGroup}>
-            <Text style={[styles.label, { color: theme.text }]}>{t.recoveryLabel}</Text>
-            <View
-              ref={recoveryContainerRef}
-              style={[styles.inputContainer, { borderColor: recoveryStatus.message && !recoveryStatus.valid ? '#d87428' : theme.border }]}
-            >
-              <Ionicons name="keypad-outline" size={20} color={theme.textSecondary} style={styles.inputIcon} />
-              <TextInput
-                ref={recoveryRef}
-                style={[styles.input, { color: theme.text }]}
-                placeholder="1234"
-                placeholderTextColor={theme.textSecondary}
-                value={formData.recoveryNumber}
-                onChangeText={handleRecoveryChange}
-                onBlur={validateRecovery}
-                keyboardType="numeric"
-                maxLength={16}
-                returnKeyType="done"
-                onSubmitEditing={nextStep}
-              />
-              {renderStatusIcon(recoveryStatus)}
-            </View>
-            {recoveryStatus.message && !recoveryStatus.valid && (
-              <Text style={[styles.statusMessage, { color: '#d87428' }]}>{recoveryStatus.message}</Text>
-            )}
-          </View>
-        );
-
-      case 3:
         return (
           <>
             <View style={styles.inputGroup}>
@@ -643,10 +539,10 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
             ) : showHint ? (
               <Animated.View style={[styles.stepHint, { opacity: fadeAnim }]}>
                 <Text style={[styles.stepHintTitle, { color: theme.text }]}>
-                  {step === 2 ? t.step2HintTitle : t.step3HintTitle}
+                  {t.step2HintTitle}
                 </Text>
                 <Text style={[styles.stepHintText, { color: theme.textSecondary }]}>
-                  {step === 2 ? t.step2HintMessages[hintIndex] : t.step3HintMessages[hintIndex]}
+                  {t.step2HintMessages[hintIndex]}
                 </Text>
               </Animated.View>
             ) : null}
@@ -671,7 +567,7 @@ const ForgotPasswordScreen = ({ navigation, language = 'English' }) => {
                   <Text style={[styles.buttonText, { color: theme.accent }]}>{t.back}</Text>
                 </TouchableOpacity>
               )}
-              {step < 3 ? (
+              {step < 2 ? (
                 <TouchableOpacity
                   style={[styles.button, styles.nextButton, { backgroundColor: theme.accent }]}
                   onPress={nextStep}

@@ -39,6 +39,17 @@ const ITEMS_PER_ROW = 2;
 const CARD_WIDTH = (width - CARD_MARGIN * (ITEMS_PER_ROW + 1)) / ITEMS_PER_ROW;
 const BOTTOM_SHEET_MAX_HEIGHT = height * 0.85;
 const CLOSE_THRESHOLD = 120;
+const DEFAULT_USER_LIMITS = {
+  postUploadLimitPerDay: 4,
+  shopUploadLimitLifetime: 1,
+  placeProductUploadLimitPerDay: 4,
+  mallShopUploadLimitLifetime: 1,
+  mallProductUploadLimitPerDay: 4,
+  imagesPerMessage: 18,
+  imagesRetentionDays: 15,
+  messagesRetentionDays: 30,
+  videoUploadLimitPerDay: 1,
+};
 
 // ---------- Translations ----------
 const translations = {
@@ -236,16 +247,8 @@ const AdminUserScreen = ({ navigation, language }) => {
   const [detailsError, setDetailsError] = useState(false);
 
   const [limits, setLimits] = useState({
-    postUploadLimitPerDay: 1,
-    shopUploadLimitLifetime: 1,
-    placeProductUploadLimitPerDay: 1,
-    mallShopUploadLimitLifetime: 1,
-    mallProductUploadLimitPerDay: 1,
-    imagesPerMessage: 5,
-    imagesRetentionDays: 5,
-    messagesRetentionDays: 30,
-    allowVideoUpload: false,
-    videoUploadLimitPerDay: 0,
+    ...DEFAULT_USER_LIMITS,
+    allowVideoUpload: true,
   });
   const [savingLimits, setSavingLimits] = useState(false);
 
@@ -495,16 +498,11 @@ const AdminUserScreen = ({ navigation, language }) => {
     const data = userDetails || selectedUser;
     if (!data) return;
     setLimits({
-      postUploadLimitPerDay: typeof data.postUploadLimitPerDay === 'number' ? Math.min(100, Math.max(0, data.postUploadLimitPerDay)) : 0,
-      shopUploadLimitLifetime: typeof data.shopUploadLimitLifetime === 'number' ? Math.min(100, Math.max(0, data.shopUploadLimitLifetime)) : 0,
-      placeProductUploadLimitPerDay: typeof data.placeProductUploadLimitPerDay === 'number' ? Math.min(100, Math.max(0, data.placeProductUploadLimitPerDay)) : 0,
-      mallShopUploadLimitLifetime: typeof data.mallShopUploadLimitLifetime === 'number' ? Math.min(100, Math.max(0, data.mallShopUploadLimitLifetime)) : 0,
-      mallProductUploadLimitPerDay: typeof data.mallProductUploadLimitPerDay === 'number' ? Math.min(100, Math.max(0, data.mallProductUploadLimitPerDay)) : 0,
-      imagesPerMessage: typeof data.imagesPerMessage === 'number' ? Math.min(100, Math.max(0, data.imagesPerMessage)) : 0,
-      imagesRetentionDays: typeof data.imagesRetentionDays === 'number' ? Math.min(100, Math.max(0, data.imagesRetentionDays)) : 0,
-      messagesRetentionDays: typeof data.messagesRetentionDays === 'number' ? Math.min(100, Math.max(0, data.messagesRetentionDays)) : 0,
-      allowVideoUpload: data.allowVideoUpload === true,
-      videoUploadLimitPerDay: typeof data.videoUploadLimitPerDay === 'number' ? Math.min(100, Math.max(0, data.videoUploadLimitPerDay)) : 0,
+      ...Object.fromEntries(Object.entries(DEFAULT_USER_LIMITS).map(([key, defaultValue]) => [
+        key,
+        Number.isSafeInteger(data[key]) ? Math.min(100, Math.max(0, data[key])) : defaultValue,
+      ])),
+      allowVideoUpload: data.allowVideoUpload !== false,
     });
   }, [userDetails, selectedUser]);
 
@@ -516,21 +514,25 @@ const AdminUserScreen = ({ navigation, language }) => {
     if (!selectedUser?._id) return;
     try {
       setSavingLimits(true);
+      const currentDetails = userDetails || selectedUser;
+      const updates = {};
+      for (const [key, defaultValue] of Object.entries(DEFAULT_USER_LIMITS)) {
+        const savedValue = Number.isSafeInteger(currentDetails[key])
+          ? currentDetails[key]
+          : defaultValue;
+        if (limits[key] !== savedValue) updates[key] = limits[key];
+      }
+      if (limits.allowVideoUpload !== (currentDetails.allowVideoUpload !== false)) {
+        updates.allowVideoUpload = limits.allowVideoUpload;
+      }
+      if (Object.keys(updates).length === 0) {
+        showStatus(t.success, 'There are no permission changes to save.');
+        return;
+      }
       const token = await getToken();
       const res = await axios.put(
         `${BASE_URL}/api/admin/users/${selectedUser._id}/limits`,
-        {
-          postUploadLimitPerDay: limits.postUploadLimitPerDay,
-          shopUploadLimitLifetime: limits.shopUploadLimitLifetime,
-          placeProductUploadLimitPerDay: limits.placeProductUploadLimitPerDay,
-          mallShopUploadLimitLifetime: limits.mallShopUploadLimitLifetime,
-          mallProductUploadLimitPerDay: limits.mallProductUploadLimitPerDay,
-          imagesPerMessage: limits.imagesPerMessage,
-          imagesRetentionDays: limits.imagesRetentionDays,
-          messagesRetentionDays: limits.messagesRetentionDays,
-          allowVideoUpload: limits.allowVideoUpload,
-          videoUploadLimitPerDay: limits.videoUploadLimitPerDay,
-        },
+        updates,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (res.data.success) {
@@ -555,7 +557,7 @@ const AdminUserScreen = ({ navigation, language }) => {
       }
     } catch (err) {
       console.error('Save limits error:', err);
-      showStatus(t.error, 'Failed to update limits');
+      showStatus(t.error, err.response?.data?.message || 'Failed to update limits');
     } finally {
       setSavingLimits(false);
     }
@@ -721,7 +723,7 @@ const AdminUserScreen = ({ navigation, language }) => {
               <Text style={[styles.limitLabel, { color: theme.text }]}>Allow Video Uploads</Text>
             </View>
             <TouchableOpacity
-              style={[styles.allowToggle, { backgroundColor: limits.allowVideoUpload ? theme.accent : theme.border }]}
+              style={[styles.allowToggle, { backgroundColor: limits.allowVideoUpload ? '#6B7280' : theme.border }]}
               onPress={() => setLimits((prev) => ({ ...prev, allowVideoUpload: !prev.allowVideoUpload }))}
               disabled={savingLimits}
             >
@@ -746,7 +748,7 @@ const AdminUserScreen = ({ navigation, language }) => {
                   <Text style={[styles.stepperValueText, { color: theme.text }]}>{limits[item.key]}</Text>
                 </View>
                 <TouchableOpacity
-                  style={[styles.stepperBtn, { backgroundColor: theme.accent }]}
+                  style={[styles.stepperBtn, { backgroundColor: '#6B7280' }]}
                   onPress={() => setLimits((prev) => ({ ...prev, [item.key]: Math.min(100, Math.max(0, prev[item.key] + 1)) }))}
                   disabled={savingLimits || limits[item.key] >= 100}
                 >
@@ -783,7 +785,7 @@ const AdminUserScreen = ({ navigation, language }) => {
 
         {/* Save Changes */}
         <TouchableOpacity
-          style={[styles.saveChangesBtn, { backgroundColor: savingLimits ? theme.textSecondary : theme.accent }]}
+          style={[styles.saveChangesBtn, { backgroundColor: savingLimits ? theme.textSecondary : '#6B7280' }]}
           onPress={saveLimits}
           disabled={savingLimits}
         >

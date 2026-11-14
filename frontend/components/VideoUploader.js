@@ -6,6 +6,7 @@ import { getVideoMetaData } from '../utils/videoCompressor';
 import { requestVideoBackground } from '../services/videoBackgroundService';
 
 const UNSUPPORTED_VIDEO_MESSAGE = 'Unsupported video. Please select a valid video with a readable duration.';
+const MAX_POST_VIDEO_DURATION_SECONDS = 120;
 
 const readBrowserVideoMetadata = uri => new Promise((resolve, reject) => {
   const video = document.createElement('video');
@@ -94,6 +95,11 @@ const VideoUploader = ({ value, onChange, onValidationChange, videoLink, onVideo
           originalWidth: dimensions.width,
           originalHeight: dimensions.height,
         };
+        setResizeNotice(
+          selectedVideo.duration > MAX_POST_VIDEO_DURATION_SECONDS
+            ? 'Only the first 2 minutes of this video will be posted.'
+            : ''
+        );
         await onChange(selectedVideo);
         if (selectedVideo.duration > 0) {
           requestVideoBackground({

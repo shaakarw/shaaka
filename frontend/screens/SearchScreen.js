@@ -163,6 +163,7 @@ const SearchScreen = ({ navigation, route, language }) => {
   const [searchError, setSearchError] = useState('');
   const [searchHasMore, setSearchHasMore] = useState(false);
   const [searchPage, setSearchPage] = useState(1);
+  const [searchLoopCount, setSearchLoopCount] = useState(0);
   const [correctedQuery, setCorrectedQuery] = useState('');
 
   const [allPosts, setAllPosts] = useState([]);
@@ -179,6 +180,7 @@ const SearchScreen = ({ navigation, route, language }) => {
   const [loadingMore, setLoadingMore] = useState(false);
   const loadingMoreRef = useRef(false);
   const searchLoadingMoreRef = useRef(false);
+  const searchLoopingRef = useRef(false);
   const searchRequestRef = useRef(0);
   const activeSearchRef = useRef({ query: '', loading: false, results: [], correctedQuery: '', error: false, track: false });
 
@@ -192,8 +194,15 @@ const SearchScreen = ({ navigation, route, language }) => {
   // ---- 3-per-row trending grid (infinite loop) ----
   const [gridPosts, setGridPosts] = useState([]);
   const gridOffsetRef = useRef(0);
+  const gridSourceRef = useRef([]);
 
   const sectionGroups = useMemo(() => chunk(trendingPosts, 3), [trendingPosts]);
+  const displayedSearchResults = useMemo(
+    () => searchLoopCount > 0
+      ? [...searchResults, ...Array.from({ length: searchLoopCount }, () => searchResults).flat()]
+      : searchResults,
+    [searchLoopCount, searchResults]
+  );
   const recentSearchStorageKey = useMemo(
     () => `${RECENT_SEARCHES_KEY}:${currentUser?._id || currentUser?.id || authUser?._id || authUser?.id || 'guest'}`,
     [currentUser?._id, currentUser?.id, authUser?._id, authUser?.id]
@@ -357,27 +366,31 @@ const SearchScreen = ({ navigation, route, language }) => {
         }
 
         const sorted = sortFeedPosts(filteredPosts, refresh);
+        const combinedPosts = refresh
+          ? sorted
+          : sortFeedPosts([...allPosts, ...sorted], false);
 
         if (refresh) {
-          setAllPosts(sorted);
           setPage(1);
         } else {
-          setAllPosts((prev) => sortFeedPosts([...prev, ...filteredPosts], false));
           setPage(pageNum);
         }
 
-        const trending = sorted.filter((p) => p.trending);
-        setTrendingPosts(trending.length > 0 ? trending : sorted);
+        setAllPosts(combinedPosts);
+        const trending = combinedPosts.filter((post) => post.trending);
+        setTrendingPosts(trending.length > 0 ? trending : combinedPosts);
 
         setHasMore(feed.hasMore);
+        return { posts: sorted, hasMore: feed.hasMore };
       } catch (error) {
         console.error('Error loading posts:', error);
+        return null;
       } finally {
         setLoading(false);
         setRefreshing(false);
       }
     },
-    [isLoggedIn, currentUser, fetchFeed]
+    [isLoggedIn, currentUser, fetchFeed, allPosts]
   );
 
   const restoreCachedFeed = useCallback(async () => {
@@ -473,6 +486,7 @@ const SearchScreen = ({ navigation, route, language }) => {
     if (pageNum === 1) {
       setSearchResults([]);
       setSearchPage(1);
+      setSearchLoopCount(0);
     }
     try {
       const response = await axios.get(`${BASE_URL}/api/posts/search`, {
@@ -620,14 +634,28 @@ const SearchScreen = ({ navigation, route, language }) => {
     if (source.length === 0) {
       setGridPosts([]);
       gridOffsetRef.current = 0;
+      gridSourceRef.current = [];
       return;
     }
+    const previousSource = gridSourceRef.current;
+    const sourceWasExtended = previousSource.length > 0 &&
+      source.length >= previousSource.length &&
+      previousSource.every((post, index) =>
+        String(post._id) === String(source[index]._id)
+      );
+    if (sourceWasExtended) {
+      gridOffsetRef.current = previousSource.length % source.length;
+      gridSourceRef.current = source;
+      return;
+    }
+
     const seed = source.slice(0, Math.min(PAGE_SIZE, source.length));
     setGridPosts(seed);
     gridOffsetRef.current = seed.length % source.length;
+    gridSourceRef.current = source;
   }, [trendingPosts, allPosts]);
 
-  const loadMoreGridPosts = useCallback(() => {
+  const loadMoreGridPosts = useCallback(async () => {
     if (loadingMoreRef.current) return;
     const source = trendingPosts.length ? trendingPosts : allPosts;
     if (source.length === 0) return;
@@ -635,8 +663,22 @@ const SearchScreen = ({ navigation, route, language }) => {
     loadingMoreRef.current = true;
     setLoadingMore(true);
 
-    setTimeout(() => {
-      setGridPosts((prev) => {
+    try {
+      if (hasMore) {
+        let nextPage = page + 1;
+        let result;
+        do {
+          result = await fetchPosts(nextPage);
+          if (!result) return;
+          if (result.posts.length > 0) {
+            setGridPosts((previous) => [...previous, ...result.posts]);
+            return;
+          }
+          nextPage += 1;
+        } while (result.hasMore);
+      }
+
+      setGridPosts((previous) => {
         const next = [];
         const start = gridOffsetRef.current;
         for (let i = 0; i < PAGE_SIZE; i++) {
@@ -644,12 +686,13 @@ const SearchScreen = ({ navigation, route, language }) => {
           next.push(source[idx]);
         }
         gridOffsetRef.current = (start + PAGE_SIZE) % source.length;
-        return [...prev, ...next];
+        return [...previous, ...next];
       });
+    } finally {
       loadingMoreRef.current = false;
       setLoadingMore(false);
-    }, 250);
-  }, [trendingPosts, allPosts]);
+    }
+  }, [trendingPosts, allPosts, hasMore, page, fetchPosts]);
 
   const handleClear = () => {
     searchRequestRef.current += 1;
@@ -748,7 +791,16 @@ const SearchScreen = ({ navigation, route, language }) => {
   };
 
   const loadMoreSearchResults = () => {
-    if (searchLoading || searchLoadingMoreRef.current || !searchHasMore) return;
+    if (searchLoading || searchLoadingMoreRef.current) return;
+    if (!searchHasMore) {
+      if (searchResults.length === 0 || searchLoopingRef.current) return;
+      searchLoopingRef.current = true;
+      setSearchLoopCount((count) => count + 1);
+      requestAnimationFrame(() => {
+        searchLoopingRef.current = false;
+      });
+      return;
+    }
     searchLoadingMoreRef.current = true;
     runSearch(searchQuery, searchPage + 1).finally(() => {
       searchLoadingMoreRef.current = false;
@@ -973,7 +1025,6 @@ const SearchScreen = ({ navigation, route, language }) => {
     if (searchQuery.trim() !== '' || popularSearches.length === 0) return null;
     return (
       <View style={styles.recentContainer}>
-        <Text style={[styles.recentTitle, { color: subTextColor }]}>{t.popularSearches}</Text>
         <View style={styles.popularChips}>
           {popularSearches.map((item) => (
             <TouchableOpacity
@@ -1138,7 +1189,7 @@ const SearchScreen = ({ navigation, route, language }) => {
     return (
       <FlatList
         key="search-results"
-        data={searchResults}
+        data={displayedSearchResults}
         keyExtractor={(item, index) => `search-${item._id}-${index}`}
         renderItem={renderSearchResultItem}
         contentContainerStyle={[styles.listContent, { backgroundColor: bgColor }]}
@@ -1196,7 +1247,7 @@ const SearchScreen = ({ navigation, route, language }) => {
   };
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: bgColor }]} edges={['left', 'right', 'bottom']}>
+    <SafeAreaView style={[styles.container, { backgroundColor: bgColor }]} edges={['left', 'right']}>
       <View style={{ flex: 1 }}>
         {renderContent()}
       </View>
@@ -1258,6 +1309,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   recentTitle: {
+    marginBottom: 4,
     fontSize: 12,
     fontWeight: '400',
   },
@@ -1281,6 +1333,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 18,
+    MarginTop:5,
     paddingHorizontal: 10,
     gap: 5,
   },

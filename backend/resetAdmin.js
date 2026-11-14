@@ -4,6 +4,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 const connectDB = require('./config/db');
 const { closeDB } = connectDB;
+const adminUserLimits = require('./config/adminUserLimits');
 
 const User = require('./models/User');
 
@@ -20,7 +21,12 @@ const resetAdmin = async () => {
 
     const user = await User.findOneAndUpdate(
       { phone },
-      { username, password: await bcrypt.hash(password, 10), role: 'admin' },
+      {
+        username,
+        password: await bcrypt.hash(password, 10),
+        role: 'admin',
+        ...adminUserLimits,
+      },
       { new: true, runValidators: false }
     );
     if (!user) {

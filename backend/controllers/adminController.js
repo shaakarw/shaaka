@@ -8,6 +8,11 @@ const BusinessIdea = require('../models/BusinessIdea');
 const { isValidObjectId } = require('../utils/objectId');
 const { computeAggregatedLimits, getActiveSubscriptions } = require('../utils/subscriptionHelpers_clean');
 const { deleteMallShopWithCleanup, deleteShopWithCleanup } = require('../utils/deletionCleanup');
+const {
+  getDailyUsage,
+  getLifetimeUsage,
+  getNextDailyReset,
+} = require('../utils/permissionUsage');
 
 // -------- DASHBOARD STATISTICS --------
 exports.getDashboardStats = async (req, res) => {
@@ -595,34 +600,47 @@ exports.getPayments = async (req, res) => {
 exports.updateUserLimits = async (req, res) => {
   try {
     const { userId } = req.params;
-    const {
-      postUploadLimitPerDay,
-      shopUploadLimitLifetime,
-      placeProductUploadLimitPerDay,
-      mallShopUploadLimitLifetime,
-      mallProductUploadLimitPerDay,
-      imagesPerMessage,
-      imagesRetentionDays,
-      messagesRetentionDays,
-      allowVideoUpload,
-      videoUploadLimitPerDay,
-    } = req.body;
     const updates = {};
-    const clampLimit = (value) => Math.min(100, Math.max(0, Number.isFinite(value) ? value : 0));
-
-    if (typeof postUploadLimitPerDay === 'number') updates.postUploadLimitPerDay = clampLimit(postUploadLimitPerDay);
-    if (typeof shopUploadLimitLifetime === 'number') updates.shopUploadLimitLifetime = clampLimit(shopUploadLimitLifetime);
-    if (typeof placeProductUploadLimitPerDay === 'number') updates.placeProductUploadLimitPerDay = clampLimit(placeProductUploadLimitPerDay);
-    if (typeof mallShopUploadLimitLifetime === 'number') updates.mallShopUploadLimitLifetime = clampLimit(mallShopUploadLimitLifetime);
-    if (typeof mallProductUploadLimitPerDay === 'number') updates.mallProductUploadLimitPerDay = clampLimit(mallProductUploadLimitPerDay);
-    if (typeof imagesPerMessage === 'number') updates.imagesPerMessage = clampLimit(imagesPerMessage);
-    if (typeof imagesRetentionDays === 'number') updates.imagesRetentionDays = clampLimit(imagesRetentionDays);
-    if (typeof messagesRetentionDays === 'number') updates.messagesRetentionDays = clampLimit(messagesRetentionDays);
-    if (typeof allowVideoUpload === 'boolean') updates.allowVideoUpload = allowVideoUpload;
-    if (typeof videoUploadLimitPerDay === 'number') updates.videoUploadLimitPerDay = clampLimit(videoUploadLimitPerDay);
+    const numericPermissions = [
+      'postUploadLimitPerDay',
+      'shopUploadLimitLifetime',
+      'placeProductUploadLimitPerDay',
+      'mallShopUploadLimitLifetime',
+      'mallProductUploadLimitPerDay',
+      'imagesPerMessage',
+      'imagesRetentionDays',
+      'messagesRetentionDays',
+      'videoUploadLimitPerDay',
+    ];
+    for (const key of numericPermissions) {
+      if (!Object.prototype.hasOwnProperty.call(req.body || {}, key)) continue;
+      const value = req.body[key];
+      if (!Number.isSafeInteger(value) || value < 0 || value > 100) {
+        return res.status(400).json({
+          success: false,
+          message: `${key} must be a whole number between 0 and 100.`,
+        });
+      }
+      updates[key] = value;
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'allowVideoUpload')) {
+      if (typeof req.body.allowVideoUpload !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'allowVideoUpload must be a boolean.' });
+      }
+      updates.allowVideoUpload = req.body.allowVideoUpload;
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: 'At least one valid permission must be provided.' });
+    }
 
     const user = await User.findByIdAndUpdate(userId, updates, { new: true }).select('-password');
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    try {
+      const io = require('../socket').getIO();
+      if (io) io.to(String(user._id)).emit('user-permissions-updated');
+    } catch (socketError) {
+      console.error('Could not notify user about updated permissions:', socketError.message || socketError);
+    }
     res.json({ success: true, message: 'User limits updated', user });
   } catch (err) {
     console.error('Update user limits error:', err);
@@ -661,15 +679,23 @@ exports.getUserDetails = async (req, res) => {
     const totalLimits = computeAggregatedLimits(user);
     const activeSubscriptions = getActiveSubscriptions(user);
 
-    // Today's posts (for usage stats)
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const postsToday = await Post.countDocuments({
-      user: userId,
-      createdAt: { $gte: today, $lt: tomorrow }
-    });
+    const now = new Date();
+    const [
+      postsToday,
+      videosToday,
+      placeProductsToday,
+      mallProductsToday,
+      shopsPlacesUsed,
+      mallShopsUsed,
+    ] = await Promise.all([
+      getDailyUsage(userId, 'posts', now),
+      getDailyUsage(userId, 'videos', now),
+      getDailyUsage(userId, 'place_products', now),
+      getDailyUsage(userId, 'mall_products', now),
+      getLifetimeUsage(userId, 'shops_places'),
+      getLifetimeUsage(userId, 'mall_shops'),
+    ]);
+    const dailyResetAt = getNextDailyReset(now);
 
     // Payment summary
     let totalPaid = 0, paymentCount = 0, lastPayment = null, firstPayment = null;
@@ -691,7 +717,7 @@ exports.getUserDetails = async (req, res) => {
     userData.stoppedPosts = stoppedPosts;
     userData.shops = {
       total: totalShops,
-      maxShops: 1,
+      maxShops: user.shopUploadLimitLifetime,
       totalImages: totalShopImages,
       maxImages: totalLimits.shopImages, // ✅ from aggregated
     };
@@ -715,12 +741,9 @@ exports.getUserDetails = async (req, res) => {
     };
 
     // ✅ Limits from aggregated subscriptions
-    const videoLimit = typeof user.videoUploadLimitPerDay === 'number' ? Math.max(0, user.videoUploadLimitPerDay) : 0;
-    const videosToday = await Post.countDocuments({
-      user: userId,
-      videoUrl: { $exists: true, $ne: '' },
-      createdAt: { $gte: today, $lt: tomorrow }
-    });
+    const videoLimit = typeof user.videoUploadLimitPerDay === 'number'
+      ? Math.max(0, user.videoUploadLimitPerDay)
+      : totalLimits.videoUploadsPerDay;
 
     userData.limits = {
       postsPerDay: totalLimits.postsPerDay,
@@ -733,6 +756,19 @@ exports.getUserDetails = async (req, res) => {
       videoUploadLimitPerDay: videoLimit,
       videosToday,
       remainingVideos: Math.max(videoLimit - videosToday, 0),
+      placeProductUploadLimitPerDay: user.placeProductUploadLimitPerDay,
+      placeProductsToday,
+      remainingPlaceProducts: Math.max(user.placeProductUploadLimitPerDay - placeProductsToday, 0),
+      mallProductUploadLimitPerDay: user.mallProductUploadLimitPerDay,
+      mallProductsToday,
+      remainingMallProducts: Math.max(user.mallProductUploadLimitPerDay - mallProductsToday, 0),
+      shopUploadLimitLifetime: user.shopUploadLimitLifetime,
+      shopsPlacesUsed,
+      mallShopUploadLimitLifetime: user.mallShopUploadLimitLifetime,
+      mallShopsUsed,
+      imagesRetentionDays: user.imagesRetentionDays,
+      messagesRetentionDays: user.messagesRetentionDays,
+      dailyResetAt: dailyResetAt.toISOString(),
     };
 
     userData.stats = {

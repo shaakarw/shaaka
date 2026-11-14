@@ -20,7 +20,7 @@ router.use(auth);
 router.post('/send', uploadMessageMedia, sendMessage);
 
 // Upload multiple images
-router.post('/upload-image', upload.array('images', 10), uploadImage); // Allow up to 10 images per upload (new requirement)
+router.post('/upload-image', upload.messageImages.array('images', 100), uploadImage);
 
 
 // Conversations

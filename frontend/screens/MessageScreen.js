@@ -87,7 +87,10 @@ const deduplicateConversationsByUser = (conversations) => {
   });
 
   return Array.from(groups, group => group.conversation)
-    .sort((a, b) => getConversationTimestamp(b) - getConversationTimestamp(a));
+    .sort((a, b) => (
+      getConversationTimestamp(b) - getConversationTimestamp(a)
+      || String(a.conversationId || '').localeCompare(String(b.conversationId || ''))
+    ));
 };
 
 // ---------- Translations ----------
@@ -763,6 +766,9 @@ const MessageScreen = ({ navigation, language, adminMode = false }) => {
       sellerPhone: sellerPhone,
       postId: conversation?.postId || '',
       postTitle: conversation?.postTitle || '',
+      conversationId: conversation?.conversationId || '',
+      contextType: conversation?.contextType || conversation?.replyPost?.contextType || 'direct',
+      replyPost: conversation?.replyPost || null,
       adminMode,
     });
   };

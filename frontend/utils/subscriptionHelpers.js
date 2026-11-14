@@ -192,6 +192,36 @@ const computeAggregatedLimits = (user) => {
   total.planLabel = highestLabel;
   total.price = highestPrice;
 
+  if (Number.isSafeInteger(user.postUploadLimitPerDay)) {
+    total.postsPerDay = user.postUploadLimitPerDay;
+    total.totalPostImagesPerDay = user.postUploadLimitPerDay * MAX_IMAGES_PER_POST;
+    total.maxTotalPosts = Infinity;
+    total.maxTotalPostImages = Infinity;
+  }
+  if (Number.isSafeInteger(user.imagesPerMessage)) total.imagesPerMessage = user.imagesPerMessage;
+  if (Number.isSafeInteger(user.imagesRetentionDays)) {
+    total.retentionDays = user.imagesRetentionDays;
+    total.messagesAutoDeleteDays = user.imagesRetentionDays;
+  }
+  if (Number.isSafeInteger(user.messagesRetentionDays)) {
+    total.messagesDurationDays = user.messagesRetentionDays;
+  }
+  if (Number.isSafeInteger(user.placeProductUploadLimitPerDay)) {
+    total.placeProductsPerDay = user.placeProductUploadLimitPerDay;
+  }
+  if (Number.isSafeInteger(user.mallProductUploadLimitPerDay)) {
+    total.mallProductsPerDay = user.mallProductUploadLimitPerDay;
+  }
+  if (Number.isSafeInteger(user.videoUploadLimitPerDay)) {
+    total.videoUploadsPerDay = user.videoUploadLimitPerDay;
+  }
+  if (Number.isSafeInteger(user.shopUploadLimitLifetime)) {
+    total.shopsLifetime = user.shopUploadLimitLifetime;
+  }
+  if (Number.isSafeInteger(user.mallShopUploadLimitLifetime)) {
+    total.mallShopsLifetime = user.mallShopUploadLimitLifetime;
+  }
+
   return total;
 };
 

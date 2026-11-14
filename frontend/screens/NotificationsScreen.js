@@ -18,6 +18,10 @@ import { offlineDatabase } from '../services/offlineDatabase';
 
 const fallbackImage = require('../assets/profile1.png');
 const notificationMemoryCache = new Map();
+const filterNotifications = notifications => notifications.filter(notification => (
+  !['NEW_MESSAGE', 'message'].includes(notification.type)
+  || Boolean(notification.postId || notification.messageId || notification.conversationId)
+));
 
 const copy = {
   English: { title: 'Notifications', markAll: 'Mark as Read', empty: '', error: 'Failed to load notifications', newPost: 'New post added', newShop: 'New shop added', newPlace: 'New place added', newMall: 'New shopping mall added', newMallShop: 'New shop added to shopping mall', mapPlace: 'New place added to the map', password: 'Your password was successfully changed.', name: 'Your account name was successfully changed.' },
@@ -39,7 +43,9 @@ export default function NotificationsScreen({ navigation, language = 'English' }
   const t = copy[language] || copy.English;
   const cacheKey = user?._id || user?.id || user?.phone;
   const memoryCachedItems = cacheKey ? notificationMemoryCache.get(String(cacheKey)) : null;
-  const [items, setItems] = useState(() => (Array.isArray(memoryCachedItems) ? memoryCachedItems : []));
+  const [items, setItems] = useState(() => (
+    Array.isArray(memoryCachedItems) ? filterNotifications(memoryCachedItems) : []
+  ));
   const [loading, setLoading] = useState(!Array.isArray(memoryCachedItems));
   const [error, setError] = useState(false);
 
@@ -67,8 +73,9 @@ export default function NotificationsScreen({ navigation, language = 'English' }
         try {
           const cachedItems = await offlineDatabase.getRecord('notifications', String(cacheKey));
           if (Array.isArray(cachedItems)) {
-            notificationMemoryCache.set(String(cacheKey), cachedItems);
-            setItems(cachedItems);
+            const visibleItems = filterNotifications(cachedItems);
+            notificationMemoryCache.set(String(cacheKey), visibleItems);
+            setItems(visibleItems);
             setError(false);
             setLoading(false);
             cachedContentAvailable = true;
@@ -80,7 +87,7 @@ export default function NotificationsScreen({ navigation, language = 'English' }
 
       setError(false);
       const response = await axios.get(`${BASE_URL}/api/notifications`, { headers: { Authorization: `Bearer ${token}` } });
-      const notifications = response.data.notifications || [];
+      const notifications = filterNotifications(response.data.notifications || []);
       setItems(notifications);
       persistItems(notifications);
     } catch (err) {

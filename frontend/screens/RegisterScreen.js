@@ -972,10 +972,11 @@ const RegisterScreen = ({ navigation, language = 'English' }) => {
             </View>
 
             <View style={styles.loginRedirect}>
+               <TouchableOpacity onPress={() => navigation.navigate('Login')}>
               <Text style={[styles.loginRedirectText, { color: theme.textSecondary }]}>
                 {t.alreadyAccount}
               </Text>
-              <TouchableOpacity onPress={() => navigation.navigate('Login')}>
+             
                 <Text style={[styles.loginLink, { color: theme.text }]}>{t.login}</Text>
               </TouchableOpacity>
             </View>

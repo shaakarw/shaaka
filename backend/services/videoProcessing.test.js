@@ -9,6 +9,7 @@ const Post = require('../models/Post');
 const { processVideoBuffer, readVideoDuration } = require('./videoProcessing');
 
 let fixtureBuffer;
+let longFixtureBuffer;
 let fixtureDirectory;
 
 before(async () => {
@@ -23,6 +24,18 @@ before(async () => {
     fixturePath,
   ], { windowsHide: true });
   fixtureBuffer = await fs.readFile(fixturePath);
+
+  const longFixturePath = path.join(fixtureDirectory, 'long.mp4');
+  execFileSync(ffmpegPath, [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:r=1',
+    '-t', '121',
+    '-an',
+    '-c:v', 'mpeg4',
+    '-pix_fmt', 'yuv420p',
+    longFixturePath,
+  ], { windowsHide: true });
+  longFixtureBuffer = await fs.readFile(longFixturePath);
 });
 
 after(async () => {
@@ -32,8 +45,23 @@ after(async () => {
 test('validates actual video duration and produces a compressed JPEG cover', async () => {
   const result = await processVideoBuffer(fixtureBuffer);
   assert.ok(Number.isFinite(result.duration) && Math.abs(result.duration - 3) <= 0.1);
+  assert.equal(result.wasTrimmed, false);
+  assert.equal(result.videoBuffer, fixtureBuffer);
   assert.ok(result.thumbnailBuffer.length > 3 && result.thumbnailBuffer.length <= 3 * 1024 * 1024);
   assert.deepEqual([...result.thumbnailBuffer.subarray(0, 3)], [0xff, 0xd8, 0xff]);
+});
+
+test('trims videos longer than two minutes before upload', async () => {
+  const result = await processVideoBuffer(longFixtureBuffer);
+  assert.equal(result.wasTrimmed, true);
+  assert.ok(result.duration > 119 && result.duration <= 120);
+  assert.equal(result.mimeType, 'video/mp4');
+  assert.notEqual(result.videoBuffer, longFixtureBuffer);
+
+  const trimmedPath = path.join(fixtureDirectory, 'trimmed-result.mp4');
+  await fs.writeFile(trimmedPath, result.videoBuffer);
+  const uploadedDuration = await readVideoDuration(trimmedPath);
+  assert.ok(uploadedDuration > 119 && uploadedDuration <= 120);
 });
 
 test('rejects unreadable video data before returning a cover', async () => {

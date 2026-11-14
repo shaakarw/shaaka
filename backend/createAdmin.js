@@ -5,6 +5,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 const connectDB = require('./config/db');
 const { closeDB } = connectDB;
+const adminUserLimits = require('./config/adminUserLimits');
 
 // Adjust path to your User model if needed
 const User = require('./models/User');
@@ -46,6 +47,9 @@ const createAdmin = async () => {
         console.log('🔑 Admin password reset');
       }
 
+      Object.assign(existing, adminUserLimits);
+      await existing.save();
+
       console.log('✅ Admin is ready – you can now log in with:');
       console.log(`   Phone: ${phone}`);
     } else {
@@ -59,6 +63,7 @@ const createAdmin = async () => {
         idNumber: idNumber,          // Now 16 digits
         password,
         role: 'admin',
+        ...adminUserLimits,
         name: 'Admin',
         avatar: '',
         location: 'Kigali, Rwanda',

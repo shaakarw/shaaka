@@ -7,6 +7,7 @@ const nodemailer = require('nodemailer');
 const bcrypt = require('bcryptjs');
 const { normalizeRwandaPhone, isValidRwandaPhone, normalizeForAuth } = require('../utils/phoneNormalizer');
 const { notifyUser } = require('../services/notificationService');
+const { DEFAULT_USER_PERMISSIONS } = require('../config/userPermissions');
 
 const generateToken = (id, tokenVersion = 0, sessionId = '', deviceId = '') => {
   return jwt.sign({ id, tokenVersion, sessionId, deviceId }, process.env.JWT_SECRET);
@@ -40,6 +41,8 @@ exports.register = async (req, res) => {
       username: username.toLowerCase(),
       password,
       lastActiveAt: new Date(),
+      ...DEFAULT_USER_PERMISSIONS,
+      allowVideoUpload: true,
     });
 
     const token = generateToken(user._id, user.tokenVersion);
@@ -53,6 +56,16 @@ exports.register = async (req, res) => {
         idNumber: user.idNumber,
         username: user.username,
         role: user.role || 'user',
+        postUploadLimitPerDay: user.postUploadLimitPerDay,
+        shopUploadLimitLifetime: user.shopUploadLimitLifetime,
+        placeProductUploadLimitPerDay: user.placeProductUploadLimitPerDay,
+        mallShopUploadLimitLifetime: user.mallShopUploadLimitLifetime,
+        mallProductUploadLimitPerDay: user.mallProductUploadLimitPerDay,
+        imagesPerMessage: user.imagesPerMessage,
+        imagesRetentionDays: user.imagesRetentionDays,
+        messagesRetentionDays: user.messagesRetentionDays,
+        videoUploadLimitPerDay: user.videoUploadLimitPerDay,
+        allowVideoUpload: user.allowVideoUpload,
       },
     });
   } catch (error) {
@@ -134,6 +147,16 @@ exports.login = async (req, res) => {
         avatar: user.avatar,
         location: user.location,
         bio: user.bio,
+        postUploadLimitPerDay: user.postUploadLimitPerDay,
+        shopUploadLimitLifetime: user.shopUploadLimitLifetime,
+        placeProductUploadLimitPerDay: user.placeProductUploadLimitPerDay,
+        mallShopUploadLimitLifetime: user.mallShopUploadLimitLifetime,
+        mallProductUploadLimitPerDay: user.mallProductUploadLimitPerDay,
+        imagesPerMessage: user.imagesPerMessage,
+        imagesRetentionDays: user.imagesRetentionDays,
+        messagesRetentionDays: user.messagesRetentionDays,
+        videoUploadLimitPerDay: user.videoUploadLimitPerDay,
+        allowVideoUpload: user.allowVideoUpload,
       },
       session: { sessionId, deviceId },
     });
@@ -334,11 +357,6 @@ exports.getMe = async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select('-password');
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
 
     const userObj = user.toObject();
 

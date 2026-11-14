@@ -25,5 +25,15 @@ const fileFilter = (req, file, cb) => {
 
 // ✅ Export the multer instance, NOT the result of .array()
 const upload = multer({ storage, fileFilter });
+upload.posts = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 80 * 1024 * 1024 },
+});
+upload.messageImages = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 3 * 1024 * 1024, files: 100 },
+});
 
 module.exports = upload;

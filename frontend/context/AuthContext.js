@@ -1,10 +1,9 @@
 // context/AuthContext.js
 import React, { createContext, useState, useContext, useEffect, useRef, useCallback } from 'react';
-import { Alert } from 'react-native';
+import { Alert, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { getApiUrl } from '../config';
-import { isReelsActive } from '../services/reelActivity';
 import { logPerformance } from '../utils/performanceLogger';
 import { networkStatus } from '../services/networkStatus';
 import { getAuthToken, removeAuthToken, setAuthToken } from '../utils/authStorage';
@@ -139,12 +138,16 @@ export const AuthProvider = ({ children }) => {
     let active = true;
     let socket;
     const checkSession = async () => {
-      if (!active || isReelsActive() || !(await networkStatus.start()).isOnline) return;
+      if (!active) return;
+      const status = await networkStatus.start();
+      if (!active || !status.isOnline) return;
       try {
         const response = await axios.get(`${getApiUrl()}/api/auth/session`, getAuthHeaders(token));
+        if (!active) return;
         const sessionId = response.data?.session?.sessionId;
         if (sessionId) await AsyncStorage.setItem('sessionId', sessionId);
       } catch (error) {
+        if (!active) return;
         if (isInvalidatedSession(error)) {
           await handleInvalidatedUserSession();
         } else if (error?.response?.status >= 500) {
@@ -177,6 +180,19 @@ export const AuthProvider = ({ children }) => {
         }
         handleInvalidatedUserSession(data?.message).catch(error => console.error('Could not end invalidated session:', error));
       });
+      socket.on('user-permissions-updated', async () => {
+        try {
+          const response = await axios.get(`${getApiUrl()}/api/auth/me`, getAuthHeaders(token));
+          if (!active || !response.data?.success) return;
+          const updatedUser = response.data.user;
+          setUser(updatedUser);
+          await AsyncStorage.setItem('user', JSON.stringify(updatedUser));
+          await AsyncStorage.setItem('sessionUser', JSON.stringify(updatedUser));
+        } catch (error) {
+          if (isInvalidatedSession(error)) await handleInvalidatedUserSession();
+          else console.warn('Could not refresh updated user permissions:', error?.response?.data?.message || error.message);
+        }
+      });
     } catch (error) {
       console.error('Could not initialize the session socket:', error);
     }
@@ -187,6 +203,9 @@ export const AuthProvider = ({ children }) => {
     const unsubscribeNetwork = networkStatus.subscribe(status => {
       if (status.isOnline) checkSession().catch(error => console.error('Session verification failed:', error));
     });
+    const appStateSubscription = AppState.addEventListener('change', state => {
+      if (state === 'active') checkSession().catch(error => console.error('Session verification failed:', error));
+    });
     checkSession().catch(error => console.error('Initial session verification failed:', error));
 
     return () => {
@@ -194,6 +213,7 @@ export const AuthProvider = ({ children }) => {
       socket?.disconnect();
       clearInterval(pollId);
       unsubscribeNetwork();
+      appStateSubscription.remove();
     };
   }, [isAuthenticated, token]);
 

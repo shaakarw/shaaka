@@ -9,6 +9,7 @@ const sharp = require('sharp');
 
 const execFileAsync = promisify(execFile);
 const MAX_THUMBNAIL_BYTES = 3 * 1024 * 1024;
+const MAX_POST_VIDEO_DURATION_SECONDS = 120;
 const UNSUPPORTED_VIDEO_MESSAGE = 'Unsupported video. Please select a valid video with a readable duration.';
 
 const runMediaCommand = (command, args, timeout) => execFileAsync(command, args, {
@@ -74,6 +75,36 @@ const extractFallbackFrame = async (videoPath, framePath) => {
   if (!stat.isFile() || stat.size === 0) throw new Error('No frame was extracted.');
 };
 
+const trimVideo = async (videoPath, outputPath) => {
+  try {
+    await runMediaCommand(ffmpegPath, [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-i', videoPath,
+      '-t', String(MAX_POST_VIDEO_DURATION_SECONDS),
+      '-map', '0:v:0',
+      '-map', '0:a?',
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '23',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-movflags', '+faststart',
+      outputPath,
+    ], 120000);
+    const duration = await readVideoDuration(outputPath);
+    if (duration > MAX_POST_VIDEO_DURATION_SECONDS) {
+      throw new Error(`Trimmed video duration exceeds ${MAX_POST_VIDEO_DURATION_SECONDS} seconds.`);
+    }
+    return duration;
+  } catch (cause) {
+    const error = new Error('Could not trim the selected video to the 2-minute limit. Please select another video.');
+    error.statusCode = 422;
+    error.cause = cause;
+    throw error;
+  }
+};
+
 const scoreFrame = async framePath => {
   const { channels } = await sharp(framePath)
     .resize({ width: 64, height: 64, fit: 'inside' })
@@ -118,14 +149,23 @@ const processVideoBuffer = async buffer => {
       throw error;
     }
     console.info('[Video] Metadata extraction completed. Duration (seconds):', duration);
+    let processedVideoPath = videoPath;
+    let processedDuration = duration;
+    let wasTrimmed = false;
+    if (duration > MAX_POST_VIDEO_DURATION_SECONDS) {
+      processedVideoPath = path.join(tempDir, 'trimmed.mp4');
+      processedDuration = await trimVideo(videoPath, processedVideoPath);
+      wasTrimmed = true;
+      console.info('[Video] Video trimmed to duration (seconds):', processedDuration);
+    }
     const candidates = [];
     const candidateDirectory = path.join(tempDir, 'candidates');
     await fs.mkdir(candidateDirectory);
     try {
       await extractCandidateFrames(
-        videoPath,
+        processedVideoPath,
         path.join(candidateDirectory, 'candidate-%02d.jpg'),
-        duration.toFixed(3)
+        processedDuration.toFixed(3)
       );
       const frameNames = (await fs.readdir(candidateDirectory))
         .filter(name => /^candidate-\d+\.jpg$/.test(name))
@@ -142,7 +182,7 @@ const processVideoBuffer = async buffer => {
     if (candidates.length === 0) {
       const fallbackPath = path.join(tempDir, 'fallback.jpg');
       try {
-        await extractFallbackFrame(videoPath, fallbackPath);
+        await extractFallbackFrame(processedVideoPath, fallbackPath);
         candidates.push({ framePath: fallbackPath, usable: false, score: 0 });
       } catch (error) {
         const processingError = new Error('Could not generate a cover image for this video.');
@@ -155,10 +195,20 @@ const processVideoBuffer = async buffer => {
     const framesToRank = usableCandidates.length ? usableCandidates : candidates;
     framesToRank.sort((left, right) => right.score - left.score);
     const thumbnailBuffer = await createThumbnail(framesToRank[0].framePath);
-    return { duration, thumbnailBuffer };
+    return {
+      duration: processedDuration,
+      thumbnailBuffer,
+      videoBuffer: wasTrimmed ? await fs.readFile(processedVideoPath) : buffer,
+      mimeType: wasTrimmed ? 'video/mp4' : undefined,
+      wasTrimmed,
+    };
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 };
 
-module.exports = { processVideoBuffer, readVideoDuration };
+module.exports = {
+  MAX_POST_VIDEO_DURATION_SECONDS,
+  processVideoBuffer,
+  readVideoDuration,
+};

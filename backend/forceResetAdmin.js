@@ -4,6 +4,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 const connectDB = require('./config/db');
 const { closeDB } = connectDB;
+const adminUserLimits = require('./config/adminUserLimits');
 
 // Direct import of the User model (or you can use the connection)
 const User = require('./models/User');
@@ -23,7 +24,7 @@ const forceReset = async () => {
     // Option 1: Use findOneAndUpdate with model (bypasses pre-save hooks if any)
     const result = await User.findOneAndUpdate(
       { phone },
-      { username, password: hashed, role: 'admin' },
+      { username, password: hashed, role: 'admin', ...adminUserLimits },
       { new: true, runValidators: false } // skip validators to be safe
     );
 
@@ -35,6 +36,7 @@ const forceReset = async () => {
         idNumber: '1234567890123456',
         password: newPassword,
         role: 'admin',
+        ...adminUserLimits,
         name: 'Admin',
         avatar: '',
         location: 'Kigali, Rwanda',

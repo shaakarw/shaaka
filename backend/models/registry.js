@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const createModel = require('./sqlModel');
+const { DEFAULT_USER_PERMISSIONS } = require('../config/userPermissions');
 
 const userDefaults = {
   role: 'user',
@@ -30,16 +31,8 @@ const userDefaults = {
   savedPosts: [],
   blocked: false,
   dailyMessagesUsed: 0,
-  postUploadLimitPerDay: 0,
-  shopUploadLimitLifetime: 0,
-  mallShopUploadLimitLifetime: 0,
-  placeProductUploadLimitPerDay: 0,
-  mallProductUploadLimitPerDay: 0,
-  allowVideoUpload: false,
-  videoUploadLimitPerDay: 0,
-  imagesPerMessage: 0,
-  imagesRetentionDays: 0,
-  messagesRetentionDays: 0,
+  ...DEFAULT_USER_PERMISSIONS,
+  allowVideoUpload: true,
   plan: 'free',
   planName: 'Free',
   planExpiry: null,
@@ -103,7 +96,7 @@ const Message = createModel('Message', 'messages', {
   },
   timestamps: true,
   defaults: {
-    postId: '', text: '', imageUrl: '', imageUrls: [], videoUrl: '', audioUrl: '',
+    conversationId: '', contextType: 'direct', postId: '', text: '', imageUrl: '', imageUrls: [], videoUrl: '', audioUrl: '',
     imageStorageKey: '', imageStorageKeys: [], videoStorageKey: '', audioStorageKey: '',
     storageProvider: '', cloudinaryPublicId: '', cloudinaryResourceType: '',
     read: false, isEdited: false,

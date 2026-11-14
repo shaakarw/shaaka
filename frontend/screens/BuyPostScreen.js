@@ -61,9 +61,8 @@ const SILENT_REFRESH_MS = 2000;
 
 const EYE_BUTTON_SIZE = 52;
 const EYE_BACKGROUND_SIZE = (EYE_BUTTON_SIZE + 10) / 1.1;
-const EYE_BUTTON_MARGIN = 8;
+const EYE_BUTTON_MARGIN = 2;
 const EYE_BUTTON_MIN_TOP = 80;
-const EYE_BUTTON_BOTTOM_PADDING = 100;
 
 const POST_MEDIA_MIN_RATIO = 0.30;
 const POST_MEDIA_MAX_RATIO = 0.75;
@@ -1485,6 +1484,7 @@ const HouseCard = React.memo(({
     minMediaHeight || 0,
     Math.min(mediaHeight, maxMediaHeight)
   );
+  const actionScale = Math.max(0.85, Math.min(1.25, boundedMediaHeight / 500));
 
   useEffect(() => {
     setShowFullDesc(false);
@@ -1652,12 +1652,12 @@ const HouseCard = React.memo(({
           </TouchableOpacity>
         )}
 
-        <View style={styles.rightActions}>
+        <View style={[styles.rightActions, { gap: 12 * actionScale }]}>
           {!isMyPost && (
-            <TouchableOpacity style={styles.rightActionBtn} onPress={handleToggleSave} activeOpacity={0.8}>
+            <TouchableOpacity style={[styles.rightActionBtn, { paddingVertical: 3 * actionScale }]} onPress={handleToggleSave} activeOpacity={0.8}>
               <Ionicons
                 name={isSaved ? 'bookmark' : 'bookmark-outline'}
-                size={32}
+                size={Math.round(26 * actionScale)}
                 color={isSaved ? '#d87428' : '#ffffff'}
                 style={styles.rightActionIcon}
               />
@@ -1665,20 +1665,20 @@ const HouseCard = React.memo(({
           )}
 
           {!isMyPost && (
-            <TouchableOpacity style={styles.rightActionBtn} onPress={handleMessage} activeOpacity={0.8}>
+            <TouchableOpacity style={[styles.rightActionBtn, { paddingVertical: 3 * actionScale }]} onPress={handleMessage} activeOpacity={0.8}>
               <Ionicons
                 name="chatbubble-ellipses"
-                size={30}
+                size={Math.round(24 * actionScale)}
                 color="#ffffff"
                 style={styles.rightActionIcon}
               />
             </TouchableOpacity>
           )}
 
-          <TouchableOpacity style={styles.rightActionBtn} onPress={handleShare} activeOpacity={0.8}>
+          <TouchableOpacity style={[styles.rightActionBtn, { paddingVertical: 3 * actionScale }]} onPress={handleShare} activeOpacity={0.8}>
             <Ionicons
               name="arrow-redo"
-              size={30}
+              size={Math.round(24 * actionScale)}
               color="#ffffff"
               style={styles.rightActionIcon}
             />
@@ -1686,14 +1686,19 @@ const HouseCard = React.memo(({
 
           {!isMyPost && (
             <TouchableOpacity
-              style={styles.rightActionBtn}
+              style={[styles.rightActionBtn, { paddingVertical: 3 * actionScale }]}
               onPress={handleReportPress}
               activeOpacity={0.8}
             >
-              <View style={styles.reportIconWrap}>
-                <View style={[styles.menuIconLine, styles.menuIconLineFirst]} />
-                <View style={[styles.menuIconLine, styles.menuIconLineFull]} />
-                <View style={[styles.menuIconLine, styles.menuIconLineLast]} />
+              <View style={[styles.reportIconWrap, {
+                width: 26 * actionScale,
+                height: 22 * actionScale,
+                paddingHorizontal: 4 * actionScale,
+                paddingVertical: 5 * actionScale,
+              }]}>
+                <View style={[styles.menuIconLine, styles.menuIconLineFirst, { height: 2 * actionScale }]} />
+                <View style={[styles.menuIconLine, styles.menuIconLineFull, { height: 2 * actionScale }]} />
+                <View style={[styles.menuIconLine, styles.menuIconLineLast, { height: 2 * actionScale }]} />
               </View>
             </TouchableOpacity>
           )}
@@ -2282,7 +2287,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
 
   const eyePosRef = useRef({
     x: SCREEN_WIDTH - EYE_BUTTON_SIZE - EYE_BUTTON_MARGIN,
-    y: SCREEN_HEIGHT - EYE_BUTTON_SIZE - EYE_BUTTON_BOTTOM_PADDING,
+    y: (SCREEN_HEIGHT - EYE_BUTTON_SIZE) / 2,
   });
   const eyeDragStartRef = useRef({ x: 0, y: 0 });
   const eyePos = useRef(new Animated.ValueXY(eyePosRef.current)).current;
@@ -2936,15 +2941,6 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
         { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
       );
       updateSuggestionState(house._id, { status: 'success', message: t.messageSent, sentText: text });
-      navigation.navigate('Chat', {
-        sellerId: String(sellerId),
-        sellerName: sellerDisplayName,
-        sellerAvatar: house.userAvatar || house.user?.avatar || '',
-        sellerPhone: house.contactNumber1 || house.contactNumber2 || '',
-        postId,
-        postTitle: house.productName || house.title || 'Product',
-        replyPost,
-      });
     } catch (error) {
       console.error('Quick send failed', error);
       if (error.response?.status === 401) {
@@ -2957,7 +2953,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
     } finally {
       setIsSendingSuggestion(false);
     }
-  }, [isLoggedIn, t, getToken, currentUser, viewerId, updateSuggestionState, navigation]);
+  }, [isLoggedIn, t, getToken, currentUser, viewerId, updateSuggestionState]);
 
   const handleDeletePost = useCallback(async (postId) => {
     try {
@@ -3094,6 +3090,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
       postId: String(postId),
       postTitle: productName,
       replyPost: buildChatReplyPost(house),
+      forceReplyPost: true,
     });
   }, [isLoggedIn, t, navigation, viewerId, showBottomSheet]);
 
@@ -3626,6 +3623,7 @@ const BuyPostScreen = ({ navigation, language, initialTab = 'ushaka' }) => {
               { ...POST_SECTIONS.videos, label: t.videos, icon: 'videocam-outline' },
               { ...POST_SECTIONS.myPosts, label: t.myPosts, icon: 'person-outline' },
               { ...POST_SECTIONS.saved, label: t.saved, icon: 'bookmark-outline' },
+
             ].map(tab => {
               const isActive = activeTab === tab.key;
               return (
@@ -4296,12 +4294,12 @@ const styles = StyleSheet.create({
     bottom: 5,
     alignItems: 'center',
     zIndex: 8,
-    gap: 18,
+    gap: 12,
   },
   rightActionBtn: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 4,
+    paddingVertical: 3,
   },
   rightActionIcon: {
     textShadowColor: 'rgba(0,0,0,0.5)',
@@ -4310,12 +4308,12 @@ const styles = StyleSheet.create({
   },
 
   reportIconWrap: {
-    width: 30,
-    height: 26,
+    width: 26,
+    height: 22,
     borderRadius: 6,
     backgroundColor: 'rgba(0,0,0,0.35)',
-    paddingHorizontal: 5,
-    paddingVertical: 6,
+    paddingHorizontal: 4,
+    paddingVertical: 5,
     flexDirection: 'column',
     justifyContent: 'space-between',
     alignItems: 'flex-start',

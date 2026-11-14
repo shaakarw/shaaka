@@ -21,7 +21,7 @@ router.get('/search', searchPosts);
 router.get('/search/popular', getPopularSearches);
 router.post('/search/analytics', trackSearchEvent);
 router.get('/', getAllPosts);
-router.post('/', auth, upload.fields([
+router.post('/', auth, upload.posts.fields([
   { name: 'images', maxCount: 10 },
   { name: 'video', maxCount: 1 },
 ]), createPost);

@@ -532,38 +532,7 @@ const WelcomeHomeScreen = ({
                   {t.buySell}
                 </Text>
               </TouchableOpacity>
-
-              <TouchableOpacity
-                ref={businessRef}
-                style={[
-                  styles.selectionCard,
-                  {
-                    backgroundColor:
-                      activeCard === 'business' ? colors.activeCardBg : colors.inactiveCardBg,
-                    borderColor:
-                      activeCard === 'business' ? colors.activeCardBg : colors.border,
-                  },
-                ]}
-                onPress={() =>
-                  handleCardPress('business', () => {
-                    navigation.navigate('BusinessIdeas');
-                  })
-                }
-              >
-                <Ionicons
-                  name="bulb-outline"
-                  size={18}
-                  color={activeCard === 'business' ? colors.activeText : colors.textSecondary}
-                />
-                <Text
-                  style={[
-                    styles.selectionTitle,
-                    { color: activeCard === 'business' ? colors.activeText : colors.textPrimary },
-                  ]}
-                >
-                  {t.businessIdeas}
-                </Text>
-              </TouchableOpacity>
+              
             </View>
 
             <View ref={trendingRef} style={{ width: '100%' }}>
@@ -678,19 +647,19 @@ const styles = StyleSheet.create({
   },
   topContent: { alignItems: 'center', width: '100%' },
   welcomeText: {
-    fontSize: Math.min(width * 0.07, 30),
+    fontSize: Math.min(width * 0.07, 25),
     fontWeight: 'bold', fontFamily: 'Irish Grover',
     textAlign: 'center', width: '100%', marginBottom: 8,
   },
   selectionContainer: {
     flexDirection: 'row', justifyContent: 'space-between',
-    width: '100%', gap: 8, marginTop: 4, marginBottom: 20,
+    width: '90%', gap: 8, marginTop: 2, marginBottom: 7,
   },
   selectionCard: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12, paddingHorizontal: 6,
+    paddingVertical: 10, paddingHorizontal: 6,
     borderRadius: 16, borderWidth: 2, justifyContent: 'center', gap: 4,
     shadowColor: '#828282', shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.1, shadowRadius: 3, elevation: 2,

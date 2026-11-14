@@ -3,24 +3,47 @@
 
 const MAX_IMAGES_PER_POST = 2;
 
+const { DEFAULT_USER_PERMISSIONS } = require('../config/userPermissions');
+
 const DEFAULTS = {
-  imagesPerMessage: 10,
-  postsPerDay: 1,
+  imagesPerMessage: DEFAULT_USER_PERMISSIONS.imagesPerMessage,
+  postsPerDay: DEFAULT_USER_PERMISSIONS.postUploadLimitPerDay,
   totalPostImagesPerDay: 2,
-  imagesRetentionDays: 5,
-  messagesRetentionDays: 30,
+  imagesRetentionDays: DEFAULT_USER_PERMISSIONS.imagesRetentionDays,
+  messagesRetentionDays: DEFAULT_USER_PERMISSIONS.messagesRetentionDays,
 };
 
 const computeAggregatedLimits = (user) => {
   const postsPerDay = (user && typeof user.postUploadLimitPerDay === 'number') ? user.postUploadLimitPerDay : DEFAULTS.postsPerDay;
-  const imagesPerMessage = DEFAULTS.imagesPerMessage;
+  const imagesPerMessage = user && Number.isSafeInteger(user.imagesPerMessage)
+    ? user.imagesPerMessage
+    : DEFAULTS.imagesPerMessage;
 
   return {
     imagesPerMessage,
     postsPerDay,
     totalPostImagesPerDay: DEFAULTS.totalPostImagesPerDay,
-    imagesRetentionDays: DEFAULTS.imagesRetentionDays,
-    messagesRetentionDays: DEFAULTS.messagesRetentionDays,
+    imagesRetentionDays: user && Number.isSafeInteger(user.imagesRetentionDays)
+      ? user.imagesRetentionDays
+      : DEFAULTS.imagesRetentionDays,
+    messagesRetentionDays: user && Number.isSafeInteger(user.messagesRetentionDays)
+      ? user.messagesRetentionDays
+      : DEFAULTS.messagesRetentionDays,
+    placesPerDay: user && Number.isSafeInteger(user.placeProductUploadLimitPerDay)
+      ? user.placeProductUploadLimitPerDay
+      : DEFAULT_USER_PERMISSIONS.placeProductUploadLimitPerDay,
+    mallProductsPerDay: user && Number.isSafeInteger(user.mallProductUploadLimitPerDay)
+      ? user.mallProductUploadLimitPerDay
+      : DEFAULT_USER_PERMISSIONS.mallProductUploadLimitPerDay,
+    shopsLifetime: user && Number.isSafeInteger(user.shopUploadLimitLifetime)
+      ? user.shopUploadLimitLifetime
+      : DEFAULT_USER_PERMISSIONS.shopUploadLimitLifetime,
+    mallShopsLifetime: user && Number.isSafeInteger(user.mallShopUploadLimitLifetime)
+      ? user.mallShopUploadLimitLifetime
+      : DEFAULT_USER_PERMISSIONS.mallShopUploadLimitLifetime,
+    videoUploadsPerDay: user && Number.isSafeInteger(user.videoUploadLimitPerDay)
+      ? user.videoUploadLimitPerDay
+      : DEFAULT_USER_PERMISSIONS.videoUploadLimitPerDay,
   };
 };
 

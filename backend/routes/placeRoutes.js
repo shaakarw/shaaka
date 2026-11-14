@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const Place = require('../models/Place');
 const User = require('../models/User');
-const MallShop = require('../models/MallShop');
 const auth = require('../middleware/auth');
 const multer = require('multer');
 const path = require('path');
@@ -12,6 +11,16 @@ const { resolveStoredImageUrl } = require('../utils/storedImageUrl');
 const { normalizeRwandaPhone, isValidRwandaPhone } = require('../utils/phoneNormalizer');
 const { notifyUsers } = require('../services/notificationService');
 const { deletePlaceWithCleanup } = require('../utils/deletionCleanup');
+const { DEFAULT_USER_PERMISSIONS } = require('../config/userPermissions');
+const {
+  getDailyUsage,
+  getLifetimeUsage,
+  getNextDailyReset,
+  reserveDailyUsage,
+  releaseDailyUsage,
+  reserveLifetimeUsage,
+  releaseLifetimeUsage,
+} = require('../utils/permissionUsage');
 
 // ---------- Custom multer config for single image ----------
 const storage = multer.memoryStorage();
@@ -82,6 +91,8 @@ router.post('/upload', auth, imageUpload, async (req, res) => {
 
 // POST add product to an existing place (authenticated, owner-only)
 router.post('/:id/products', auth, async (req, res) => {
+  const quotaRequestTime = new Date();
+  let reservedProducts = 0;
   try {
     const { name, price, description, images, imageVariants } = req.body;
     const place = await Place.findById(req.params.id);
@@ -98,18 +109,9 @@ router.post('/:id/products', auth, async (req, res) => {
     // Enforce per-user daily product limit for places (default 1, admin override supported)
     const userId = req.user.id;
     const user = await User.findById(userId).select('placeProductUploadLimitPerDay');
-    const maxProductsPerDay = (user && typeof user.placeProductUploadLimitPerDay === 'number') ? user.placeProductUploadLimitPerDay : 1;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(today);
-    endOfDay.setHours(23, 59, 59, 999);
-
-    const userPlaces = await Place.find({ userId, createdAt: { $gte: today, $lte: endOfDay } });
-    const existingProductsToday = userPlaces.reduce((acc, p) => acc + ((p.products && p.products.length) || 0), 0);
-    if (existingProductsToday >= maxProductsPerDay) {
-      return res.status(403).json({ success: false, message: `You have reached your daily product limit. Maximum ${maxProductsPerDay} products per day.` });
-    }
-
+    const maxProductsPerDay = Number.isSafeInteger(user?.placeProductUploadLimitPerDay)
+      ? user.placeProductUploadLimitPerDay
+      : DEFAULT_USER_PERMISSIONS.placeProductUploadLimitPerDay;
     const product = {
       name,
       price: Number(price),
@@ -120,8 +122,27 @@ router.post('/:id/products', auth, async (req, res) => {
     if (Number.isNaN(product.price)) {
       return res.status(400).json({ success: false, message: 'Invalid price' });
     }
+    const productsToday = await getDailyUsage(userId, 'place_products', quotaRequestTime);
+    if (productsToday >= maxProductsPerDay) {
+      return res.status(403).json({
+        success: false,
+        message: `You have reached your daily product limit. Maximum ${maxProductsPerDay} products per day.`,
+        resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
+      });
+    }
+    reservedProducts = await reserveDailyUsage(userId, 'place_products', 1, maxProductsPerDay, quotaRequestTime)
+      ? 1
+      : 0;
+    if (!reservedProducts) {
+      return res.status(403).json({
+        success: false,
+        message: `You have reached your daily product limit. Maximum ${maxProductsPerDay} products per day.`,
+        resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
+      });
+    }
     place.products.push(product);
     await place.save();
+    reservedProducts = 0;
     res.status(201).json({
       success: true,
       message: 'Product added',
@@ -129,6 +150,10 @@ router.post('/:id/products', auth, async (req, res) => {
       place,
     });
   } catch (error) {
+    if (reservedProducts) {
+      await releaseDailyUsage(req.user.id, 'place_products', reservedProducts, quotaRequestTime)
+        .catch(releaseError => console.error('[Permissions] Could not release failed place product quota:', releaseError.code || releaseError.message));
+    }
     console.error('POST /places/:id/products error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -161,6 +186,9 @@ router.get('/:id', async (req, res) => {
 
 // POST create a new place (authenticated) – expects JSON with image URLs
 router.post('/', auth, async (req, res) => {
+  const quotaRequestTime = new Date();
+  let reservedShopLifetime = false;
+  let reservedPlaceProducts = 0;
   try {
     const {
       name,
@@ -210,31 +238,22 @@ router.post('/', auth, async (req, res) => {
 
     // One-type-only rule: user cannot have both a normal place/shop and a shopping mall shop
     const userId = req.user.id;
-    const existingMallShop = await MallShop.findOne({ ownerId: userId });
-    if (existingMallShop) {
+    const existingMallShopCount = await getLifetimeUsage(userId, 'mall_shops');
+    if (existingMallShopCount > 0) {
       return res.status(403).json({ success: false, message: 'You already have a Shopping Mall Shop. You cannot add a Shop/Place.' });
     }
 
     // Enforce lifetime shop/place limit per user (default 1, admin override supported)
-    const user = await User.findById(userId).select('shopUploadLimitLifetime postUploadLimitPerDay');
-    const maxShopsLifetime = (user && typeof user.shopUploadLimitLifetime === 'number') ? user.shopUploadLimitLifetime : 1;
-    const maxProductsPerDay = (user && typeof user.postUploadLimitPerDay === 'number') ? user.postUploadLimitPerDay : 1;
-
-    const existingPlacesCount = await Place.countDocuments({ userId });
-    if (existingPlacesCount >= maxShopsLifetime) {
+    const user = await User.findById(userId).select('shopUploadLimitLifetime placeProductUploadLimitPerDay');
+    const maxShopsLifetime = Number.isSafeInteger(user?.shopUploadLimitLifetime)
+      ? user.shopUploadLimitLifetime
+      : DEFAULT_USER_PERMISSIONS.shopUploadLimitLifetime;
+    const maxProductsPerDay = Number.isSafeInteger(user?.placeProductUploadLimitPerDay)
+      ? user.placeProductUploadLimitPerDay
+      : DEFAULT_USER_PERMISSIONS.placeProductUploadLimitPerDay;
+    const existingPlacesCount = await getLifetimeUsage(userId, 'shops_places');
+    if (category !== 'shoppingmall' && category !== 'shopping_mall' && existingPlacesCount >= maxShopsLifetime) {
       return res.status(403).json({ success: false, message: `You have reached your lifetime shop limit. Maximum ${maxShopsLifetime} shop/place.` });
-    }
-
-    // Count existing products created by this user today across places
-    const today = new Date();
-    today.setHours(0,0,0,0);
-    const end = new Date(today);
-    end.setHours(23,59,59,999);
-    const existingPlaces = await Place.find({ userId, createdAt: { $gte: today, $lte: end } });
-    const existingProductsCount = existingPlaces.reduce((acc, p) => acc + ((p.products && p.products.length) || 0), 0);
-    const newProductsCount = (products && products.length) ? products.length : 0;
-    if (existingProductsCount + newProductsCount > maxProductsPerDay) {
-      return res.status(403).json({ success: false, message: `Daily product limit reached. Maximum ${maxProductsPerDay} products per day.` });
     }
 
     // Ensure every product has at most one image
@@ -244,6 +263,42 @@ router.post('/', auth, async (req, res) => {
           return res.status(400).json({ success: false, message: 'Each product can contain only one image.' });
         }
       }
+    }
+
+    const isNormalPlace = category !== 'shoppingmall' && category !== 'shopping_mall';
+    const newProductsCount = isNormalPlace && Array.isArray(products) ? products.length : 0;
+    if (isNormalPlace) {
+      reservedShopLifetime = await reserveLifetimeUsage(userId, 'shops_places', 1, maxShopsLifetime);
+      if (!reservedShopLifetime) {
+        return res.status(403).json({ success: false, message: `You have reached your lifetime shop limit. Maximum ${maxShopsLifetime} shop/place.` });
+      }
+    }
+    if (newProductsCount > 0) {
+      const productsToday = await getDailyUsage(userId, 'place_products', quotaRequestTime);
+      if (productsToday + newProductsCount > maxProductsPerDay) {
+        if (reservedShopLifetime) {
+          await releaseLifetimeUsage(userId, 'shops_places', 1);
+          reservedShopLifetime = false;
+        }
+        return res.status(403).json({
+          success: false,
+          message: `Daily product limit reached. Maximum ${maxProductsPerDay} products per day.`,
+          resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
+        });
+      }
+      const productsReserved = await reserveDailyUsage(userId, 'place_products', newProductsCount, maxProductsPerDay, quotaRequestTime);
+      if (!productsReserved) {
+        if (reservedShopLifetime) {
+          await releaseLifetimeUsage(userId, 'shops_places', 1);
+          reservedShopLifetime = false;
+        }
+        return res.status(403).json({
+          success: false,
+          message: `Daily product limit reached. Maximum ${maxProductsPerDay} products per day.`,
+          resetsAt: getNextDailyReset(quotaRequestTime).toISOString(),
+        });
+      }
+      reservedPlaceProducts = newProductsCount;
     }
 
     const newPlace = new Place({
@@ -283,6 +338,8 @@ router.post('/', auth, async (req, res) => {
     });
 
     await newPlace.save();
+    reservedShopLifetime = false;
+    reservedPlaceProducts = 0;
     const notificationType = category === 'shoppingmall' ? 'NEW_SHOPPING_MALL' : category === 'shop' ? 'NEW_SHOP' : 'NEW_PLACE';
     try {
       await notifyUsers({
@@ -300,6 +357,14 @@ router.post('/', auth, async (req, res) => {
     }
     res.status(201).json({ success: true, place: newPlace });
   } catch (error) {
+    const releases = [];
+    if (reservedShopLifetime) releases.push(releaseLifetimeUsage(req.user.id, 'shops_places', 1));
+    if (reservedPlaceProducts) {
+      releases.push(releaseDailyUsage(req.user.id, 'place_products', reservedPlaceProducts, quotaRequestTime));
+    }
+    await Promise.all(releases.map(release => release.catch(releaseError => {
+      console.error('[Permissions] Could not release failed place creation quota:', releaseError.code || releaseError.message);
+    })));
     console.error('POST /places error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }

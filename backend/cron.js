@@ -2,7 +2,7 @@
 // Cron jobs for daily reset, auto-delete messages, and plan expiry
 
 const User = require('./models/User');
-const { cleanupOldMessages } = require('./utils/messageRetention');
+const { cleanupExpiredMessageImages, cleanupOldMessages } = require('./utils/messageRetention');
 const { processPendingNotifications } = require('./services/pushNotificationService');
 
 /**
@@ -48,6 +48,24 @@ const runAutoDelete = async () => {
     }
   } catch (error) {
     console.error('[Cron] Auto-delete error:', error);
+  }
+};
+
+const runExpiredImageCleanup = async () => {
+  console.log('[Cron] Running expired message image cleanup...');
+
+  try {
+    const result = await cleanupExpiredMessageImages();
+    if (result.totalImagesDeleted > 0 || result.totalAssetsFailed > 0) {
+      console.log(
+        `[Cron] Expired message image cleanup: ${result.totalImagesDeleted} image(s) removed, `
+        + `${result.totalAssetsFailed} asset operation(s) failed`
+      );
+    } else {
+      console.log('[Cron] No message images expired.');
+    }
+  } catch (error) {
+    console.error('[Cron] Expired image cleanup error:', error);
   }
 };
 
@@ -112,6 +130,7 @@ const initCronJobs = ({ initialDelayMs = 0 } = {}) => {
   const startJobs = () => {
     runDailyReset();
     runAutoDelete();
+    runExpiredImageCleanup();
     runPlanExpiry();
     processPendingNotifications().catch(error => {
       console.error('[Cron] Push notification queue error:', error);
@@ -120,6 +139,7 @@ const initCronJobs = ({ initialDelayMs = 0 } = {}) => {
     const HOUR_IN_MS = 60 * 60 * 1000;
     setInterval(runDailyReset, HOUR_IN_MS);
     setInterval(runAutoDelete, HOUR_IN_MS);
+    setInterval(runExpiredImageCleanup, HOUR_IN_MS);
     setInterval(runPlanExpiry, HOUR_IN_MS);
     setInterval(() => {
       processPendingNotifications().catch(error => {
@@ -134,4 +154,10 @@ const initCronJobs = ({ initialDelayMs = 0 } = {}) => {
   console.log('[Cron] Cron jobs scheduled (every hour).');
 };
 
-module.exports = { initCronJobs, runDailyReset, runAutoDelete, runPlanExpiry };
+module.exports = {
+  initCronJobs,
+  runDailyReset,
+  runAutoDelete,
+  runExpiredImageCleanup,
+  runPlanExpiry,
+};
