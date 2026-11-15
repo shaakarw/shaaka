@@ -56,7 +56,13 @@ const connectDB = async () => {
   const url = process.env.TURSO_DATABASE_URL;
   const authToken = process.env.TURSO_AUTH_TOKEN;
   if (!url || !authToken) {
-    throw new Error('TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be configured in backend/.env.');
+    const error = new Error('TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be configured.');
+    error.code = !url && !authToken
+      ? 'TURSO_CONFIG_MISSING'
+      : !url
+        ? 'TURSO_DATABASE_URL_MISSING'
+        : 'TURSO_AUTH_TOKEN_MISSING';
+    throw error;
   }
 
   if (client) return client;
@@ -70,7 +76,7 @@ const connectDB = async () => {
     return client;
   } catch (error) {
     database.close();
-    console.error('Turso connection error:', error.code || 'CONNECTION_FAILED');
+    console.error('Turso connection error:', error.code || error.cause?.code || 'CONNECTION_FAILED');
     throw error;
   }
 };

@@ -354,7 +354,10 @@ const initializeRuntime = async ({ initializeCron = true, retryDelayMs = 30000 }
         console.info(`[Perf][Startup] database-connected ${(Number(process.hrtime.bigint() - databaseStartedAt) / 1e6).toFixed(1)}ms`);
       }
     } catch (error) {
-      console.error('[Startup] Database initialization failed; health remains available:', error.code || 'DATABASE_INITIALIZATION_FAILED');
+      console.error(
+        '[Startup] Database initialization failed; health remains available:',
+        error.code || error.cause?.code || 'DATABASE_INITIALIZATION_FAILED'
+      );
       if (!isShuttingDown) {
         retryTimer = setTimeout(() => {
           retryTimer = undefined;

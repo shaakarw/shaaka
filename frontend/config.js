@@ -8,7 +8,8 @@ try {
   ExpoConstants = {};
 }
 
-const ENV_API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.API_URL;
+const DEFAULT_API_URL = 'https://exquisite-curiosity-production-da89bd85.up.railway.app';
+const ENV_API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.API_URL || DEFAULT_API_URL;
 const LOCAL_LAN_API_URLS = [
   'http://192.168.1.69:5000',
   'http://192.168.1.64:5000',
@@ -62,13 +63,7 @@ const getDetectedHostUrl = () => {
 
 export const getApiUrl = () => {
   if (Platform.OS === 'web') {
-    // Set EXPO_PUBLIC_API_URL in Cloudflare Pages to the deployed backend origin.
-    const publicApiUrl = process.env.EXPO_PUBLIC_API_URL;
-    if (publicApiUrl) return publicApiUrl.replace(/\/$/, '');
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('EXPO_PUBLIC_API_URL must be configured for production web builds.');
-    }
-    return LOCALHOST_API_URL;
+    return ENV_API_URL.replace(/\/$/, '');
   }
 
   const configuredApiUrl = getConfiguredApiUrl();
