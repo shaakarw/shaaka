@@ -12,6 +12,16 @@ let testServer;
 let testBaseUrl;
 const originalGetClient = connectDB.getClient;
 
+test('GET / returns the backend service status', async () => {
+  const response = await fetch(`${testBaseUrl}/`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    success: true,
+    message: 'Shaaka Backend API is running',
+    service: 'shaaka-backend',
+  });
+});
+
 before(async () => {
   testServer = http.createServer(app);
   await new Promise((resolve, reject) => {
@@ -42,6 +52,19 @@ test('GET /health is public, reports liveness, and does not depend on Turso', as
   assert.equal(body.status, 'healthy');
   assert.equal(body.service, 'shaaka-backend');
   assert.ok(Number.isFinite(Date.parse(body.timestamp)));
+});
+
+test('existing API routes preserve authentication and unknown API routes return 404', async () => {
+  const protectedResponse = await fetch(`${testBaseUrl}/api/auth/me`);
+  assert.equal(protectedResponse.status, 401);
+  assert.equal((await protectedResponse.json()).reason, 'no_token');
+
+  const missingResponse = await fetch(`${testBaseUrl}/api/not-a-route`);
+  assert.equal(missingResponse.status, 404);
+  assert.deepEqual(await missingResponse.json(), {
+    success: false,
+    message: 'Route not found',
+  });
 });
 
 test('GET /ready reports database readiness without exposing database errors', async () => {

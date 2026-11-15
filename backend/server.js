@@ -147,15 +147,11 @@ app.use('/api/mall-shops', mallShopRoutes);
 app.use('/api/favorites', favoriteRoutes);
 app.use('/api/notifications', require('./routes/notifications'));
 
-// 👇 **NEW: Payment routes (MTN MoMo)**
-const paymentRouter = require('./routes/payment');
-app.use('/', paymentRouter); // Now /request-payment, /callback, etc. will work
-
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'Shaaka API is running.',
-    app: 'Shaaka'
+    message: 'Shaaka Backend API is running',
+    service: 'shaaka-backend',
   });
 });
 
@@ -216,6 +212,10 @@ app.post('/api/admin/setup', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// Keep the root-mounted payment fallback after all defined routes.
+const paymentRouter = require('./routes/payment');
+app.use('/', paymentRouter);
 
 // ---------- Socket.IO ----------
 const socketHelper = require('./socket');
