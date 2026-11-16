@@ -33,7 +33,7 @@ import { normalizeRwandaPhone } from '../utils/phoneNormalizer';
 import { useAuth, useUserLimits } from '../context/AuthContext';
 import Logo from '../assets/logos.png';
 import { useBottomSheet } from '../context/BottomSheetContext';
-import VideoUploader, { readSelectedVideoMetadata } from '../components/VideoUploader';
+import VideoUploader from '../components/VideoUploader';
 import VideoPost from '../components/VideoPost';
 import TopBar from '../components/topbar';
 import { getMaxMediaHeight } from '../utils/mediaLimits';
@@ -41,6 +41,7 @@ import ScreenTutorialOverlay from '../components/ScreenTutorialOverlay';
 import useScreenTutorial from '../hooks/useScreenTutorial';
 import { normalizeImageSource } from '../utils/imageUrl';
 
+const { validateVideoMetadata } = require('../utils/videoMetadata');
 
 const { width } = Dimensions.get('window');
 
@@ -1055,7 +1056,7 @@ const AddPostScreen = ({ navigation, language = 'English', toggleLanguage }) => 
       if (videoForUpload) {
         let metadata;
         try {
-          metadata = await readSelectedVideoMetadata(videoForUpload.uri);
+          metadata = validateVideoMetadata(videoForUpload);
         } catch {
           throw new Error('Unsupported video. Please select a valid video with a readable duration.');
         }

@@ -1,7 +1,8 @@
+
 {
   "expo": {
-    "name": "shaaka",
-    "slug": "shaaka",
+    "name": "Shaaka",
+    "slug": "shaka",
     "version": "1.0.0",
     "sdkVersion": "57.0.0",
     "orientation": "portrait",
@@ -33,12 +34,12 @@
         "expo-build-properties",
         {
           "android": {
-            "minSdkVersion": 21
+            "minSdkVersion": 24
           }
         }
       ],
-      "@maplibre/maplibre-react-native",
       "expo-asset",
+      "./plugins/withExpoMavenRepositories",
       "./plugins/withAndroidEmulatorNetworkSecurity",
       [
         "expo-media-library",
@@ -71,3 +72,4 @@
     "owner": "segoremys-team"
   }
 }
+  

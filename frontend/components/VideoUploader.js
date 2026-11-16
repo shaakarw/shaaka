@@ -2,8 +2,9 @@ import React, { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, StyleSheet, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
-import { getVideoMetaData } from '../utils/videoCompressor';
 import { requestVideoBackground } from '../services/videoBackgroundService';
+
+const { getVideoMetaData, validateVideoMetadata } = require('../utils/videoMetadata');
 
 const UNSUPPORTED_VIDEO_MESSAGE = 'Unsupported video. Please select a valid video with a readable duration.';
 const MAX_POST_VIDEO_DURATION_SECONDS = 120;
@@ -40,25 +41,16 @@ const readBrowserVideoMetadata = uri => new Promise((resolve, reject) => {
   video.load();
 });
 
-export const readSelectedVideoMetadata = async uri => {
+export const readSelectedVideoMetadata = async (uri, asset) => {
   let metadata;
   try {
     metadata = Platform.OS === 'web'
       ? await readBrowserVideoMetadata(uri)
-      : await getVideoMetaData(uri);
+      : getVideoMetaData(asset);
   } catch {
     throw new Error(UNSUPPORTED_VIDEO_MESSAGE);
   }
-  const duration = Number(metadata.duration);
-  if (!Number.isFinite(duration) || duration <= 0) {
-    throw new Error(UNSUPPORTED_VIDEO_MESSAGE);
-  }
-  const width = Number(metadata.width);
-  const height = Number(metadata.height);
-  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
-    throw new Error('Unable to read this video\'s dimensions. Please select another video.');
-  }
-  return { ...metadata, duration, width, height };
+  return validateVideoMetadata(metadata);
 };
 
 const VideoUploader = ({ value, onChange, onValidationChange, videoLink, onVideoLinkChange, theme, disabled = false, disabledMessage = 'Video uploads are not allowed for this account. Please contact the admin for support.' }) => {
@@ -82,7 +74,7 @@ const VideoUploader = ({ value, onChange, onValidationChange, videoLink, onVideo
       if (!result.canceled && result.assets?.[0]) {
         const asset = result.assets[0];
         const uri = asset.uri;
-        const dimensions = await readSelectedVideoMetadata(uri);
+        const dimensions = await readSelectedVideoMetadata(uri, asset);
         const extension = String(dimensions.extension || 'mp4').toLowerCase();
         const selectedVideo = {
           uri,

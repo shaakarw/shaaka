@@ -8,7 +8,7 @@ try {
   ExpoConstants = {};
 }
 
-const DEFAULT_API_URL = 'https://exquisite-curiosity-production-da89bd85.up.railway.app';
+const DEFAULT_API_URL = 'https://happy-encouragement-production-5de2a884.up.railway.app';
 const ENV_API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.API_URL || DEFAULT_API_URL;
 const LOCAL_LAN_API_URLS = [
   'http://192.168.1.69:5000',
